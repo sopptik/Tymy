@@ -258,6 +258,49 @@ pub async fn delete_message(
     check(resp).await.map(|_| ())
 }
 
+/// Formát `consumptionhorizon`: `<id přečtené zprávy>;<čas přečtení v ms>;<clientmessageid>`
+/// (shodně s hodnotou, kterou vrací seznam konverzací).
+pub fn consumption_horizon(message: &MessageId, client_id: Option<&str>, now_ms: i64) -> String {
+    format!(
+        "{};{now_ms};{}",
+        message.as_str(),
+        client_id
+            .filter(|c| !c.is_empty())
+            .unwrap_or(message.as_str())
+    )
+}
+
+/// Nahlásí serveru, kam až uživatel konverzaci přečetl (ostatní klienti pak nepřečtené neukazují).
+/// `PUT /v1/users/ME/conversations/{id}/properties?name=consumptionhorizon`,
+/// tělo `{"consumptionhorizon": "<id>;<čas>;<clientmessageid>"}`.
+/// NEOVĚŘENO proti produkci: formát převzatý z protokolu Skype a hodnot ze seznamu konverzací.
+pub async fn set_consumption_horizon(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    horizon: &str,
+) -> Result<()> {
+    let mut url = api_url(
+        session,
+        &[
+            "v1",
+            "users",
+            "ME",
+            "conversations",
+            conversation.as_str(),
+            "properties",
+        ],
+    );
+    url.query_pairs_mut()
+        .append_pair("name", "consumptionhorizon");
+    let resp = authed(http.client.put(url), session)
+        .json(&json!({ "consumptionhorizon": horizon }))
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(|_| ())
+}
+
 /// Založí vlákno chatu (`POST /v1/threads`). Pro dvě osoby žádá „unikátní“ 1:1 chat.
 /// NEOVĚŘENO proti produkci: formát převzatý z protokolu Skype.
 pub async fn create_thread(
@@ -456,6 +499,43 @@ mod tests {
             .await
             .unwrap();
         delete_message(&http, &s, &conv, &id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_read_horizon() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/v1/users/ME/conversations/19:abc@thread.v2/properties",
+            ))
+            .and(query_param("name", "consumptionhorizon"))
+            .and(header("Authentication", "skypetoken=st"))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                assert_eq!(
+                    body,
+                    json!({"consumptionhorizon": "1700000000000;1700000005000;42"})
+                );
+                ResponseTemplate::new(200)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let id = MessageId::from("1700000000000");
+        let h = consumption_horizon(&id, Some("42"), 1_700_000_005_000);
+        assert_eq!(
+            consumption_horizon(&id, None, 5),
+            "1700000000000;5;1700000000000",
+            "bez clientmessageid se použije id"
+        );
+        set_consumption_horizon(
+            &Http::new().unwrap(),
+            &session(&server.uri()),
+            &"19:abc@thread.v2".into(),
+            &h,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

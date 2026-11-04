@@ -75,6 +75,15 @@ pub trait ChatBackend: Send + Sync {
     /// Smaže vlastní zprávu.
     async fn delete(&self, conversation: &ConversationId, message: &MessageId) -> Result<()>;
 
+    /// Nahlásí serveru, že je konverzace přečtená po zprávu `message` (včetně);
+    /// `client_id` je její `client_message_id`, pokud ho známe.
+    async fn mark_read(
+        &self,
+        conversation: &ConversationId,
+        message: &MessageId,
+        client_id: Option<&str>,
+    ) -> Result<()>;
+
     /// Počká na další dávku real-time událostí (long-poll). Může vrátit prázdný seznam
     /// při vypršení intervalu; volající pak jednoduše zavolá znovu.
     async fn poll_events(&self) -> Result<Vec<Event>>;

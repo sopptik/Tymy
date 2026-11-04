@@ -101,6 +101,7 @@ podmínek služby Microsoftu.
 | Nepřečtené v neaktivních účtech (menu, odznak u jména, lišta) | ✅ |
 | Přihlášení v prohlížeči (PKCE, `http://localhost`) | ✅ ověřeno (druhý pracovní účet) |
 | Opuštěné týmy a kanály bez přístupu (403) | ✅ skryté |
+| Hlášení přečtení serveru | 🟡 hotovo, neověřeno proti produkci |
 | Skok z citace odpovědi na původní zprávu | 🟡 hotovo, klik zatím neověřen na snímku |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
@@ -144,7 +145,12 @@ podmínek služby Microsoftu.
    ⏸ **Odloženo na později** (rozhodnutí uživatele 2026-11-04); potřeba HAR záznam z web klienta
    včetně WebSocket rámců (postup v `docs/protocol/README.md`). Nejpozději před fází 2
    (příchozí hovory chodí přes trouter).
-2. **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
+2. 🟡 **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
+   Hotovo (2026-11-04), neověřeno proti produkci: otevřený chat se nahlásí jako přečtený, když
+   má okno fokus a není skryté (při návratu do okna hned). Přečtení se teď i lokálně počítá
+   jen při viditelném okně (dřív se otevřený chat označil jako přečtený i ve skrytém okně).
+   Priorita uživatele (2026-11-04): 1. hlášení přečtení, 2. založení skupinového chatu,
+   dál podle mých priorit; každý bod samostatný commit, testovat bude uživatel najednou.
 3. **Jména účastníků** 1:1 chatů z profilů (middle tier), místo procházení historie.
 4. **Odesílání souborů:** pracovní účet = OneDrive „Microsoft Teams Chat Files“ + `properties.files`;
    osobní = AMS upload. Drag & drop, dialog, průběh.

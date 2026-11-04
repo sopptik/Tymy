@@ -141,6 +141,8 @@ pub enum Msg {
     /// Odhlásit aktivní účet (smaže přihlášení i jeho cache).
     SignOut,
     SignedOut(Result<(), Failure>),
+    /// Server potvrdil (nebo odmítl) hlášení přečtení konverzace po zprávu (`u64` = její id).
+    ReadReported(ConversationId, MessageId, Result<(), Failure>),
     /// Zjistit nepřečtené u neaktivních účtů.
     PollOthers,
     OtherUnread(AccountId, Result<(OtherBackend, usize), Failure>),
@@ -279,6 +281,9 @@ impl Msg {
             Msg::SignOut => debug!("update: SignOut"),
             Msg::SignedOut(r) => debug!(result = ok(r.is_ok()), "update: SignedOut"),
             Msg::PollOthers => trace!("update: PollOthers"),
+            Msg::ReadReported(c, id, r) => {
+                debug!(conversation = %c, %id, result = ok(r.is_ok()), "update: ReadReported")
+            }
             Msg::OtherUnread(id, r) => debug!(
                 account = %id,
                 result = ok(r.is_ok()),
@@ -506,8 +511,11 @@ pub struct App {
     messages: HashMap<ConversationId, Vec<Message>>,
     /// Kurzor na starší historii; `None` v mapě = ještě nenačteno, `Some(None)` = začátek.
     older: HashMap<ConversationId, Option<String>>,
-    /// Co jsme přečetli v tomto okně (serveru to zatím nehlásíme).
+    /// Co jsme přečetli v tomto okně.
     read_locally: HashMap<ConversationId, MessageId>,
+    /// Kam až jsme přečtení nahlásili serveru (id zprávy v ms) a co se právě hlásí.
+    reported_read: HashMap<ConversationId, u64>,
+    reporting_read: HashSet<ConversationId>,
     selected: Option<ConversationId>,
     search: String,
     /// Psací pole (víceřádkové).
@@ -619,6 +627,8 @@ impl App {
             messages: HashMap::new(),
             older: HashMap::new(),
             read_locally: HashMap::new(),
+            reported_read: HashMap::new(),
+            reporting_read: HashSet::new(),
             selected: None,
             search: String::new(),
             composer: text_editor::Content::new(),
@@ -895,7 +905,17 @@ impl App {
         )
     }
 
+    /// Je okno vidět a má fokus (uživatel opravdu čte otevřený chat)?
+    fn visible(&self) -> bool {
+        self.focused && !self.hidden
+    }
+
+    /// Označí otevřenou konverzaci jako přečtenou (jen když je okno vidět; serveru to
+    /// pak nahlásí [`Self::report_read`]).
     fn mark_read(&mut self, id: &ConversationId) {
+        if !self.visible() {
+            return;
+        }
         if let Some(last) = self.messages.get(id).and_then(|m| m.last()) {
             self.read_locally.insert(id.clone(), last.id.clone());
         }
@@ -1034,6 +1054,62 @@ impl App {
             iced::clipboard::write_primary(text),
             self.show_toast(toast),
         ])
+    }
+
+    /// Nahlásí serveru přečtení otevřené konverzace, pokud jsme v okně přečetli víc,
+    /// než server ví (a víc, než jsme už hlásili).
+    fn report_read(&mut self) -> Task<Msg> {
+        if !self.visible() {
+            return Task::none();
+        }
+        let Some(conv) = self.selected.clone() else {
+            return Task::none();
+        };
+        if self.is_draft(&conv)
+            || self.forbidden.contains(&conv)
+            || self.reporting_read.contains(&conv)
+        {
+            return Task::none();
+        }
+        let (Some(read), Some(backend)) = (
+            self.read_locally.get(&conv).cloned(),
+            self.session().map(|s| s.backend.clone()),
+        ) else {
+            return Task::none();
+        };
+        let n = msg_num(&read);
+        let listed = self.conversations.iter().find(|c| c.id == conv);
+        let on_server = listed
+            .and_then(|c| c.read_up_to.as_ref())
+            .map(msg_num)
+            .unwrap_or(0);
+        let reported = self.reported_read.get(&conv).copied().unwrap_or(0);
+        if n == 0 || n <= on_server || n <= reported {
+            return Task::none();
+        }
+        let client_id = self
+            .messages
+            .get(&conv)
+            .and_then(|v| v.iter().rev().find(|m| m.id == read))
+            .or_else(|| {
+                listed
+                    .and_then(|c| c.last_message.as_ref())
+                    .filter(|m| m.id == read)
+            })
+            .and_then(|m| m.client_message_id.clone());
+        self.reporting_read.insert(conv.clone());
+        Task::perform(
+            {
+                let (conv, read) = (conv.clone(), read.clone());
+                async move {
+                    backend
+                        .mark_read(&conv, &read, client_id.as_deref())
+                        .await
+                        .map_err(Failure::from)
+                }
+            },
+            move |r| Msg::ReadReported(conv.clone(), read.clone(), r),
+        )
     }
 
     /// Spustí zjištění nepřečtených u všech neaktivních účtů (pokud už neběží).
@@ -1450,8 +1526,10 @@ impl App {
         let task = self.handle(msg);
         // výsledky úloh nesou období, ve kterém vznikly (viz `reset_account_state`)
         let epoch = self.epoch;
+        let report = self.report_read();
         Task::batch([
             task.map(move |m| Msg::Scoped(epoch, Box::new(m))),
+            report.map(move |m| Msg::Scoped(epoch, Box::new(m))),
             self.sync_tray(),
         ])
     }
@@ -1613,6 +1691,25 @@ impl App {
             }
             Msg::Scoped(..) => Task::none(),
             Msg::PollOthers => self.poll_others(),
+            Msg::ReadReported(conv, id, r) => {
+                self.reporting_read.remove(&conv);
+                // i při chybě: znovu až s další zprávou, ať server nezahlcujeme
+                self.reported_read.insert(conv.clone(), msg_num(&id));
+                match r {
+                    Ok(()) => {
+                        if let Some(c) = self.conversations.iter_mut().find(|c| c.id == conv) {
+                            c.read_up_to = Some(id);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(%conv, error = %e.text, "hlášení přečtení selhalo");
+                        if e.forbidden {
+                            self.mark_forbidden(conv, &e);
+                        }
+                    }
+                }
+                Task::none()
+            }
             Msg::OtherUnread(id, r) => {
                 self.others_pending = self.others_pending.saturating_sub(1);
                 let entry = self.others.entry(id.clone()).or_default();
@@ -1967,6 +2064,10 @@ impl App {
             Msg::OpenPerson(person) => self.open_person(person),
             Msg::WindowFocus(f) => {
                 self.focused = f;
+                // návrat do okna: otevřený chat je teď opravdu přečtený
+                if let Some(sel) = self.selected.clone() {
+                    self.mark_read(&sel);
+                }
                 // návrat z prohlížeče: adresa stránky může být ve schránce
                 if f && self.browser_login.is_some() && !self.redeeming {
                     return iced::clipboard::read().map(Msg::LoginClipboard);
