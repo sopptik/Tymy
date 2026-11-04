@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use tymy_core::{Conversation, ConversationId, ConversationKind, Message, MessageId, Profile};
+use tymy_core::{
+    AccountKind, Conversation, ConversationId, ConversationKind, Message, MessageId, Profile,
+    Reaction, UserId,
+};
 
 /// Chaty rozdělené na připnuté (v ručním pořadí) a ostatní (od poslední aktivity;
 /// nové chaty bez aktivity nahoře).
@@ -179,10 +182,41 @@ impl PeerNames {
     }
 }
 
+/// Moje MRI (pro místní zápis reakcí před potvrzením serverem).
+pub fn my_mri(me: &Profile) -> UserId {
+    match me.kind {
+        AccountKind::Work => UserId(format!("8:orgid:{}", me.account_id)),
+        AccountKind::Personal => UserId(format!("8:live:{}", me.account_id)),
+    }
+}
+
+/// Přepne moji reakci `key` na zprávě; vrátí `true`, když jsem ji přidal.
+/// Moje reakce poznám podle konce MRI (`account`), stejně jako [`is_me`].
+pub fn toggle_reaction(m: &mut Message, key: &str, me: &UserId, account: &str) -> bool {
+    let mine = |u: &UserId| u.as_str().ends_with(account);
+    if let Some(i) = m.reactions.iter().position(|r| r.key == key) {
+        let r = &mut m.reactions[i];
+        if r.users.iter().any(mine) {
+            r.users.retain(|u| !mine(u));
+            if r.users.is_empty() {
+                m.reactions.remove(i);
+            }
+            return false;
+        }
+        r.users.push(me.clone());
+        return true;
+    }
+    m.reactions.push(Reaction {
+        key: key.to_owned(),
+        users: vec![me.clone()],
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tymy_core::{AccountKind, MessageKind, UserId};
+    use tymy_core::MessageKind;
 
     fn me() -> Profile {
         Profile {
@@ -192,6 +226,23 @@ mod tests {
             username: None,
             tenant_id: None,
         }
+    }
+
+    #[test]
+    fn toggles_my_reaction() {
+        let me = UserId("8:orgid:me".into());
+        let mut m = msg("1", "x", "X");
+        m.reactions = vec![Reaction {
+            key: "like".into(),
+            users: vec![UserId("8:orgid:other".into())],
+        }];
+        assert!(toggle_reaction(&mut m, "like", &me, "me"));
+        assert_eq!(m.reactions[0].users.len(), 2);
+        assert!(!toggle_reaction(&mut m, "like", &me, "me"));
+        assert_eq!(m.reactions[0].users.len(), 1);
+        assert!(toggle_reaction(&mut m, "heart", &me, "me"));
+        assert!(!toggle_reaction(&mut m, "heart", &me, "me"));
+        assert_eq!(m.reactions.len(), 1, "prázdná reakce zmizí");
     }
 
     fn msg(id: &str, sender: &str, name: &str) -> Message {

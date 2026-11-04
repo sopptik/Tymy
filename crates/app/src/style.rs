@@ -272,20 +272,6 @@ pub fn bubble(t: &Theme, mine: bool, first: bool) -> container::Style {
     }
 }
 
-pub fn reaction(t: &Theme, by_me: bool) -> container::Style {
-    let c = colors(t);
-    container::Style {
-        background: Some(if by_me { c.primary_soft } else { c.surface }.into()),
-        text_color: Some(c.text),
-        border: Border {
-            radius: 12.0.into(),
-            width: 1.0,
-            color: if by_me { c.primary } else { c.border },
-        },
-        ..Default::default()
-    }
-}
-
 // ---------- obsah zpráv ----------
 
 /// Barva textu v bublině (na vlastní bublině bílá, jinak běžná).
@@ -416,6 +402,86 @@ pub fn reply_preview(t: &Theme) -> container::Style {
             },
             ..Default::default()
         },
+        ..Default::default()
+    }
+}
+
+/// Reakce pod zprávou jako tlačítko (klik přidá/odebere moji).
+pub fn reaction_button(t: &Theme, status: button::Status, by_me: bool) -> button::Style {
+    let c = colors(t);
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(
+            if by_me {
+                c.primary_soft
+            } else if hovered {
+                c.surface_alt
+            } else {
+                c.surface
+            }
+            .into(),
+        ),
+        text_color: c.text,
+        border: Border {
+            radius: 12.0.into(),
+            width: 1.0,
+            color: if by_me || hovered {
+                c.primary
+            } else {
+                c.border
+            },
+        },
+        ..Default::default()
+    }
+}
+
+/// Lišta s výběrem reakcí.
+pub fn reaction_picker(t: &Theme) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(c.surface.into()),
+        border: Border {
+            radius: 16.0.into(),
+            width: 1.0,
+            color: c.border,
+        },
+        shadow: Shadow {
+            color: c.shadow,
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+        ..Default::default()
+    }
+}
+
+/// Zvýraznění zprávy nalezené hledáním.
+pub fn highlight(t: &Theme) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(c.primary_soft.into()),
+        border: rounded(12.0),
+        ..Default::default()
+    }
+}
+
+/// Tlačítko nevratné akce (smazání).
+pub fn danger_button(t: &Theme, status: button::Status) -> button::Style {
+    let c = colors(t);
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(
+            if hovered {
+                c.danger
+            } else {
+                Color {
+                    a: 0.85,
+                    ..c.danger
+                }
+            }
+            .into(),
+        ),
+        text_color: Color::WHITE,
+        border: rounded(8.0),
         ..Default::default()
     }
 }

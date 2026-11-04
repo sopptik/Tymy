@@ -8,11 +8,46 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use tymy_core::text::html_to_plain;
+use tymy_core::text::rich;
 use tymy_core::{AccountId, Conversation, ConversationId, Error, Message, Result};
 
 /// Verze schématu; při zvýšení přidat migraci do [`migrate`].
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+
+/// Výsledek fulltextového hledání.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub message: Message,
+    /// Úryvek s nalezenými slovy mezi [`HIT_START`] a [`HIT_END`].
+    pub snippet: String,
+}
+
+/// Značky zvýraznění v [`SearchHit::snippet`].
+pub const HIT_START: char = '\u{2}';
+pub const HIT_END: char = '\u{3}';
+
+/// Stav historie konverzace v cache (pro indexaci na pozadí).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryState {
+    /// Kurzor na starší zprávy: `None` = neznámý, `Some(None)` = začátek historie.
+    pub cursor: Option<Option<String>>,
+    /// Id (= čas v ms) nejstarší uložené zprávy.
+    pub oldest: Option<i64>,
+    pub count: i64,
+}
+
+/// Text zprávy pro fulltext: bez citace odpovědi (to je cizí text).
+fn index_text(m: &Message) -> String {
+    if m.deleted || !m.is_user_content() {
+        return String::new();
+    }
+    let mut text = rich::plain(&rich::parse(&m.content));
+    for a in &m.attachments {
+        text.push('\n');
+        text.push_str(&a.name);
+    }
+    text
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -136,11 +171,7 @@ impl Store {
                     m.id.0.clone(),
                     m.id.as_str().parse::<i64>().unwrap_or(0),
                     serde_json::to_string(m).map_err(json_err)?,
-                    if m.deleted || !m.is_user_content() {
-                        String::new()
-                    } else {
-                        html_to_plain(&m.content)
-                    },
+                    index_text(m),
                 ))
             })
             .collect::<Result<_>>()?;
@@ -219,19 +250,100 @@ impl Store {
         })
     }
 
-    /// Fulltextové hledání ve zprávách účtu (nejnovější první).
-    pub fn search(&self, account: &AccountId, query: &str, limit: usize) -> Result<Vec<Message>> {
+    /// Fulltextové hledání ve zprávách účtu, volitelně jen v jedné konverzaci
+    /// (nejnovější první). Slova se hledají jako předpony a bez ohledu na diakritiku.
+    pub fn search(
+        &self,
+        account: &AccountId,
+        query: &str,
+        conversation: Option<&ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
         let Some(fts) = fts_query(query) else {
             return Ok(vec![]);
         };
-        let rows: Vec<String> = self.with(|conn| {
+        let rows: Vec<(String, String)> = self.with(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT m.json FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
+                "SELECT m.json, snippet(messages_fts, 0, char(2), char(3), '…', 12)
+                 FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
                  WHERE messages_fts MATCH ?1 AND m.account = ?2
-                 ORDER BY m.id_num DESC LIMIT ?3",
+                   AND (?3 IS NULL OR m.conversation_id = ?3)
+                 ORDER BY m.id_num DESC LIMIT ?4",
             )?;
-            stmt.query_map(params![fts, account.as_str(), limit as i64], |r| r.get(0))?
-                .collect()
+            stmt.query_map(
+                params![
+                    fts,
+                    account.as_str(),
+                    conversation.map(|c| c.as_str()),
+                    limit as i64
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect()
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(j, snippet)| {
+                serde_json::from_str(&j)
+                    .ok()
+                    .map(|message| SearchHit { message, snippet })
+            })
+            .collect())
+    }
+
+    /// Až `limit` zpráv starších než `before` (id v ms), vráceno od nejstarší.
+    pub fn load_messages_before(
+        &self,
+        account: &AccountId,
+        conversation: &ConversationId,
+        before: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let mut msgs = self.load_where(
+            "SELECT json FROM messages WHERE account = ?1 AND conversation_id = ?2
+             AND id_num < ?3 ORDER BY id_num DESC LIMIT ?4",
+            account,
+            conversation,
+            before,
+            limit,
+        )?;
+        msgs.reverse();
+        Ok(msgs)
+    }
+
+    /// Až `limit` zpráv od `since` (id v ms, včetně) dál, vráceno od nejstarší.
+    pub fn load_messages_since(
+        &self,
+        account: &AccountId,
+        conversation: &ConversationId,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        self.load_where(
+            "SELECT json FROM messages WHERE account = ?1 AND conversation_id = ?2
+             AND id_num >= ?3 ORDER BY id_num ASC LIMIT ?4",
+            account,
+            conversation,
+            since,
+            limit,
+        )
+    }
+
+    fn load_where(
+        &self,
+        sql: &str,
+        account: &AccountId,
+        conversation: &ConversationId,
+        bound: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let rows: Vec<String> = self.with(|conn| {
+            let mut stmt = conn.prepare(sql)?;
+            stmt.query_map(
+                params![account.as_str(), conversation.as_str(), bound, limit as i64],
+                |r| r.get(0),
+            )?
+            .collect()
         })?;
         Ok(rows
             .iter()
@@ -239,7 +351,28 @@ impl Store {
             .collect())
     }
 
-    /// Uloží stažené médium (obrázek) pod jeho URL.
+    /// Kolik historie konverzace máme a kde pokračovat.
+    pub fn history_state(
+        &self,
+        account: &AccountId,
+        conversation: &ConversationId,
+    ) -> Result<HistoryState> {
+        let cursor = self.older_cursor(account, conversation)?;
+        let (oldest, count) = self.with(|conn| {
+            conn.query_row(
+                "SELECT MIN(NULLIF(id_num, 0)), COUNT(*) FROM messages
+                 WHERE account = ?1 AND conversation_id = ?2",
+                params![account.as_str(), conversation.as_str()],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?)),
+            )
+        })?;
+        Ok(HistoryState {
+            cursor,
+            oldest,
+            count,
+        })
+    }
+
     pub fn save_media(&self, account: &AccountId, url: &str, bytes: &[u8]) -> Result<()> {
         self.with(|conn| {
             conn.execute(
@@ -386,6 +519,35 @@ fn fts_query(query: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" "))
 }
 
+/// Přepočítá text pro fulltext u všech zpráv (změna [`index_text`]); FTS aktualizují triggery.
+fn reindex(conn: &Connection) -> Result<()> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT rowid, json FROM messages")
+            .map_err(db_err)?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(db_err)?
+    };
+    conn.execute_batch("BEGIN").map_err(db_err)?;
+    {
+        let mut update = conn
+            .prepare("UPDATE messages SET plain = ?2 WHERE rowid = ?1")
+            .map_err(db_err)?;
+        for (rowid, json) in &rows {
+            let plain = serde_json::from_str::<Message>(json)
+                .map(|m| index_text(&m))
+                .unwrap_or_default();
+            update.execute(params![rowid, plain]).map_err(db_err)?;
+        }
+    }
+    conn.execute_batch("PRAGMA user_version = 4; COMMIT;")
+        .map_err(db_err)?;
+    tracing::info!(count = rows.len(), "fulltext přeindexován");
+    Ok(())
+}
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -468,6 +630,9 @@ fn migrate(conn: &Connection) -> Result<()> {
              COMMIT;",
         )
         .map_err(db_err)?;
+    }
+    if version < 4 {
+        reindex(conn)?;
     }
     Ok(())
 }
@@ -583,16 +748,65 @@ mod tests {
             ],
         )
         .unwrap();
-        let hits = s.search(&acc(), "priloh", 10).unwrap();
+        let hits = s.search(&acc(), "priloh", None, 10).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].id.as_str(), "1");
+        assert_eq!(hits[0].message.id.as_str(), "1");
+        assert_eq!(hits[0].snippet, "Posílám \u{2}přílohu\u{3}");
+        assert!(
+            s.search(&acc(), "priloh", Some(&"c2".into()), 10)
+                .unwrap()
+                .is_empty()
+        );
         s.save_messages(&acc(), &[msg("c1", "1", "změněno")])
             .unwrap();
-        assert!(s.search(&acc(), "priloh", 10).unwrap().is_empty());
-        assert_eq!(s.search(&acc(), "zmeneno", 10).unwrap().len(), 1);
+        assert!(s.search(&acc(), "priloh", None, 10).unwrap().is_empty());
+        assert_eq!(s.search(&acc(), "zmeneno", None, 10).unwrap().len(), 1);
         // uvozovky v dotazu nerozbijí FTS syntaxi
-        assert!(s.search(&acc(), "\"", 10).unwrap().is_empty());
-        assert!(s.search(&acc(), "   ", 10).unwrap().is_empty());
+        assert!(s.search(&acc(), "\"", None, 10).unwrap().is_empty());
+        assert!(s.search(&acc(), "   ", None, 10).unwrap().is_empty());
+        // citace odpovědi se neindexuje
+        s.save_messages(
+            &acc(),
+            &[msg(
+                "c1",
+                "3",
+                r#"<blockquote itemtype="http://schema.skype.com/Reply" itemid="1"><strong itemprop="mri" itemid="8:x">X</strong><p itemprop="preview">cizitext</p></blockquote><p>vlastni</p>"#,
+            )],
+        )
+        .unwrap();
+        assert!(s.search(&acc(), "cizitext", None, 10).unwrap().is_empty());
+        assert_eq!(s.search(&acc(), "vlastni", None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn history_ranges_and_state() {
+        let s = Store::open_in_memory().unwrap();
+        let c: ConversationId = "c1".into();
+        s.save_messages(
+            &acc(),
+            &[
+                msg("c1", "100", "a"),
+                msg("c1", "200", "b"),
+                msg("c1", "300", "c"),
+                msg("c2", "150", "x"),
+            ],
+        )
+        .unwrap();
+        let ids = |v: Vec<Message>| v.into_iter().map(|m| m.id.0).collect::<Vec<_>>();
+        assert_eq!(
+            ids(s.load_messages_before(&acc(), &c, 300, 10).unwrap()),
+            ["100", "200"]
+        );
+        assert_eq!(
+            ids(s.load_messages_before(&acc(), &c, 300, 1).unwrap()),
+            ["200"]
+        );
+        assert_eq!(
+            ids(s.load_messages_since(&acc(), &c, 200, 10).unwrap()),
+            ["200", "300"]
+        );
+        let st = s.history_state(&acc(), &c).unwrap();
+        assert_eq!((st.cursor, st.oldest, st.count), (None, Some(100), 3));
     }
 
     #[test]

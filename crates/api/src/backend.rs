@@ -212,6 +212,61 @@ impl ChatBackend for TeamsBackend {
         .await
     }
 
+    async fn history(
+        &self,
+        conversation: &ConversationId,
+        cursor: Option<&str>,
+    ) -> Result<MessagePage> {
+        self.call(|s| async move {
+            chat::list_messages_sized(
+                &self.http,
+                &s,
+                conversation,
+                cursor,
+                chat::HISTORY_PAGE_SIZE,
+            )
+            .await
+        })
+        .await
+    }
+
+    async fn react(
+        &self,
+        conversation: &ConversationId,
+        message: &tymy_core::MessageId,
+        key: &str,
+        on: bool,
+    ) -> Result<()> {
+        self.call(|s| async move {
+            chat::set_reaction(&self.http, &s, conversation, message, key, on).await
+        })
+        .await
+    }
+
+    async fn edit(
+        &self,
+        conversation: &ConversationId,
+        message: &tymy_core::MessageId,
+        html: &str,
+    ) -> Result<()> {
+        let name = self.profile.display_name.as_deref();
+        self.call(|s| async move {
+            chat::edit_html(&self.http, &s, conversation, message, html, name).await
+        })
+        .await
+    }
+
+    async fn delete(
+        &self,
+        conversation: &ConversationId,
+        message: &tymy_core::MessageId,
+    ) -> Result<()> {
+        self.call(
+            |s| async move { chat::delete_message(&self.http, &s, conversation, message).await },
+        )
+        .await
+    }
+
     async fn poll_events(&self) -> Result<Vec<Event>> {
         let session = self.session().await?;
         let mut reg = self.poll.lock().await;

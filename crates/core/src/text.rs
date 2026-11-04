@@ -44,6 +44,37 @@ pub fn reply_html(r: &crate::ReplyRef) -> String {
     )
 }
 
+/// Nový obsah upravené zprávy: text z editoru, ale zachová citaci odpovědi a vložené
+/// obrázky z původní zprávy (ty v editoru nejsou). Ostatní formátování se nahradí textem.
+pub fn edited_html(original: &str, text: &str) -> String {
+    let mut out = String::new();
+    if let Some(start) = find_ascii_ci(original, "<blockquote")
+        && let Some(tag_end) = original[start..].find('>')
+        && original[start..start + tag_end].contains("schema.skype.com/Reply")
+        && let Some(end) = find_ascii_ci(&original[start..], "</blockquote>")
+    {
+        out.push_str(&original[start..start + end + "</blockquote>".len()]);
+    }
+    if !text.trim().is_empty() {
+        out.push_str(&plain_to_html(text));
+    }
+    for part in message_parts(original) {
+        if let Part::Image(img) = part {
+            let dim = |name: &str, v: Option<f32>| {
+                v.map(|v| format!(r#" {name}="{v}""#)).unwrap_or_default()
+            };
+            out.push_str(&format!(
+                r#"<p><img src="{}" itemscope="png" itemtype="http://schema.skype.com/AMSImage"{}{} alt="{}"></p>"#,
+                escape_attr(&img.url),
+                dim("width", img.width),
+                dim("height", img.height),
+                escape_attr(img.alt.as_deref().unwrap_or("obrázek")),
+            ));
+        }
+    }
+    out
+}
+
 /// Délka náhledu původní zprávy v odpovědi.
 pub const REPLY_PREVIEW_CHARS: usize = 150;
 
@@ -359,6 +390,21 @@ mod tests {
             b => panic!("{b:?}"),
         }
         assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn edit_keeps_reply_quote_and_images() {
+        let original = r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1"><strong itemprop="mri" itemid="8:x">X</strong><p itemprop="preview">původní</p></blockquote><p>staré <b>tučné</b></p><p><img src="https://eu-api.asm.skype.com/v1/objects/0-weu-d1-a/views/imgo" itemtype="http://schema.skype.com/AMSImage" width="100" height="50" alt="obr"></p>"#;
+        let html = edited_html(original, "nové");
+        let blocks = rich::parse(&html);
+        assert!(
+            matches!(&blocks[0], rich::Block::Quote(q) if matches!(q.kind, rich::QuoteKind::Reply { .. }))
+        );
+        assert_eq!(rich::plain(&blocks), "nové");
+        assert!(
+            matches!(&blocks[2], rich::Block::Image(i) if i.width == Some(100.0) && i.alt.as_deref() == Some("obr"))
+        );
+        assert_eq!(edited_html("<p>a</p>", "b < c"), "<p>b &lt; c</p>");
     }
 
     #[test]

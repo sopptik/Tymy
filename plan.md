@@ -43,6 +43,13 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Obrázky ze schránky (2026-11-04):** vkládat obrázky ze schránky; vložený obrázek musí
   jít odebrat.
 
+- **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
+  na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová
+  služba (JVM, stovky MB RAM), pro desktopového klienta nevhodná. Tantivy (Lucene v Rustu) by
+  ukládal index nešifrovaně mimo SQLCipher a češtinu stejně neumí lépe (nemá český stemmer).
+  Zvolen FTS5 přímo v šifrované cache + indexace historie na pozadí. Přechod na Tantivy zvážit,
+  kdyby FTS5 nestačil (řazení podle relevance, překlepy).
+
 ## 2. Architektura (návrh, realizováno)
 
 | Crate | Úloha |
@@ -88,6 +95,8 @@ podmínek služby Microsoftu.
 | Vkládání obrázků ze schránky | 🟡 UI ✅, nahrání do AMS neověřeno proti produkci |
 | Formátované zprávy (odkazy, kód, seznamy, tabulky, citace, zmínky) | ✅ ověřeno na reálných zprávách |
 | Odpověď na zprávu | 🟡 zobrazení ✅, odeslání neověřeno proti produkci |
+| Reakce, úprava a mazání vlastních zpráv | 🟡 UI ✅, volání neověřena proti produkci |
+| Hledání ve zprávách + indexace historie na pozadí | ✅ |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -105,10 +114,19 @@ podmínek služby Microsoftu.
 5. **Lepší zobrazení zpráv:** ✅ obrázky, ✅ reakce, ✅ emoji jako text, ✅ klikatelné odkazy (i holé
    adresy), ✅ tučně/kurzíva/podtržení/přeškrtnutí, ✅ zmínky, ✅ kód v řádku i bloky kódu,
    ✅ seznamy, nadpisy, tabulky, ✅ citace, přeposlané zprávy a odpovědi, 🟡 odpovídání na zprávy
-   (tlačítko ↩, Esc zruší; odeslání neověřeno proti produkci). Zbývá: posílání reakcí,
-   klik na citaci odpovědi skočí na původní zprávu.
-6. **Úpravy a mazání vlastních zpráv.**
+   (tlačítko ↩, Esc zruší; odeslání neověřeno proti produkci), 🟡 posílání reakcí (☺ u zprávy,
+   klik na reakci pod zprávou ji přidá/odebere; neověřeno proti produkci). Zbývá: klik na citaci
+   odpovědi skočí na původní zprávu.
+6. 🟡 **Úpravy a mazání vlastních zpráv:** ✎ (nebo ↑ v prázdném poli) načte text do psacího pole,
+   Enter uloží, Esc zruší; citace odpovědi a obrázky zůstanou, ostatní formátování se nahradí
+   textem. 🗑 se potvrzuje. Změna se projeví hned, při chybě se vrátí stav ze serveru.
+   Neověřeno proti produkci.
 7. **Přepínání účtů** v okně (podpora více účtů je už v konfiguraci).
+8. ✅ **Hledání ve zprávách:** fulltext SQLite FTS5 uvnitř šifrované cache (bez diakritiky,
+   předpony slov, úryvky se zvýrazněním), výsledky v postranním panelu pod chaty a lidmi,
+   klik otevře zprávu v kontextu a zvýrazní ji. Indexace historie na pozadí: po startu postupně
+   stáhne historii všech konverzací (stránky po 200, 1,5 s pauza, max. rok / 5000 zpráv na
+   konverzaci) a navazuje, kde skončila. „Načíst starší“ bere nejdřív z cache.
 
 ### Fáze 1b: potřebuje odchyt provozu (HAR z web klienta)
 1. **Trouter (WebSocket):** okamžité doručování zpráv, „píše…“, přítomnost. Nahradí 5s obnovu.

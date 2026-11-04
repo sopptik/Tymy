@@ -5,7 +5,7 @@ pub(crate) mod wire;
 use chrono::{TimeZone, Utc};
 use reqwest::RequestBuilder;
 use serde_json::{Value, json};
-use tymy_core::{Conversation, ConversationId, Error, MessagePage, Result, SentMessage};
+use tymy_core::{Conversation, ConversationId, Error, MessageId, MessagePage, Result, SentMessage};
 use url::Url;
 
 use crate::auth::SkypeSession;
@@ -13,6 +13,8 @@ use crate::http::{Http, SendLogged, check, json, net_err};
 
 /// Počet zpráv na stránku historie.
 const PAGE_SIZE: u32 = 50;
+/// Stránka při indexaci historie na pozadí (server víc než 200 nedovolí).
+pub const HISTORY_PAGE_SIZE: u32 = 200;
 const VIEW: &str = "msnp24Equivalent|supportsMessageProperties";
 
 /// Sestaví URL na chat službě; segmenty se správně procentově zakódují.
@@ -57,8 +59,34 @@ pub async fn list_messages(
     conversation: &ConversationId,
     cursor: Option<&str>,
 ) -> Result<MessagePage> {
+    list_messages_sized(http, session, conversation, cursor, PAGE_SIZE).await
+}
+
+/// Jako [`list_messages`], ale s danou velikostí stránky (přepíše ji i v kurzoru).
+pub async fn list_messages_sized(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    cursor: Option<&str>,
+    page_size: u32,
+) -> Result<MessagePage> {
     let rb = match cursor {
-        Some(link) => http.client.get(same_origin(session, link)?),
+        Some(link) => {
+            let mut url = same_origin(session, link)?;
+            let pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .map(|(k, v)| {
+                    let v = if k == "pageSize" {
+                        page_size.to_string()
+                    } else {
+                        v.into_owned()
+                    };
+                    (k.into_owned(), v)
+                })
+                .collect();
+            url.query_pairs_mut().clear().extend_pairs(pairs);
+            http.client.get(url)
+        }
         None => {
             let url = api_url(
                 session,
@@ -73,7 +101,7 @@ pub async fn list_messages(
             );
             http.client.get(url).query(&[
                 ("view", VIEW),
-                ("pageSize", &PAGE_SIZE.to_string()),
+                ("pageSize", &page_size.to_string()),
                 ("startTime", "1"),
             ])
         }
@@ -132,6 +160,100 @@ pub async fn send_html(
         client_message_id,
         arrived_at,
     })
+}
+
+/// URL jedné zprávy (`…/conversations/{id}/messages/{msg}`) s volitelnými dalšími segmenty.
+fn message_url(
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    message: &MessageId,
+    extra: &[&str],
+) -> Url {
+    let mut segments = vec![
+        "v1",
+        "users",
+        "ME",
+        "conversations",
+        conversation.as_str(),
+        "messages",
+        message.as_str(),
+    ];
+    segments.extend_from_slice(extra);
+    api_url(session, &segments)
+}
+
+/// Přidá (`on`) nebo odebere moji reakci na zprávu.
+/// `PUT|DELETE …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":…,"value":ms}}`.
+/// NEOVĚŘENO proti produkci: formát převzatý z web klienta Skype/Teams.
+pub async fn set_reaction(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    message: &MessageId,
+    key: &str,
+    on: bool,
+) -> Result<()> {
+    let mut url = message_url(session, conversation, message, &["properties"]);
+    url.query_pairs_mut().append_pair("name", "emotions");
+    let (req, body) = if on {
+        (
+            http.client.put(url),
+            json!({"emotions": {"key": key, "value": Utc::now().timestamp_millis()}}),
+        )
+    } else {
+        (http.client.delete(url), json!({"emotions": {"key": key}}))
+    };
+    let resp = authed(req, session)
+        .json(&body)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(|_| ())
+}
+
+/// Přepíše obsah vlastní zprávy (`PUT …/messages/{id}`).
+/// NEOVĚŘENO proti produkci.
+pub async fn edit_html(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    message: &MessageId,
+    html: &str,
+    display_name: Option<&str>,
+) -> Result<()> {
+    let url = message_url(session, conversation, message, &[]);
+    let body = json!({
+        "id": message.as_str(),
+        "type": "Message",
+        "conversationid": conversation.as_str(),
+        "content": html,
+        "messagetype": "RichText/Html",
+        "contenttype": "text",
+        "imdisplayname": display_name.unwrap_or_default(),
+    });
+    let resp = authed(http.client.put(url), session)
+        .json(&body)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(|_| ())
+}
+
+/// Smaže vlastní zprávu (`DELETE …/messages/{id}?behavior=softDelete`; ostatní uvidí
+/// „Zpráva byla smazána“). NEOVĚŘENO proti produkci.
+pub async fn delete_message(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    message: &MessageId,
+) -> Result<()> {
+    let mut url = message_url(session, conversation, message, &[]);
+    url.query_pairs_mut().append_pair("behavior", "softDelete");
+    let resp = authed(http.client.delete(url), session)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(|_| ())
 }
 
 /// Založí vlákno chatu (`POST /v1/threads`). Pro dvě osoby žádá „unikátní“ 1:1 chat.
@@ -269,6 +391,69 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(new_client_message_id().len(), 19);
         }
+    }
+
+    #[tokio::test]
+    async fn reacts_edits_and_deletes() {
+        let server = MockServer::start().await;
+        let msg = "/v1/users/ME/conversations/19:abc@thread.v2/messages/1700000000000";
+        Mock::given(method("PUT"))
+            .and(path(format!("{msg}/properties")))
+            .and(query_param("name", "emotions"))
+            .and(header("Authentication", "skypetoken=st"))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                assert_eq!(body["emotions"]["key"], "like");
+                assert!(body["emotions"]["value"].as_i64().unwrap() > 1_700_000_000_000);
+                ResponseTemplate::new(200)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("{msg}/properties")))
+            .and(query_param("name", "emotions"))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                assert_eq!(body, json!({"emotions": {"key": "heart"}}));
+                ResponseTemplate::new(200)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(msg))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                assert_eq!(body["content"], "<p>Opraveno</p>");
+                assert_eq!(body["id"], "1700000000000");
+                ResponseTemplate::new(200)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(msg))
+            .and(query_param("behavior", "softDelete"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (http, s) = (Http::new().unwrap(), session(&server.uri()));
+        let (conv, id) = (
+            ConversationId::from("19:abc@thread.v2"),
+            MessageId::from("1700000000000"),
+        );
+        set_reaction(&http, &s, &conv, &id, "like", true)
+            .await
+            .unwrap();
+        set_reaction(&http, &s, &conv, &id, "heart", false)
+            .await
+            .unwrap();
+        edit_html(&http, &s, &conv, &id, "<p>Opraveno</p>", Some("Jan"))
+            .await
+            .unwrap();
+        delete_message(&http, &s, &conv, &id).await.unwrap();
     }
 
     #[tokio::test]
