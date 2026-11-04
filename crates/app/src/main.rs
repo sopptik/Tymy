@@ -3,7 +3,11 @@
 //! Parametry: `--log=debug|production` (viz `tymy_config::logging`).
 
 mod app;
+mod clipboard;
+mod notify;
 mod state;
+mod style;
+mod tray;
 
 use tymy_config::logging;
 
@@ -27,6 +31,9 @@ fn main() -> iced::Result {
     iced::application(app::App::boot, app::App::update, app::App::view)
         .title(app::App::title)
         .subscription(app::App::subscription)
+        .theme(app::App::theme)
         .window_size((1100.0, 720.0))
+        // zavření okna řeší aplikace (skrytí do lišty, viz Msg::CloseRequested)
+        .exit_on_close_request(false)
         .run()
 }

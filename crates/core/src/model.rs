@@ -302,6 +302,15 @@ pub struct SentMessage {
     pub arrived_at: Option<DateTime<Utc>>,
 }
 
+/// Obrázek k odeslání (PNG/JPEG data a rozměry pro zobrazení).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingImage {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub filename: String,
+}
+
 /// Přihlášený uživatel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {

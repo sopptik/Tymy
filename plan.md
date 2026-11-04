@@ -36,6 +36,12 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   řadit (zvoleno: připnutí + šipky); nepřipnuté podle data poslední komunikace.
 - **Značky nepřečtených (2026-11-04):** na záložkách a u týmů ukázat, kde je něco nového.
 - **Trouter (2026-11-04):** doladíme později. Do té doby zůstává obnova každých 5 s.
+- **Ikona v liště (2026-11-04):** obálka je zavádějící → vlastní ikona (bublina chatu).
+- **Design (2026-11-04):** přepínání vzhledu tmavý/světlý a celkově modernější vzhled.
+- **Kopírování (2026-11-04):** možnost označit část textu zprávy a kopírovat; po označení
+  automaticky do schránky.
+- **Obrázky ze schránky (2026-11-04):** vkládat obrázky ze schránky; vložený obrázek musí
+  jít odebrat.
 
 ## 2. Architektura (návrh, realizováno)
 
@@ -75,6 +81,11 @@ podmínek služby Microsoftu.
 | Nový 1:1 chat z hledání | 🟡 prázdné vlákno ✅, založení první zprávou neověřeno |
 | Záložky Chaty/Týmy, kanály po týmech, odznaky nepřečtených | ✅ |
 | Ruční pořadí chatů (připnutí, ▲▼) | ✅ lokálně |
+| Víceřádkové psaní (Shift+Enter) | ✅ |
+| Desktopové notifikace, ikona v liště, zavření = skrytí | ✅ |
+| Vzhled světlý/tmavý/podle systému, nový design | ✅ |
+| Kopírování zprávy, výběr textu s automatickým kopírováním | ✅ |
+| Vkládání obrázků ze schránky | 🟡 UI ✅, nahrání do AMS neověřeno proti produkci |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -84,10 +95,11 @@ podmínek služby Microsoftu.
 ### Fáze 1a: dokončení chatu (nepotřebuje odchyt provozu)
 1. ✅ **Lokální cache (`crates/store`)**: šifrovaná (SQLCipher), konverzace, zprávy i obrázky;
    rychlý start, historie offline, fulltext bez diakritiky (FTS5). Zbývá: hledání v UI.
-2. **Víceřádkové psaní:** Enter odešle, Shift+Enter nový řádek (iced `text_editor`).
-3. **Desktopové notifikace** (D-Bus, `notify-rust`): nová zpráva mimo otevřený chat,
+2. ✅ **Víceřádkové psaní:** Enter odešle, Shift+Enter nový řádek (iced `text_editor`).
+3. ✅ **Desktopové notifikace** (D-Bus, `notify-rust`): nová zpráva mimo otevřený chat,
    klik otevře chat.
-4. **Ikona v liště** (StatusNotifierItem, `ksni`) s počtem nepřečtených; zavření okna = skrytí.
+4. ✅ **Ikona v liště** (StatusNotifierItem, `ksni`, vlastní kreslená ikona) s počtem
+   nepřečtených; zavření okna = skrytí.
 5. **Lepší zobrazení zpráv:** ✅ obrázky, ✅ reakce, ✅ emoji jako text; zbývá: odkazy, citace a odpovědi,
    zmínky, posílání reakcí.
 6. **Úpravy a mazání vlastních zpráv.**
@@ -139,6 +151,10 @@ podmínek služby Microsoftu.
 9. ✅ **Logování:** `--log=debug|production`, `TYMY_LOG`, `settings.toml`; `~/.local/state/tymy/logs`.
 10. ✅ **Hledání lidí** v adresáři + otevření/založení 1:1 chatu. Zbývá: lidé mimo organizaci (HAR).
 11. ✅ **Záložky Chaty / Týmy**, odznaky nepřečtených, **ruční pořadí** připnutých chatů.
+12. ✅ **Design:** vlastní paleta, avatary, přepínač vzhledu (`settings.toml` → `theme`).
+13. ✅ **Kopírování:** ⧉ celá zpráva, ⌶/dvojklik režim výběru, automatické kopírování výběru
+    (schránka i primární výběr X11).
+14. 🟡 **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace; odeslání přes AMS — ověřit.
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).
