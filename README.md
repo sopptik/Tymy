@@ -57,5 +57,7 @@ sudo apt install ./target/deb/tymy_*_amd64.deb
 ```
 
 Balíček obsahuje `tymy` (okno) a `tymy-cli`, spouštěč v menu aplikací a ikony.
+Spouštění po přihlášení se zapíná v okně (menu účtů → „Spouštět po přihlášení“);
+`tymy --hidden` spustí aplikaci jen v liště.
 Závislosti na systémových knihovnách doplní `dpkg-shlibdeps`. Ověřeno instalací
 na čistém Ubuntu 24.04 (Docker). Odinstalace: `sudo apt remove tymy`.

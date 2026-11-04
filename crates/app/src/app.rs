@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme};
 use tymy_api::auth::{self, BrowserLogin, CredentialStore, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
-use tymy_config::{AccountRecord, Config, ThemeMode};
+use tymy_config::{AccountRecord, Config, ThemeMode, autostart};
 use tymy_core::text::rich::{self, Block, QuoteKind};
 use tymy_core::text::{
     InlineImage, Part, REPLY_PREVIEW_CHARS, edited_html, message_parts, truncate_chars,
@@ -165,6 +165,8 @@ pub enum Msg {
     SignedOut(Result<(), Failure>),
     /// Server potvrdil (nebo odmítl) hlášení přečtení konverzace po zprávu (`u64` = její id).
     ReadReported(ConversationId, MessageId, Result<(), Failure>),
+    /// Zapnout/vypnout spouštění po přihlášení do systému.
+    ToggleAutostart,
     /// Zjistit nepřečtené u neaktivních účtů.
     PollOthers,
     OtherUnread(AccountId, Result<(OtherBackend, usize), Failure>),
@@ -315,6 +317,7 @@ impl Msg {
             Msg::SignOut => debug!("update: SignOut"),
             Msg::SignedOut(r) => debug!(result = ok(r.is_ok()), "update: SignedOut"),
             Msg::PollOthers => trace!("update: PollOthers"),
+            Msg::ToggleAutostart => debug!("update: ToggleAutostart"),
             Msg::ReadReported(c, id, r) => {
                 debug!(conversation = %c, %id, result = ok(r.is_ok()), "update: ReadReported")
             }
@@ -545,6 +548,8 @@ pub struct App {
     accounts: Vec<AccountRecord>,
     account_menu: bool,
     confirm_sign_out: bool,
+    /// Spouštět po přihlášení do systému (soubor v `~/.config/autostart`).
+    autostart: bool,
     /// Neaktivní účty: spojení a nepřečtené; počet rozběhnutých dotazů.
     others: HashMap<AccountId, OtherAccount>,
     others_pending: usize,
@@ -658,7 +663,9 @@ pub struct App {
 
 impl App {
     pub fn boot() -> (Self, Task<Msg>) {
-        let app = Self::blank();
+        let mut app = Self::blank();
+        // `--hidden`: okno se nevytvoří viditelné (viz main), aplikace běží v liště
+        app.hidden = std::env::args().any(|a| a == autostart::HIDDEN_ARG);
         let system_theme = iced::system::theme().map(Msg::SystemTheme);
         (
             app,
@@ -674,6 +681,7 @@ impl App {
             accounts: load_accounts(),
             account_menu: false,
             confirm_sign_out: false,
+            autostart: autostart::enabled(),
             others: HashMap::new(),
             others_pending: 0,
             login_task: None,
@@ -1850,6 +1858,24 @@ impl App {
             }
             Msg::Scoped(..) => Task::none(),
             Msg::PollOthers => self.poll_others(),
+            Msg::ToggleAutostart => {
+                let on = !self.autostart;
+                let result = std::env::current_exe()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|exe| autostart::set(on, &exe));
+                match result {
+                    Ok(()) => {
+                        tracing::info!(on, "spouštění po přihlášení");
+                        self.autostart = on;
+                        self.show_toast(if on {
+                            "Tymy se spustí po přihlášení (v liště)"
+                        } else {
+                            "Spouštění po přihlášení vypnuto"
+                        })
+                    }
+                    Err(e) => self.fail(e.into()),
+                }
+            }
             Msg::ReadReported(conv, id, r) => {
                 self.reporting_read.remove(&conv);
                 // i při chybě: znovu až s další zprávou, ať server nezahlcujeme
@@ -2325,6 +2351,10 @@ impl App {
             }
             Msg::TrayUnavailable => {
                 self.tray = None;
+                // bez ikony v liště by skryté okno nešlo otevřít
+                if self.hidden {
+                    return self.show_window();
+                }
                 Task::none()
             }
             Msg::Tray(TrayEvent::Show) => self.show_window(),
@@ -3131,6 +3161,21 @@ impl App {
                 .width(Length::Fill)
                 .style(|t: &Theme, st| style::list_item(t, st, false))
                 .on_press(Msg::AddAccount),
+        );
+        col = col.push(
+            button(
+                row![
+                    text("Spouštět po přihlášení").size(13).width(Length::Fill),
+                    text(if self.autostart { "✓" } else { "" })
+                        .size(13)
+                        .style(style::accent),
+                ]
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([7, 10])
+            .width(Length::Fill)
+            .style(|t: &Theme, st| style::list_item(t, st, false))
+            .on_press(Msg::ToggleAutostart),
         );
         if self.confirm_sign_out {
             let name = session.profile.display_name.as_deref().unwrap_or("účet");

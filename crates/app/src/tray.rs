@@ -129,8 +129,10 @@ const BADGE: [u8; 3] = [0xE5, 0x39, 0x35];
 pub fn window_icon(size: u32) -> Option<iced::window::Icon> {
     let argb = bubble_icon(size as i32, false).data;
     let rgba: Vec<u8> = argb
-        .chunks_exact(4)
-        .flat_map(|p| [p[1], p[2], p[3], p[0]])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|[a, r, g, b]| [*r, *g, *b, *a])
         .collect();
     iced::window::icon::from_rgba(rgba, size, size).ok()
 }
