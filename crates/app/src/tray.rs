@@ -125,6 +125,16 @@ pub fn subscription() -> Subscription<Msg> {
 const BUBBLE: [u8; 3] = [0x1E, 0x88, 0x9E];
 const BADGE: [u8; 3] = [0xE5, 0x39, 0x35];
 
+/// Ikona okna (stejná bublina jako v liště), RGBA.
+pub fn window_icon(size: u32) -> Option<iced::window::Icon> {
+    let argb = bubble_icon(size as i32, false).data;
+    let rgba: Vec<u8> = argb
+        .chunks_exact(4)
+        .flat_map(|p| [p[1], p[2], p[3], p[0]])
+        .collect();
+    iced::window::icon::from_rgba(rgba, size, size).ok()
+}
+
 /// Nakreslí bublinu chatu se třemi tečkami; `unread` přidá červenou tečku vpravo nahoře.
 /// Vyhlazení hran: 4×4 vzorky na pixel.
 fn bubble_icon(size: i32, unread: bool) -> Icon {

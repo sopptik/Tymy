@@ -46,5 +46,16 @@ cargo run -p tymy-cli -- watch
 cargo run -p tymy-cli -- -vv chats          # ladění: zredigovaná těla odpovědí
 ```
 
-Konfigurace je v `~/.config/tymy/` (`accounts.toml`, volitelně `endpoints.toml`).
-Refresh tokeny jsou výhradně v Secret Service.
+Konfigurace je v `~/.config/tymy/` (`accounts.toml`, `settings.toml`, volitelně
+`endpoints.toml`). Refresh tokeny jsou výhradně v Secret Service.
+
+## Instalace (.deb)
+
+```sh
+packaging/build-deb.sh                      # → target/deb/tymy_<verze>_amd64.deb
+sudo apt install ./target/deb/tymy_*_amd64.deb
+```
+
+Balíček obsahuje `tymy` (okno) a `tymy-cli`, spouštěč v menu aplikací a ikony.
+Závislosti na systémových knihovnách doplní `dpkg-shlibdeps`. Ověřeno instalací
+na čistém Ubuntu 24.04 (Docker). Odinstalace: `sudo apt remove tymy`.
