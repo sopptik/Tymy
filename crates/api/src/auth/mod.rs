@@ -1,13 +1,15 @@
 //! Přihlášení a správa tokenů.
 //!
-//! Tok: OAuth2 (device code) → access token pro `skype_scope` → výměna na authsvc
+//! Tok: OAuth2 (device code, nebo authorization code + PKCE v prohlížeči) → access token pro `skype_scope` → výměna na authsvc
 //! za *skypetoken* + regionální adresy služeb. Skypetoken se pak posílá chat službě.
 
+mod browser;
 mod device_code;
 mod skype;
 mod store;
 mod token;
 
+pub use browser::{BrowserLogin, redeem_code, start_browser_login};
 pub use device_code::{DeviceCode, poll_device_code, refresh, start_device_code};
 pub use skype::{SkypeSession, exchange_for_skype_token};
 pub use store::{CredentialStore, MemoryStore, SecretServiceStore};

@@ -9,6 +9,7 @@ rekompilace v `~/.config/tymy/endpoints.toml`:
 [work]
 # client_id = "..."
 # authz_url = "..."
+# redirect_uri = "http://localhost"   # přihlášení v prohlížeči, viz 1.
 
 [personal]
 # authority = "https://login.microsoftonline.com/consumers"
@@ -30,8 +31,25 @@ Legenda: ✅ ověřeno proti produkci · 🟡 převzato z veřejných zdrojů, n
 | Scope | `https://api.spaces.skype.com/.default` ✅ | `https://api.fl.spaces.skype.com/.default` ❓ |
 
 Device code flow může být v organizaci zablokovaný podmíněným přístupem
-(chyba `AADSTS50199`/`AADSTS53003` apod.). Pak bude potřeba authorization code
-flow s PKCE, viz otevřené body.
+(chyba `AADSTS50199`/`AADSTS53003` apod.). Pro ten případ je **přihlášení v prohlížeči**
+(authorization code + PKCE, `crates/api/src/auth/browser.rs`) 🟡:
+
+- `GET {autorita}/oauth2/v2.0/authorize?client_id&response_type=code&response_mode=query`
+  `&redirect_uri&scope&code_challenge&code_challenge_method=S256&state&prompt=select_account`
+  v systémovém prohlížeči,
+- `POST {autorita}/oauth2/v2.0/token` s `grant_type=authorization_code`, `code`, `redirect_uri`,
+  `code_verifier`, `scope`.
+- Návratová adresa (`redirect_uri` v `endpoints.toml`): výchozí `http://localhost` ✅
+  (port se doplní, kód převezme místní server Tymy). Ověřeno 2026-11-04 s pracovním účtem,
+  kterému organizace blokuje device code (`53003`).
+- `https://login.microsoftonline.com/common/oauth2/nativeclient` v systémovém prohlížeči
+  **nefunguje** ✅: Microsoft adresu s kódem hned přesměruje na `/common/wrongplace`
+  („Toto není správná stránka“) a kód se ztratí. Funguje jen ve vestavěném prohlížeči,
+  který navigaci zachytí. Jiná (ne-localhost) adresa: Tymy nabídne pole pro vložení adresy.
+- Microsoft návratové adresy u `/organizations` i u konkrétního tenantu kontroluje až po
+  přihlášení (vymyšlená adresa neskončí chybou `AADSTS50011` hned).
+- Politika vyžadující spravované zařízení (`53003` se stavem zařízení „Unregistered“ i v
+  prohlížeči) neprojde ani tak.
 
 ## 2. Výměna za skypetoken
 
@@ -164,6 +182,11 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
   `spaceThreadTopic` = název týmu, `groupId`,
 - kanál: `threadType: "topic"`, `productThreadType: "TeamsStandardChannel"`, `topic` = název kanálu,
   `spaceId` = id kořenového vlákna týmu, `groupId`.
+- `lastjoinat` / `lastleaveat` (ms, text nebo číslo) ✅: u opuštěných týmů je odchod pozdější
+  než připojení. Taková vlákna seznam konverzací vrací dál, oficiální klient je nezobrazuje
+  a zprávy často končí `403` s `{"errorCode":209, "subCode":"AclCheckFailed", "details":
+  "The initiator … is not a member of the roster …"}`. Tymy je ze seznamu vynechává
+  (skupinové chaty ne); na `403` u jiných konverzací je skryje za běhu.
 
 ## 8. Nový 1:1 chat
 

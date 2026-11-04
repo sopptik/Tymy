@@ -55,6 +55,20 @@ pub(crate) struct ThreadProperties {
     pub space_id: Option<String>,
     /// U kořenového vlákna týmu: název týmu.
     pub space_thread_topic: Option<String>,
+    /// Poslední připojení / odchod uživatele z vlákna (ms, jako text i číslo).
+    #[serde(default, rename = "lastjoinat")]
+    pub last_join_at: Option<Value>,
+    #[serde(default, rename = "lastleaveat")]
+    pub last_leave_at: Option<Value>,
+}
+
+/// Čas v ms z JSON hodnoty (text nebo číslo).
+fn ms_value(v: Option<&Value>) -> i64 {
+    match v {
+        Some(Value::String(s)) => s.parse().unwrap_or(0),
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,6 +113,18 @@ pub(crate) struct EventMessage {
 }
 
 impl WireConversation {
+    /// Kanál nebo tým, který uživatel opustil (odchod je pozdější než poslední připojení).
+    /// Seznam konverzací je dál vrací, oficiální klient je ale nezobrazuje (týmy bere
+    /// z jiné služby) a server k nim často odepře přístup (403).
+    pub fn left_team(&self) -> bool {
+        let Some(p) = &self.thread_properties else {
+            return false;
+        };
+        let channel = conversation_kind(&self.id, Some(p)) == ConversationKind::Channel;
+        let left = ms_value(p.last_leave_at.as_ref());
+        channel && left > 0 && left > ms_value(p.last_join_at.as_ref())
+    }
+
     pub fn into_domain(self) -> Conversation {
         let kind = conversation_kind(&self.id, self.thread_properties.as_ref());
         let last_message = self
@@ -448,6 +474,23 @@ mod tests {
         );
         assert_eq!(c[1].topic.as_deref(), Some("Vývoj"));
         assert!(c[2].team.is_none());
+    }
+
+    #[test]
+    fn left_teams_are_recognized() {
+        let raw = serde_json::json!({"conversations": [
+            {"id": "19:left@thread.tacv2", "threadProperties": {"threadType": "topic", "lastjoinat": "100", "lastleaveat": "200"}},
+            {"id": "19:back@thread.tacv2", "threadProperties": {"threadType": "topic", "lastjoinat": 300, "lastleaveat": "200"}},
+            {"id": "19:member@thread.tacv2", "threadProperties": {"threadType": "topic", "lastjoinat": "100"}},
+            {"id": "19:chat@thread.v2", "threadProperties": {"threadType": "chat", "lastjoinat": "100", "lastleaveat": "200"}}
+        ]});
+        let r: ConversationsResponse = serde_json::from_value(raw).unwrap();
+        let left: Vec<bool> = r.conversations.iter().map(|c| c.left_team()).collect();
+        assert_eq!(
+            left,
+            [true, false, false, false],
+            "opuštěný skupinový chat zůstává"
+        );
     }
 
     #[test]

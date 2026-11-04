@@ -46,6 +46,8 @@ pub async fn list_conversations(http: &Http, session: &SkypeSession) -> Result<V
     let mut convs: Vec<_> = r
         .conversations
         .into_iter()
+        // opuštěné týmy: oficiální klient je nezobrazuje, server k nim odpírá přístup
+        .filter(|c| !c.left_team())
         .map(|c| c.into_domain())
         .collect();
     convs.sort_by_key(|c| std::cmp::Reverse(c.last_activity));

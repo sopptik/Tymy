@@ -1,7 +1,7 @@
 //! OAuth2 device authorization grant (RFC 8628) proti Microsoft identity platform.
 //!
 //! Pozn.: některé organizace device code flow blokují podmíněným přístupem. Pro ně
-//! bude později potřeba authorization code flow s PKCE.
+//! je přihlášení v prohlížeči (`browser.rs`, authorization code + PKCE).
 
 use std::time::Duration;
 
@@ -115,7 +115,7 @@ pub async fn refresh(
     Ok(r.into())
 }
 
-async fn oauth_check(resp: reqwest::Response) -> Result<reqwest::Response> {
+pub(super) async fn oauth_check(resp: reqwest::Response) -> Result<reqwest::Response> {
     if resp.status().is_success() {
         return Ok(resp);
     }
