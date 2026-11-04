@@ -100,6 +100,7 @@ podmínek služby Microsoftu.
 | Hledání ve zprávách + indexace historie na pozadí | ✅ |
 | Přepínání účtů, přidání a odhlášení účtu | ✅ ověřeno se dvěma pracovními účty (odhlášení neověřeno) |
 | Nepřečtené v neaktivních účtech (menu, odznak u jména, lišta) | ✅ |
+| Notifikace z neaktivních účtů (klik přepne účet) | 🟡 hotovo, zatím nevyzkoušeno |
 | Přihlášení v prohlížeči (PKCE, `http://localhost`) | ✅ ověřeno (druhý pracovní účet) |
 | Opuštěné týmy a kanály bez přístupu (403) | ✅ skryté |
 | Balíček `.deb`, instalace na čistém Ubuntu 24.04 | ✅ (Docker + Xvfb) |
@@ -135,7 +136,8 @@ podmínek služby Microsoftu.
    zahodí stav i výsledky rozběhnutých úloh předchozího účtu. Odkaz i kód přihlášení jdou
    zkopírovat. ✅ Nepřečtené z neaktivních účtů: jednou za minutu se stáhne jejich seznam
    konverzací (spojení se drží, tokeny se zbytečně neobnovují); počet je v menu u účtu,
-   jako odznak u jména a v součtu v liště. Později: notifikace z neaktivních účtů.
+   jako odznak u jména a v součtu v liště. ✅ Notifikace z neaktivních účtů (nové zprávy
+   v chatech od minulého dotazu, v nadpisu název účtu); klik přepne účet a otevře chat.
 8. ✅ **Hledání ve zprávách:** fulltext SQLite FTS5 uvnitř šifrované cache (bez diakritiky,
    předpony slov, úryvky se zvýrazněním), výsledky v postranním panelu pod chaty a lidmi,
    klik otevře zprávu v kontextu a zvýrazní ji. Indexace historie na pozadí: po startu postupně
