@@ -75,6 +75,9 @@ pub struct Settings {
     /// Vzhled: `"system"`, `"light"` nebo `"dark"`.
     #[serde(default)]
     pub theme: ThemeMode,
+    /// Naposledy použitý účet v okně (bez něj první v `accounts.toml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountId>,
 }
 
 /// Volba vzhledu aplikace.
@@ -161,6 +164,24 @@ impl Config {
     pub fn upsert(&mut self, record: AccountRecord) {
         self.accounts.accounts.retain(|a| a.id != record.id);
         self.accounts.accounts.push(record);
+    }
+
+    /// Odebere účet ze seznamu; byl-li naposledy použitý, zapomene i to.
+    pub fn remove(&mut self, id: &AccountId) {
+        self.accounts.accounts.retain(|a| &a.id != id);
+        if self.settings.account.as_ref() == Some(id) {
+            self.settings.account = None;
+        }
+    }
+
+    /// Účet pro okno: naposledy použitý, jinak první.
+    pub fn active(&self) -> Option<&AccountRecord> {
+        let all = &self.accounts.accounts;
+        self.settings
+            .account
+            .as_ref()
+            .and_then(|id| all.iter().find(|a| &a.id == id))
+            .or_else(|| all.first())
     }
 
     /// Najde účet podle id, e-mailu nebo pořadí (od 1); bez výběru vrátí jediný/první účet.
@@ -252,6 +273,24 @@ mod tests {
         assert_eq!(c.find(Some("2")).unwrap().id.as_str(), "a");
         assert_eq!(c.find(Some("JAN@firma.cz")).unwrap().id.as_str(), "a");
         assert!(c.find(Some("nikdo")).is_err());
+        let mut c4 = Config::load_from(&dir).unwrap();
+        assert_eq!(
+            c4.active().unwrap().id.as_str(),
+            "b",
+            "bez volby první účet"
+        );
+        c4.settings.account = Some("a".into());
+        assert_eq!(c4.active().unwrap().id.as_str(), "a");
+        c4.settings.account = Some("zmizel".into());
+        assert_eq!(
+            c4.active().unwrap().id.as_str(),
+            "b",
+            "neznámý účet → první"
+        );
+        c4.settings.account = Some("a".into());
+        c4.remove(&"a".into());
+        assert_eq!(c4.settings.account, None);
+        assert_eq!(c4.active().unwrap().id.as_str(), "b");
         assert_eq!(c.endpoints(AccountKind::Personal, None).client_id, "custom");
         assert_eq!(
             c.endpoints(AccountKind::Work, Some("https://login.example/t"))
