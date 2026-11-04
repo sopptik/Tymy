@@ -86,6 +86,8 @@ podmínek služby Microsoftu.
 | Vzhled světlý/tmavý/podle systému, nový design | ✅ |
 | Kopírování zprávy, výběr textu s automatickým kopírováním | ✅ |
 | Vkládání obrázků ze schránky | 🟡 UI ✅, nahrání do AMS neověřeno proti produkci |
+| Formátované zprávy (odkazy, kód, seznamy, tabulky, citace, zmínky) | ✅ ověřeno na reálných zprávách |
+| Odpověď na zprávu | 🟡 zobrazení ✅, odeslání neověřeno proti produkci |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -100,8 +102,11 @@ podmínek služby Microsoftu.
    klik otevře chat.
 4. ✅ **Ikona v liště** (StatusNotifierItem, `ksni`, vlastní kreslená ikona) s počtem
    nepřečtených; zavření okna = skrytí.
-5. **Lepší zobrazení zpráv:** ✅ obrázky, ✅ reakce, ✅ emoji jako text; zbývá: odkazy, citace a odpovědi,
-   zmínky, posílání reakcí.
+5. **Lepší zobrazení zpráv:** ✅ obrázky, ✅ reakce, ✅ emoji jako text, ✅ klikatelné odkazy (i holé
+   adresy), ✅ tučně/kurzíva/podtržení/přeškrtnutí, ✅ zmínky, ✅ kód v řádku i bloky kódu,
+   ✅ seznamy, nadpisy, tabulky, ✅ citace, přeposlané zprávy a odpovědi, 🟡 odpovídání na zprávy
+   (tlačítko ↩, Esc zruší; odeslání neověřeno proti produkci). Zbývá: posílání reakcí,
+   klik na citaci odpovědi skočí na původní zprávu.
 6. **Úpravy a mazání vlastních zpráv.**
 7. **Přepínání účtů** v okně (podpora více účtů je už v konfiguraci).
 

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 
 use crate::{
-    AccountKind, Conversation, ConversationId, Event, Message, Person, Profile, Result, SentMessage,
+    AccountKind, Conversation, ConversationId, Event, Message, Outgoing, Person, Profile, Result,
+    SentMessage,
 };
 
 /// Jedna stránka historie zpráv (od nejnovější po nejstarší).
@@ -32,16 +33,17 @@ pub trait ChatBackend: Send + Sync {
         cursor: Option<&str>,
     ) -> Result<MessagePage>;
 
-    /// Odešle textovou zprávu. `text` je prostý text, implementace ho escapuje do HTML.
-    async fn send_text(&self, conversation: &ConversationId, text: &str) -> Result<SentMessage>;
+    /// Odešle zprávu: text (může být prázdný), obrázky (nejdřív se nahrají) a případnou odpověď.
+    async fn send(&self, conversation: &ConversationId, message: &Outgoing) -> Result<SentMessage>;
 
-    /// Odešle zprávu s textem (může být prázdný) a obrázky; obrázky nejdřív nahraje.
-    async fn send_with_images(
-        &self,
-        conversation: &ConversationId,
-        text: &str,
-        images: &[crate::OutgoingImage],
-    ) -> Result<SentMessage>;
+    /// Odešle prostou textovou zprávu.
+    async fn send_text(&self, conversation: &ConversationId, text: &str) -> Result<SentMessage> {
+        let message = Outgoing {
+            text: text.to_owned(),
+            ..Default::default()
+        };
+        self.send(conversation, &message).await
+    }
 
     /// Počká na další dávku real-time událostí (long-poll). Může vrátit prázdný seznam
     /// při vypršení intervalu; volající pak jednoduše zavolá znovu.

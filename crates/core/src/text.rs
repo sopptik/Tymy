@@ -1,7 +1,9 @@
 //! Převody mezi prostým textem a HTML obsahem zpráv.
 //!
 //! Plnohodnotné vykreslení rich textu bude v UI; tady je jen to, co potřebuje
-//! odesílání, CLI a náhledy v seznamu chatů.
+//! odesílání, CLI a náhledy v seznamu chatů. Strukturovaný obsah pro okno je v [`rich`].
+
+pub mod rich;
 
 /// Escapuje prostý text do HTML zprávy Teams (`<p>…</p>`, nové řádky jako `<br>`).
 pub fn plain_to_html(text: &str) -> String {
@@ -21,6 +23,50 @@ pub fn plain_to_html(text: &str) -> String {
     }
     out.push_str("</p>");
     out
+}
+
+/// HTML citace pro odpověď na zprávu (stejný tvar, jaký posílá web klient Teams).
+/// Patří před vlastní text odpovědi.
+pub fn reply_html(r: &crate::ReplyRef) -> String {
+    let id = escape_attr(r.message_id.as_str());
+    let mri = r
+        .author
+        .as_ref()
+        .map(|a| escape_attr(a.as_str()))
+        .unwrap_or_default();
+    let name = escape_text(&r.author_name);
+    let preview = escape_text(&truncate_chars(
+        &r.preview.replace('\n', " "),
+        REPLY_PREVIEW_CHARS,
+    ));
+    format!(
+        r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="{id}"><strong itemprop="mri" itemid="{mri}">{name}</strong><span itemprop="time" itemid="{id}"></span><p itemprop="preview">{preview}</p></blockquote>"#
+    )
+}
+
+/// Délka náhledu původní zprávy v odpovědi.
+pub const REPLY_PREVIEW_CHARS: usize = 150;
+
+/// Zkrátí text na `max` znaků, případně se „…“.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out = out.trim_end().to_owned();
+    out.push('…');
+    out
+}
+
+fn escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_attr(s: &str) -> String {
+    escape_text(s).replace('"', "&quot;")
 }
 
 /// Velmi jednoduchý převod HTML na čitelný text (bez závislosti na HTML parseru).
@@ -104,7 +150,7 @@ pub fn html_to_plain(html: &str) -> String {
 }
 
 /// Hodnota atributu `name="…"` ve značce (bez `<`/`>`), s dekódovanými entitami.
-fn attr(tag: &str, name: &str) -> Option<String> {
+pub(crate) fn attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     // mezera před názvem, aby `src` nenašlo `data-src` apod.
     let needle = format!(" {name}=\"");
@@ -168,7 +214,7 @@ pub fn message_parts(html: &str) -> Vec<Part> {
     parts
 }
 
-fn inline_image(tag: &str) -> Option<InlineImage> {
+pub(crate) fn inline_image(tag: &str) -> Option<InlineImage> {
     let url = attr(tag, "src")?;
     let ams = attr(tag, "itemtype").is_some_and(|t| t.contains("AMSImage"))
         || url::host(&url).is_some_and(|h| h.ends_with(".asm.skype.com"));
@@ -188,7 +234,7 @@ fn inline_image(tag: &str) -> Option<InlineImage> {
     })
 }
 
-fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+pub(crate) fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
     haystack
         .as_bytes()
         .windows(needle.len())
@@ -203,7 +249,7 @@ mod url {
     }
 }
 
-fn decode_entity(e: &str) -> Option<char> {
+pub(crate) fn decode_entity(e: &str) -> Option<char> {
     Some(match e {
         "amp" => '&',
         "lt" => '<',
@@ -285,6 +331,34 @@ mod tests {
             &message_parts(r#"<img src="http://eu-api.asm.skype.com/x" alt="x">"#)[..],
             [Part::Text(_)]
         ));
+    }
+
+    #[test]
+    fn reply_html_is_escaped_and_parsed_back() {
+        let r = crate::ReplyRef {
+            message_id: crate::MessageId::from("1730000000000"),
+            author: Some(crate::UserId::from("8:orgid:abc")),
+            author_name: "Jan <Novák>".into(),
+            preview: "a\nb & \"c\"".into(),
+        };
+        let html = reply_html(&r);
+        assert!(html.contains(r#"itemid="1730000000000""#));
+        let blocks = rich::parse(&format!("{html}<p>ok</p>"));
+        match &blocks[0] {
+            rich::Block::Quote(q) => {
+                assert_eq!(
+                    q.kind,
+                    rich::QuoteKind::Reply {
+                        message_id: Some("1730000000000".into()),
+                        author: Some("Jan <Novák>".into()),
+                        author_mri: Some("8:orgid:abc".into()),
+                    }
+                );
+                assert_eq!(rich::plain(&q.blocks), "a b & \"c\"");
+            }
+            b => panic!("{b:?}"),
+        }
+        assert_eq!(truncate_chars("abcdef", 4), "abc…");
     }
 
     #[test]

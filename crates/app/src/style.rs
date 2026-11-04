@@ -286,6 +286,140 @@ pub fn reaction(t: &Theme, by_me: bool) -> container::Style {
     }
 }
 
+// ---------- obsah zpráv ----------
+
+/// Barva textu v bublině (na vlastní bublině bílá, jinak běžná).
+pub fn bubble_text(c: &Colors, mine: bool) -> Color {
+    if mine { c.on_primary } else { c.text }
+}
+
+/// Jemný podklad uvnitř bubliny (kód, citace, tabulky) odvozený z barvy textu.
+pub fn bubble_tint(c: &Colors, mine: bool, alpha: f32) -> Color {
+    Color {
+        a: alpha,
+        ..bubble_text(c, mine)
+    }
+}
+
+/// Barva odkazů a zmínek v bublině.
+pub fn bubble_link(c: &Colors, mine: bool) -> Color {
+    if mine { c.on_primary } else { c.primary }
+}
+
+/// Blok kódu.
+pub fn code_block(t: &Theme, mine: bool) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(bubble_tint(&c, mine, 0.09).into()),
+        border: rounded(8.0),
+        ..Default::default()
+    }
+}
+
+/// Smíchá dvě barvy (`t` = podíl `b`), výsledek je neprůhledný.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.0,
+    }
+}
+
+/// Pozadí bubliny (pro neprůhledné podklady uvnitř).
+fn bubble_background(c: &Colors, mine: bool) -> Color {
+    if mine { c.primary } else { c.surface }
+}
+
+/// Barva proužku u citace.
+fn quote_bar_color(c: &Colors, mine: bool) -> Color {
+    if mine {
+        mix(c.primary, c.on_primary, 0.7)
+    } else {
+        c.primary
+    }
+}
+
+/// Citace: vnější obal v barvě proužku; vnitřek ([`quote`]) ho zakryje až na 3 px vlevo.
+pub fn quote_frame(t: &Theme, mine: bool) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(quote_bar_color(&c, mine).into()),
+        border: rounded(8.0),
+        ..Default::default()
+    }
+}
+
+/// Vnitřek citace (neprůhledný, aby proužek nebyl vidět skrz).
+pub fn quote(t: &Theme, mine: bool) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(mix(bubble_background(&c, mine), bubble_text(&c, mine), 0.07).into()),
+        border: Border {
+            radius: Radius {
+                top_left: 2.0,
+                top_right: 8.0,
+                bottom_right: 8.0,
+                bottom_left: 2.0,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Vodorovná čára ve zprávě.
+pub fn rule(t: &Theme, mine: bool) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(bubble_tint(&c, mine, 0.25).into()),
+        ..Default::default()
+    }
+}
+
+/// Psací pole při odpovědi: obal v barvě proužku.
+pub fn reply_frame(t: &Theme) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(c.primary.into()),
+        border: rounded(8.0),
+        ..Default::default()
+    }
+}
+
+/// Buňka tabulky ve zprávě.
+pub fn table_cell(t: &Theme, mine: bool, header: bool) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: header.then(|| bubble_tint(&c, mine, 0.08).into()),
+        border: Border {
+            radius: 0.0.into(),
+            width: 1.0,
+            color: bubble_tint(&c, mine, 0.15),
+        },
+        ..Default::default()
+    }
+}
+
+/// Náhled zprávy, na kterou se odpovídá, nad psacím polem (vnitřek, viz [`reply_frame`]).
+pub fn reply_preview(t: &Theme) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(c.surface_alt.into()),
+        text_color: Some(c.text),
+        border: Border {
+            radius: Radius {
+                top_left: 2.0,
+                top_right: 8.0,
+                bottom_right: 8.0,
+                bottom_left: 2.0,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 /// Odznak s počtem nepřečtených.
 pub fn badge(t: &Theme) -> container::Style {
     let c = colors(t);
