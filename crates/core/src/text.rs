@@ -103,11 +103,104 @@ pub fn html_to_plain(html: &str) -> String {
     result
 }
 
+/// Hodnota atributu `name="…"` ve značce (bez `<`/`>`), s dekódovanými entitami.
 fn attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
-    let start = lower.find(&format!("{name}=\""))? + name.len() + 2;
+    // mezera před názvem, aby `src` nenašlo `data-src` apod.
+    let needle = format!(" {name}=\"");
+    let start = lower.find(&needle)? + needle.len();
     let end = start + tag[start..].find('"')?;
     Some(html_to_plain(&tag[start..end]))
+}
+
+/// Část obsahu zprávy pro vykreslení.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    Text(String),
+    Image(InlineImage),
+}
+
+/// Obrázek vložený do zprávy (uložený v Microsoft media službě, vyžaduje přihlášení).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineImage {
+    pub url: String,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub alt: Option<String>,
+}
+
+impl InlineImage {
+    /// URL originálu. Zpráva odkazuje na zmenšený náhled (`/views/imgo`);
+    /// originál je ve view `imgpsh_fullsize_anim` (zachová i animaci GIFů).
+    pub fn full_size_url(&self) -> String {
+        match self.url.rfind("/views/") {
+            Some(i) => format!("{}/views/imgpsh_fullsize_anim", &self.url[..i]),
+            None => self.url.clone(),
+        }
+    }
+}
+
+/// Rozdělí HTML zprávy na text a vložené obrázky. Emoji (`<img alt="🙂">`) zůstávají v textu.
+pub fn message_parts(html: &str) -> Vec<Part> {
+    let mut parts = Vec::new();
+    let mut chunk_start = 0;
+    let mut cursor = 0;
+    let push_text = |parts: &mut Vec<Part>, chunk: &str| {
+        let t = html_to_plain(chunk);
+        if !t.is_empty() {
+            parts.push(Part::Text(t));
+        }
+    };
+    while let Some(rel) = find_ascii_ci(&html[cursor..], "<img") {
+        let pos = cursor + rel;
+        let Some(len) = html[pos..].find('>') else {
+            break;
+        };
+        let after = pos + len + 1;
+        if let Some(img) = inline_image(&html[pos + 1..pos + len]) {
+            push_text(&mut parts, &html[chunk_start..pos]);
+            parts.push(Part::Image(img));
+            chunk_start = after;
+        }
+        cursor = after;
+    }
+    push_text(&mut parts, &html[chunk_start..]);
+    parts
+}
+
+fn inline_image(tag: &str) -> Option<InlineImage> {
+    let url = attr(tag, "src")?;
+    let ams = attr(tag, "itemtype").is_some_and(|t| t.contains("AMSImage"))
+        || url::host(&url).is_some_and(|h| h.ends_with(".asm.skype.com"));
+    if !ams || !url.starts_with("https://") {
+        return None;
+    }
+    let num = |n: &str| {
+        attr(tag, n)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+    };
+    Some(InlineImage {
+        width: num("width"),
+        height: num("height"),
+        alt: attr(tag, "alt").filter(|a| !a.is_empty()),
+        url,
+    })
+}
+
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+mod url {
+    /// Host z `https://host/...` bez závislosti na crate url.
+    pub fn host(u: &str) -> Option<&str> {
+        let rest = u.strip_prefix("https://")?;
+        Some(rest.split(['/', '?', '#', ':']).next().unwrap_or(rest))
+    }
 }
 
 fn decode_entity(e: &str) -> Option<char> {
@@ -139,6 +232,59 @@ mod tests {
             plain_to_html("a < b & \"c\"\ndruhý řádek\n"),
             "<p>a &lt; b &amp; &quot;c&quot;<br>druhý řádek</p>"
         );
+    }
+
+    #[test]
+    fn splits_ams_images_and_keeps_emoji_inline() {
+        let html = r#"<p>Koukni <img alt="🙂" itemtype="http://schema.skype.com/Emoji" src="https://statics.teams.cdn.office.net/e.png"> sem:</p><p><img src="https://eu-api.asm.skype.com/v1/objects/0-weu-d5-abc/views/imgo" itemtype="http://schema.skype.com/AMSImage" width="331.7" height="250" alt="obrázek"></p><p>a dál</p>"#;
+        let parts = message_parts(html);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[0], Part::Text("Koukni 🙂 sem:".into()));
+        match &parts[1] {
+            Part::Image(i) => {
+                assert_eq!(
+                    i.url,
+                    "https://eu-api.asm.skype.com/v1/objects/0-weu-d5-abc/views/imgo"
+                );
+                assert_eq!(i.width, Some(331.7));
+                assert_eq!(i.height, Some(250.0));
+                assert_eq!(i.alt.as_deref(), Some("obrázek"));
+            }
+            p => panic!("{p:?}"),
+        }
+        assert_eq!(parts[2], Part::Text("a dál".into()));
+    }
+
+    #[test]
+    fn full_size_url_replaces_view() {
+        let img = |url: &str| InlineImage {
+            url: url.into(),
+            width: None,
+            height: None,
+            alt: None,
+        };
+        assert_eq!(
+            img("https://eu-api.asm.skype.com/v1/objects/0-weu-d5-abc/views/imgo").full_size_url(),
+            "https://eu-api.asm.skype.com/v1/objects/0-weu-d5-abc/views/imgpsh_fullsize_anim"
+        );
+        assert_eq!(
+            img("https://x.asm.skype.com/o").full_size_url(),
+            "https://x.asm.skype.com/o"
+        );
+    }
+
+    #[test]
+    fn plain_message_is_single_text_part() {
+        assert_eq!(
+            message_parts("<p>Ahoj</p>"),
+            vec![Part::Text("Ahoj".into())]
+        );
+        assert!(message_parts("<p></p>").is_empty());
+        // http (ne https) obrázek se nezobrazí jako obrázek
+        assert!(matches!(
+            &message_parts(r#"<img src="http://eu-api.asm.skype.com/x" alt="x">"#)[..],
+            [Part::Text(_)]
+        ));
     }
 
     #[test]

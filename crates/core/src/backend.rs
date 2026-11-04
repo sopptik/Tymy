@@ -38,4 +38,7 @@ pub trait ChatBackend: Send + Sync {
     /// Počká na další dávku real-time událostí (long-poll). Může vrátit prázdný seznam
     /// při vypršení intervalu; volající pak jednoduše zavolá znovu.
     async fn poll_events(&self) -> Result<Vec<Event>>;
+
+    /// Stáhne médium vložené do zprávy (obrázek z [`crate::text::InlineImage`]).
+    async fn fetch_media(&self, url: &str) -> Result<Vec<u8>>;
 }

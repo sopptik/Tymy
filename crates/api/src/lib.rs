@@ -8,6 +8,7 @@ mod backend;
 pub mod chat;
 mod endpoints;
 mod http;
+pub mod media;
 mod realtime;
 
 pub use backend::{TeamsBackend, complete_login};

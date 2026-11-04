@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use iced::widget::{
-    Column, Id, button, column, container, operation, row, rule, scrollable, space, text,
+    Column, Id, button, column, container, image, operation, row, rule, scrollable, space, text,
     text_input,
 };
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme, font};
 use tymy_api::auth::{self, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config};
-use tymy_core::text::html_to_plain;
+use tymy_core::text::{InlineImage, Part, message_parts};
 use tymy_core::{
     AccountKind, ChatBackend, Conversation, ConversationId, Error, Message, MessageId, MessageKind,
     MessagePage, Profile,
@@ -91,7 +91,21 @@ pub enum Msg {
     Send,
     Sent(ConversationId, String, Result<(), Failure>),
     DismissError,
+    MediaLoaded(String, Result<Arc<Vec<u8>>, Failure>),
+    OpenImage(InlineImage),
+    /// Stažený originál obrázku: (URL originálu, URL náhledu, výsledek).
+    FullImage(String, String, Result<Arc<Vec<u8>>, Failure>),
 }
+
+/// Stav staženého obrázku ze zprávy.
+enum Media {
+    Loading,
+    Ready(image::Handle, Arc<Vec<u8>>),
+    Failed,
+}
+
+/// Maximální šířka obrázku v bublině.
+const IMAGE_MAX_WIDTH: f32 = 360.0;
 
 enum Phase {
     Starting,
@@ -120,6 +134,10 @@ pub struct App {
     loading_older: bool,
     peer_scan_done: bool,
     error: Option<String>,
+    /// Obrázky ze zpráv podle URL.
+    media: HashMap<String, Media>,
+    /// Originály obrázků uložené na disk (URL originálu → soubor).
+    originals: HashMap<String, std::path::PathBuf>,
 }
 
 impl App {
@@ -139,6 +157,8 @@ impl App {
             loading_older: false,
             peer_scan_done: false,
             error: None,
+            media: HashMap::new(),
+            originals: HashMap::new(),
         };
         (app, Task::perform(load_session(), Msg::Booted))
     }
@@ -243,6 +263,39 @@ impl App {
                 self.read_locally.insert(id.clone(), last.id.clone());
             }
         }
+    }
+
+    /// Spustí stažení obrázků ze zpráv, které ještě nemáme.
+    fn fetch_media_for(&mut self, messages: &[Message]) -> Task<Msg> {
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        let mut tasks = vec![];
+        for m in messages.iter().filter(|m| !m.deleted) {
+            for part in message_parts(&m.content) {
+                let Part::Image(img) = part else { continue };
+                if self.media.contains_key(&img.url) {
+                    continue;
+                }
+                self.media.insert(img.url.clone(), Media::Loading);
+                let backend = backend.clone();
+                let url = img.url;
+                tasks.push(Task::perform(
+                    {
+                        let url = url.clone();
+                        async move {
+                            backend
+                                .fetch_media(&url)
+                                .await
+                                .map(Arc::new)
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::MediaLoaded(url.clone(), r),
+                ));
+            }
+        }
+        Task::batch(tasks)
     }
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
@@ -392,11 +445,12 @@ impl App {
                 if older || first_load {
                     self.older.insert(id.clone(), page.older);
                 }
+                let media = self.fetch_media_for(&page.messages);
                 merge_messages(self.messages.entry(id.clone()).or_default(), page.messages);
                 if self.selected.as_ref() == Some(&id) {
                     self.mark_read(&id);
                 }
-                Task::none()
+                media
             }
             Msg::Messages(_, Err(e), older) => {
                 if older {
@@ -469,6 +523,61 @@ impl App {
             }
             Msg::DismissError => {
                 self.error = None;
+                Task::none()
+            }
+            Msg::MediaLoaded(url, Ok(bytes)) => {
+                let handle = image::Handle::from_bytes(bytes.as_ref().clone());
+                self.media.insert(url, Media::Ready(handle, bytes));
+                Task::none()
+            }
+            Msg::MediaLoaded(url, Err(e)) => {
+                tracing::warn!(%url, error = %e.text, "obrázek se nepodařilo stáhnout");
+                self.media.insert(url, Media::Failed);
+                Task::none()
+            }
+            Msg::OpenImage(img) => {
+                let full = img.full_size_url();
+                if let Some(path) = self.originals.get(&full) {
+                    open_path(path);
+                    return Task::none();
+                }
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                let preview = img.url;
+                Task::perform(
+                    {
+                        let full = full.clone();
+                        async move {
+                            backend
+                                .fetch_media(&full)
+                                .await
+                                .map(Arc::new)
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::FullImage(full.clone(), preview.clone(), r),
+                )
+            }
+            Msg::FullImage(full, _, Ok(bytes)) => {
+                match save_media(&full, &bytes) {
+                    Ok(path) => {
+                        open_path(&path);
+                        self.originals.insert(full, path);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "uložení obrázku selhalo"),
+                }
+                Task::none()
+            }
+            Msg::FullImage(_, preview, Err(e)) => {
+                // Originál není k dispozici → otevřít aspoň náhled.
+                tracing::warn!(error = %e.text, "originál obrázku nelze stáhnout, otevírám náhled");
+                if let Some(Media::Ready(_, bytes)) = self.media.get(&preview) {
+                    match save_media(&preview, bytes) {
+                        Ok(path) => open_path(&path),
+                        Err(e) => tracing::warn!(error = %e, "uložení náhledu selhalo"),
+                    }
+                }
                 Task::none()
             }
         }
@@ -555,7 +664,7 @@ impl App {
             .as_ref()
             .filter(|m| m.is_user_content())
             .map(|m| {
-                let body = html_to_plain(&m.content).replace('\n', " ");
+                let body = preview_text(&m.content);
                 if is_me(&session.profile, m) {
                     format!("Vy: {body}")
                 } else {
@@ -654,7 +763,12 @@ impl App {
                         _ => true,
                     }
             });
-            list = list.push(message_view(m, is_me(&session.profile, m), new_group));
+            list = list.push(message_view(
+                m,
+                is_me(&session.profile, m),
+                new_group,
+                &self.media,
+            ));
             prev = Some(m);
         }
 
@@ -692,16 +806,23 @@ fn displayable(m: &Message) -> bool {
         || matches!(&m.kind, MessageKind::Event(t) if t.starts_with("Event/Call"))
 }
 
-fn message_view(m: &Message, mine: bool, header: bool) -> Element<'_, Msg> {
+fn message_view<'a>(
+    m: &'a Message,
+    mine: bool,
+    header: bool,
+    media: &'a HashMap<String, Media>,
+) -> Element<'a, Msg> {
     let mut body = Column::new().spacing(4);
     if m.deleted {
         body = body.push(text("Zpráva byla smazána").size(13).style(muted));
     } else if let MessageKind::Event(_) = m.kind {
         body = body.push(text("📞 Hovor").size(13).style(muted));
     } else {
-        let content = html_to_plain(&m.content);
-        if !content.is_empty() {
-            body = body.push(text(content).size(14));
+        for part in message_parts(&m.content) {
+            body = body.push(match part {
+                Part::Text(t) => Element::from(text(t).size(14)),
+                Part::Image(img) => image_view(&img, media.get(&img.url)),
+            });
         }
         for a in &m.attachments {
             let label = text(format!("📎 {}", a.name)).size(13);
@@ -746,6 +867,88 @@ fn message_view(m: &Message, mine: bool, header: bool) -> Element<'_, Msg> {
         Element::from(row![bubble, space::horizontal()])
     });
     col.into()
+}
+
+/// Obrázek v bublině; velikost podle rozměrů z HTML, zmenšená na [`IMAGE_MAX_WIDTH`].
+fn image_view<'a>(img: &InlineImage, state: Option<&Media>) -> Element<'a, Msg> {
+    let (w, h) = match (img.width, img.height) {
+        (Some(w), Some(h)) => {
+            let w2 = w.min(IMAGE_MAX_WIDTH);
+            (w2, h * w2 / w)
+        }
+        _ => (IMAGE_MAX_WIDTH, IMAGE_MAX_WIDTH * 0.75),
+    };
+    match state {
+        Some(Media::Ready(handle, _)) => button(image(handle.clone()).width(w).height(h))
+            .style(button::text)
+            .padding(0)
+            .on_press(Msg::OpenImage(img.clone()))
+            .into(),
+        Some(Media::Failed) => text("🖼 Obrázek se nepodařilo načíst")
+            .size(13)
+            .style(muted)
+            .into(),
+        _ => container(text("Načítám obrázek…").size(12).style(muted))
+            .width(w)
+            .height(h)
+            .center_x(w)
+            .center_y(h)
+            .into(),
+    }
+}
+
+/// Text pro náhled v seznamu chatů; obrázky jako „🖼 Obrázek“.
+fn preview_text(html: &str) -> String {
+    let parts: Vec<String> = message_parts(html)
+        .into_iter()
+        .map(|p| match p {
+            Part::Text(t) => t.replace('\n', " "),
+            Part::Image(_) => "🖼 Obrázek".into(),
+        })
+        .collect();
+    parts.join(" ")
+}
+
+/// Uloží médium do `~/.cache/tymy/media/` (název podle URL, přípona podle obsahu).
+fn save_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let ext = match bytes {
+        [0xFF, 0xD8, ..] => "jpg",
+        [0x89, b'P', b'N', b'G', ..] => "png",
+        [b'G', b'I', b'F', ..] => "gif",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => "webp",
+        _ => "bin",
+    };
+    let dirs = directories::ProjectDirs::from("", "", "tymy")
+        .ok_or_else(|| std::io::Error::other("nelze určit adresář cache"))?;
+    let dir = dirs.cache_dir().join("media");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut h);
+    let path = dir.join(format!("{:016x}.{ext}", h.finish()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+/// Otevře soubor ve výchozí aplikaci.
+fn open_path(path: &std::path::Path) {
+    if let Err(e) = std::process::Command::new("xdg-open").arg(path).spawn() {
+        tracing::warn!(error = %e, "xdg-open selhal");
+    }
 }
 
 fn centered<'a>(content: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {

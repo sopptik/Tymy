@@ -72,6 +72,14 @@ enum Command {
     },
     /// Sleduje události v reálném čase (Ctrl+C ukončí).
     Watch,
+    /// Stáhne médium (obrázek) vložené do zprávy.
+    Media {
+        /// URL z atributu `src` obrázku (…asm.skype.com/…).
+        url: String,
+        /// Kam uložit.
+        #[arg(short, long)]
+        output: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -135,6 +143,14 @@ async fn main() -> Result<()> {
             let id = resolve_chat(&backend, &chat).await?;
             let sent = backend.send_text(&id, &text.join(" ")).await?;
             println!("Odesláno (clientmessageid {})", sent.client_message_id);
+            Ok(())
+        }
+        Command::Media { url, output } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let bytes = backend.fetch_media(&url).await?;
+            std::fs::write(&output, &bytes)
+                .with_context(|| format!("zápis {}", output.display()))?;
+            println!("Uloženo {} B do {}", bytes.len(), output.display());
             Ok(())
         }
         Command::Watch => {

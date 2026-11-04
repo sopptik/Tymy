@@ -13,7 +13,8 @@ tymy-config.workspace = true
 serde.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
-iced = { version = "0.14", features = ["tokio"] }
+directories.workspace = true
+iced = { version = "0.14", features = ["tokio", "image"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

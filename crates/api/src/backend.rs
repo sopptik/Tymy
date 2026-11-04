@@ -16,7 +16,7 @@ use tymy_core::{
 
 use crate::auth::{self, CredentialStore, SkypeSession};
 use crate::realtime::poll::{self, PollRegistration};
-use crate::{Endpoints, chat, http::Http};
+use crate::{Endpoints, chat, http::Http, media};
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
 const REFRESH_MARGIN_MINUTES: i64 = 5;
@@ -142,6 +142,11 @@ impl ChatBackend for TeamsBackend {
             async move { chat::send_html(&self.http, &s, conversation, html, name).await }
         })
         .await
+    }
+
+    async fn fetch_media(&self, url: &str) -> Result<Vec<u8>> {
+        self.call(|s| async move { media::fetch(&self.http, &s, url).await })
+            .await
     }
 
     async fn poll_events(&self) -> Result<Vec<Event>> {
