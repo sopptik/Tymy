@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tymy_core::{
     Attachment, Conversation, ConversationId, ConversationKind, Event, Message, MessageKind,
-    Reaction, UserId,
+    Reaction, TeamRef, UserId,
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -51,6 +51,10 @@ pub(crate) struct ThreadProperties {
     pub topic: Option<String>,
     pub thread_type: Option<String>,
     pub product_thread_type: Option<String>,
+    /// U kanálu: id kořenového vlákna týmu.
+    pub space_id: Option<String>,
+    /// U kořenového vlákna týmu: název týmu.
+    pub space_thread_topic: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -110,6 +114,21 @@ impl WireConversation {
             .and_then(|h| h.split(';').next().map(str::to_owned))
             .filter(|id| !id.is_empty() && id != "0")
             .map(Into::into);
+        let team = self.thread_properties.as_ref().and_then(|t| {
+            let name = t.space_thread_topic.clone().filter(|n| !n.is_empty());
+            match (t.thread_type.as_deref(), &t.space_id, name) {
+                // kořen týmu = obecný kanál
+                (Some("space"), _, name) => Some(TeamRef {
+                    id: ConversationId(self.id.clone()),
+                    name,
+                }),
+                (_, Some(space), name) if !space.is_empty() => Some(TeamRef {
+                    id: ConversationId(space.clone()),
+                    name,
+                }),
+                _ => None,
+            }
+        });
         Conversation {
             id: ConversationId(self.id),
             kind,
@@ -117,6 +136,7 @@ impl WireConversation {
                 .thread_properties
                 .and_then(|t| t.topic)
                 .filter(|t| !t.is_empty()),
+            team,
             last_message,
             last_activity,
             read_up_to,
@@ -403,6 +423,31 @@ mod tests {
 
         assert_eq!(convs[2].kind, ConversationKind::Meeting);
         assert_eq!(convs[3].kind, ConversationKind::System);
+    }
+
+    #[test]
+    fn channels_know_their_team() {
+        let raw = serde_json::json!({"conversations": [
+            {"id": "19:root@thread.tacv2", "threadProperties": {"threadType": "space", "productThreadType": "TeamsTeam", "spaceThreadTopic": "Firma"}},
+            {"id": "19:ch@thread.tacv2", "threadProperties": {"threadType": "topic", "topic": "Vývoj", "spaceId": "19:root@thread.tacv2"}},
+            {"id": "19:g@thread.v2", "threadProperties": {"threadType": "chat", "topic": "Skupina"}}
+        ]});
+        let r: ConversationsResponse = serde_json::from_value(raw).unwrap();
+        let c: Vec<_> = r
+            .conversations
+            .into_iter()
+            .map(|c| c.into_domain())
+            .collect();
+        let root = c[0].team.as_ref().unwrap();
+        assert_eq!(root.id.as_str(), "19:root@thread.tacv2");
+        assert_eq!(root.name.as_deref(), Some("Firma"));
+        assert_eq!(c[0].kind, ConversationKind::Channel);
+        assert_eq!(
+            c[1].team.as_ref().unwrap().id.as_str(),
+            "19:root@thread.tacv2"
+        );
+        assert_eq!(c[1].topic.as_deref(), Some("Vývoj"));
+        assert!(c[2].team.is_none());
     }
 
     #[test]

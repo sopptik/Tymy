@@ -4,7 +4,7 @@ use tymy_core::{Error, Result};
 use url::Url;
 
 use crate::auth::SkypeSession;
-use crate::http::{Http, check, net_err};
+use crate::http::{Http, SendLogged, check, net_err};
 
 /// Horní mez velikosti staženého média.
 const MAX_BYTES: u64 = 25 * 1024 * 1024;
@@ -34,7 +34,7 @@ pub async fn fetch(http: &Http, session: &SkypeSession, url: &str) -> Result<Vec
             reqwest::header::AUTHORIZATION,
             format!("skype_token {}", session.token),
         )
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let resp = check(resp).await?;
@@ -76,6 +76,8 @@ mod tests {
             token: "st".into(),
             expires_at: Utc::now() + Duration::hours(1),
             chat_service: server.uri().parse().unwrap(),
+            bearer: String::new(),
+            middle_tier: None,
         };
         let url = format!("{}/v1/objects/o1/views/imgo", server.uri());
         assert_eq!(

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tymy_core::{Error, Result};
 
 use super::token::{TokenResponse, TokenSet};
+use crate::http::SendLogged;
 use crate::{Endpoints, http::Http, http::json, http::net_err};
 
 /// Kód, který uživatel zadá v prohlížeči.
@@ -48,7 +49,7 @@ pub async fn start_device_code(http: &Http, ep: &Endpoints) -> Result<DeviceCode
             ("client_id", ep.client_id.as_str()),
             ("scope", &ep.login_scopes()),
         ])
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let resp = oauth_check(resp).await?;
@@ -72,7 +73,7 @@ pub async fn poll_device_code(http: &Http, ep: &Endpoints, code: &DeviceCode) ->
                 ("client_id", ep.client_id.as_str()),
                 ("device_code", code.device_code.as_str()),
             ])
-            .send()
+            .send_logged()
             .await
             .map_err(net_err)?;
         if resp.status().is_success() {
@@ -106,7 +107,7 @@ pub async fn refresh(
             ("refresh_token", refresh_token),
             ("scope", &scope),
         ])
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let resp = oauth_check(resp).await?;

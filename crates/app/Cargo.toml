@@ -18,4 +18,3 @@ directories.workspace = true
 iced = { version = "0.14", features = ["tokio", "image"] }
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true

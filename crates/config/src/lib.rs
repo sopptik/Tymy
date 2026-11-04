@@ -1,4 +1,7 @@
-//! Neveřejná konfigurace: seznam účtů a přepisy endpointů. Tajemství jsou v Secret Service.
+//! Neveřejná konfigurace: seznam účtů, nastavení, přepisy endpointů a logování.
+//! Tajemství jsou v Secret Service.
+
+pub mod logging;
 
 use std::path::{Path, PathBuf};
 
@@ -64,9 +67,17 @@ pub struct EndpointsFile {
     pub personal: EndpointOverrides,
 }
 
+/// `settings.toml`: uživatelská nastavení aplikace.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    /// Režim logování: `"debug"` (podrobně) nebo `"production"` (jen chyby).
+    pub log: Option<logging::LogMode>,
+}
+
 pub struct Config {
     dir: PathBuf,
     pub accounts: Accounts,
+    pub settings: Settings,
     endpoints: EndpointsFile,
 }
 
@@ -80,9 +91,11 @@ impl Config {
     pub fn load_from(dir: &Path) -> Result<Self> {
         let accounts = read_toml(&dir.join("accounts.toml"))?.unwrap_or_default();
         let endpoints = read_toml(&dir.join("endpoints.toml"))?.unwrap_or_default();
+        let settings = read_toml(&dir.join("settings.toml"))?.unwrap_or_default();
         Ok(Self {
             dir: dir.to_owned(),
             accounts,
+            settings,
             endpoints,
         })
     }
@@ -183,7 +196,9 @@ mod tests {
         )
         .unwrap();
 
+        std::fs::write(dir.join("settings.toml"), "log = \"production\"\n").unwrap();
         let c = Config::load_from(&dir).unwrap();
+        assert_eq!(c.settings.log, Some(logging::LogMode::Production));
         assert_eq!(c.accounts.accounts.len(), 2);
         assert_eq!(c.find(None).unwrap().id.as_str(), "b");
         assert_eq!(c.find(Some("2")).unwrap().id.as_str(), "a");

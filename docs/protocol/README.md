@@ -113,6 +113,35 @@ přímo v HTML obsahu zprávy:
   "filename": "MicrosoftTeams-image.png", …}` ✅.
 - Ladění: `tymy-cli media <url> -o soubor`.
 
+## 6. Middle tier (profily, hledání lidí)
+
+Adresa z authz odpovědi: `regionGtms.middleTier` (např. `https://teams.microsoft.com/api/mt/emea`).
+Autorizace: `Authorization: Bearer <access token pro skype_scope>` ✅ (stejný token, který se
+vyměňuje za skypetoken); posíláme i `X-Skypetoken`. Ladění: `tymy-cli mt <METODA> <cesta> [json]`.
+
+| Operace | Požadavek | Stav |
+|---|---|---|
+| Profily podle MRI | `POST beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true`, tělo `["8:orgid:<oid>", …]` → `{value: [{mri, displayName, email, jobTitle, department, …}]}` | ✅ |
+| Hledání v adresáři | `POST beta/users/searchV2?includeDLs=false&includeBots=false&enableGuest=true&source=newChat&skypeTeamsInfo=true`, tělo = JSON řetězec dotazu → `{value: [...], bestMatchSuggestions: [...]}` | ✅ |
+| Hledání mimo organizaci | `GET beta/users/<email>/externalsearchv3?includeTFLUsers=true` → interně `userdiscovery.teams.microsoft.com/v4/discovery/…` | ❌ `400 BadRequest` (chybí hlavička/token, potřeba HAR) |
+
+## 7. Týmy a kanály ✅
+
+Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
+- kořen týmu (zároveň obecný kanál): `threadType: "space"`, `productThreadType: "TeamsTeam"`,
+  `spaceThreadTopic` = název týmu, `groupId`,
+- kanál: `threadType: "topic"`, `productThreadType: "TeamsStandardChannel"`, `topic` = název kanálu,
+  `spaceId` = id kořenového vlákna týmu, `groupId`.
+
+## 8. Nový 1:1 chat
+
+- Id 1:1 chatu: `19:<oid1>_<oid2>@unq.gbl.spaces`, object id seřazená vzestupně (pozorováno na všech
+  existujících chatech) ✅.
+- Dokud chat neexistuje, `GET …/conversations/<id>/messages` vrací `404` se `subCode: LocationLookupFailed` ✅.
+- Založení: zkusíme odeslat zprávu na odvozené id; při 404 `POST /v1/threads`
+  `{members: [{id, role: "Admin"}…], properties: {threadType: "chat", fixedRoster: "true", uniquerosterthread: "true"}}`,
+  id z hlavičky `Location` ❓ (neověřeno).
+
 ## Jak odchytit provoz (fáze 0, krok 1)
 
 1. V Chromiu/Firefoxu otevřete DevTools → Network, zapněte *Preserve log*, filtr `Fetch/XHR` + `WS`.

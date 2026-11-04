@@ -95,6 +95,18 @@ pub struct Conversation {
     pub last_activity: Option<DateTime<Utc>>,
     /// Id poslední přečtené zprávy (consumption horizon).
     pub read_up_to: Option<MessageId>,
+    /// U kanálů: tým, do kterého kanál patří.
+    #[serde(default)]
+    pub team: Option<TeamRef>,
+}
+
+/// Odkaz na tým (kořenové vlákno týmu je zároveň jeho obecný kanál).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamRef {
+    /// Id kořenového vlákna týmu.
+    pub id: ConversationId,
+    /// Název týmu; známe ho jen u kořenového vlákna.
+    pub name: Option<String>,
 }
 
 impl Conversation {
@@ -223,6 +235,48 @@ pub struct Attachment {
     pub file_type: Option<String>,
 }
 
+/// Osoba z adresáře nebo z externího hledání.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Person {
+    pub mri: UserId,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub job_title: Option<String>,
+    pub department: Option<String>,
+    pub company: Option<String>,
+    /// Mimo vlastní organizaci (federovaný nebo osobní účet).
+    pub external: bool,
+}
+
+impl Person {
+    /// Object id z MRI `8:orgid:<oid>`.
+    pub fn object_id(&self) -> Option<&str> {
+        self.mri.as_str().strip_prefix("8:orgid:")
+    }
+
+    /// Doplňující řádek pro zobrazení (pozice · oddělení · e-mail).
+    pub fn subtitle(&self) -> String {
+        [&self.job_title, &self.department, &self.email]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// Id 1:1 chatu dvou uživatelů organizace: `19:<oid>_<oid>@unq.gbl.spaces`,
+/// object id seřazená vzestupně (pozorováno na reálných chatech).
+pub fn one_on_one_id(me: &str, other: &str) -> ConversationId {
+    let (a, b) = if me <= other {
+        (me, other)
+    } else {
+        (other, me)
+    };
+    ConversationId(format!("19:{a}_{b}@unq.gbl.spaces"))
+}
+
 /// Událost doručená real-time kanálem.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
@@ -281,6 +335,13 @@ mod tests {
     }
 
     #[test]
+    fn one_on_one_id_is_sorted() {
+        let id = one_on_one_id("dddd4444-eeee", "5555aaaa-ffff");
+        assert_eq!(id.as_str(), "19:5555aaaa-ffff_dddd4444-eeee@unq.gbl.spaces");
+        assert_eq!(one_on_one_id("5555aaaa-ffff", "dddd4444-eeee"), id);
+    }
+
+    #[test]
     fn reaction_emoji() {
         let r = |k: &str| {
             Reaction {
@@ -304,6 +365,7 @@ mod tests {
             last_message: last.map(msg),
             last_activity: None,
             read_up_to: read.map(Into::into),
+            team: None,
         }
     }
 

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    AccountKind, Conversation, ConversationId, Event, Message, Profile, Result, SentMessage,
+    AccountKind, Conversation, ConversationId, Event, Message, Person, Profile, Result, SentMessage,
 };
 
 /// Jedna stránka historie zpráv (od nejnovější po nejstarší).
@@ -41,4 +41,13 @@ pub trait ChatBackend: Send + Sync {
 
     /// Stáhne médium vložené do zprávy (obrázek z [`crate::text::InlineImage`]).
     async fn fetch_media(&self, url: &str) -> Result<Vec<u8>>;
+
+    /// Založí chat s danými účastníky (kromě mě); vrátí jeho id.
+    async fn create_chat(&self, members: &[crate::UserId]) -> Result<ConversationId>;
+
+    /// Hledání lidí ve vlastní organizaci (adresář).
+    async fn search_people(&self, query: &str) -> Result<Vec<Person>>;
+
+    /// Hledání lidí mimo organizaci podle přesné e-mailové adresy.
+    async fn find_external(&self, email: &str) -> Result<Vec<Person>>;
 }

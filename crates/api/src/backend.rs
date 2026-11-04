@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::Duration;
 use tokio::sync::Mutex;
 use tymy_core::{
-    AccountKind, ChatBackend, Conversation, ConversationId, Error, Event, MessagePage, Profile,
-    Result, SentMessage, text,
+    AccountKind, ChatBackend, Conversation, ConversationId, Error, Event, MessagePage, Person,
+    Profile, Result, SentMessage, text,
 };
 
 use crate::auth::{self, CredentialStore, SkypeSession};
@@ -103,6 +103,20 @@ impl TeamsBackend {
         }
     }
 
+    /// Ladění protokolu: požadavek na middle tier.
+    pub async fn mt_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        self.call(|s| {
+            let method = method.clone();
+            async move { crate::people::mt_request(&self.http, &s, method, path, body).await }
+        })
+        .await
+    }
+
     /// Ladění protokolu: surový GET na chat službu.
     pub async fn raw_get(&self, path_and_query: &str) -> Result<serde_json::Value> {
         self.call(|s| async move { chat::raw_get(&self.http, &s, path_and_query).await })
@@ -152,6 +166,26 @@ impl ChatBackend for TeamsBackend {
 
     async fn fetch_media(&self, url: &str) -> Result<Vec<u8>> {
         self.call(|s| async move { media::fetch(&self.http, &s, url).await })
+            .await
+    }
+
+    async fn create_chat(&self, members: &[tymy_core::UserId]) -> Result<ConversationId> {
+        let me = format!("8:orgid:{}", self.profile.account_id);
+        let members: Vec<&str> = members.iter().map(|m| m.as_str()).collect();
+        self.call(|s| {
+            let (me, members) = (&me, &members);
+            async move { chat::create_thread(&self.http, &s, me, members).await }
+        })
+        .await
+    }
+
+    async fn search_people(&self, query: &str) -> Result<Vec<Person>> {
+        self.call(|s| async move { crate::people::search_directory(&self.http, &s, query).await })
+            .await
+    }
+
+    async fn find_external(&self, email: &str) -> Result<Vec<Person>> {
+        self.call(|s| async move { crate::people::search_external(&self.http, &s, email).await })
             .await
     }
 
