@@ -35,6 +35,7 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Týmy a chaty (2026-11-04):** oddělit týmy a chaty (zvoleno: dvě záložky). Chaty ručně
   řadit (zvoleno: připnutí + šipky); nepřipnuté podle data poslední komunikace.
 - **Značky nepřečtených (2026-11-04):** na záložkách a u týmů ukázat, kde je něco nového.
+- **Trouter (2026-11-04):** doladíme později. Do té doby zůstává obnova každých 5 s.
 
 ## 2. Architektura (návrh, realizováno)
 
@@ -94,6 +95,9 @@ podmínek služby Microsoftu.
 
 ### Fáze 1b: potřebuje odchyt provozu (HAR z web klienta)
 1. **Trouter (WebSocket):** okamžité doručování zpráv, „píše…“, přítomnost. Nahradí 5s obnovu.
+   ⏸ **Odloženo na později** (rozhodnutí uživatele 2026-11-04); potřeba HAR záznam z web klienta
+   včetně WebSocket rámců (postup v `docs/protocol/README.md`). Nejpozději před fází 2
+   (příchozí hovory chodí přes trouter).
 2. **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
 3. **Jména účastníků** 1:1 chatů z profilů (middle tier), místo procházení historie.
 4. **Odesílání souborů:** pracovní účet = OneDrive „Microsoft Teams Chat Files“ + `properties.files`;
@@ -126,7 +130,8 @@ podmínek služby Microsoftu.
 ## 5. Moje doporučení k pořadí
 1. Teď **fáze 1a** (cache, víceřádkové psaní, notifikace, lišta): bez závislosti na odchytu provozu
    a s největším přínosem pro každodenní použití.
-2. Jakmile bude k dispozici HAR záznam: **trouter**. Je předpokladem i pro příchozí hovory ve fázi 2.
+2. **Trouter** je odložený na později; doladíme ho s HAR záznamem, nejpozději před fází 2
+   (je předpokladem pro příchozí hovory).
 3. Soubory a hlášení přečtení hned po trouteru (stejný odchyt provozu).
 4. `.deb` balíček jakmile je chat použitelný na denní bázi, ještě před hovory.
 
