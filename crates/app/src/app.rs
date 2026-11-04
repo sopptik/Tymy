@@ -11,7 +11,7 @@ use iced::widget::{
     scrollable, space, span, stack, text, text_editor, text_input,
 };
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme};
-use tymy_api::auth::{self, CredentialStore, DeviceCode, SecretServiceStore};
+use tymy_api::auth::{self, BrowserLogin, CredentialStore, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config, ThemeMode};
 use tymy_core::text::rich::{self, Block, QuoteKind};
@@ -31,8 +31,8 @@ use iced::widget::text::Wrapping;
 use crate::clipboard::{self, Clip};
 use crate::notify;
 use crate::state::{
-    PeerNames, channel_name, group_teams, is_me, merge_messages, move_pin, my_mri, order_chats,
-    toggle_reaction,
+    PeerNames, channel_name, group_teams, is_me, is_unread, merge_messages, move_pin, my_mri,
+    order_chats, toggle_reaction, unread_count,
 };
 use crate::style::{self, BOLD, SEMIBOLD, accent, muted};
 use crate::tray::{self, TrayEvent, TrayHandle};
@@ -51,6 +51,8 @@ pub struct Failure {
     reauth: bool,
     /// Server odpověděl 404 (např. vlákno nového chatu ještě neexistuje).
     not_found: bool,
+    /// Server odpověděl 403 (např. konverzace, jejímž členem už uživatel není).
+    forbidden: bool,
 }
 
 impl From<Error> for Failure {
@@ -58,6 +60,7 @@ impl From<Error> for Failure {
         Self {
             reauth: matches!(e, Error::ReauthRequired(_)),
             not_found: matches!(e, Error::Http { status: 404, .. }),
+            forbidden: matches!(e, Error::Http { status: 403, .. }),
             text: e.to_string(),
         }
     }
@@ -69,6 +72,7 @@ impl From<anyhow::Error> for Failure {
             text: format!("{e:#}"),
             reauth: false,
             not_found: false,
+            forbidden: false,
         }
     }
 }
@@ -89,6 +93,27 @@ impl fmt::Debug for Session {
     }
 }
 
+/// Spojení neaktivního účtu (kvůli počtu nepřečtených).
+#[derive(Clone)]
+pub struct OtherBackend(Arc<TeamsBackend>);
+
+impl fmt::Debug for OtherBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OtherBackend")
+    }
+}
+
+/// Stav neaktivního účtu: spojení a počet nepřečtených konverzací.
+#[derive(Default)]
+struct OtherAccount {
+    backend: Option<Arc<TeamsBackend>>,
+    unread: Option<usize>,
+    error: Option<String>,
+}
+
+/// Jak často zjišťovat nepřečtené u neaktivních účtů.
+const OTHERS_REFRESH: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub enum Msg {
     Booted(Result<Option<Session>, Failure>),
@@ -98,6 +123,14 @@ pub enum Msg {
     LoginDone(Result<AccountId, Failure>),
     /// Zpět z přihlášení dalšího účtu.
     CancelLogin,
+    /// Přihlášení v prohlížeči (authorization code + PKCE).
+    StartBrowserLogin(AccountKind),
+    /// Text vložený do pole pro adresu z prohlížeče.
+    BrowserLoginInput(String),
+    /// Obsah schránky po návratu do okna (možná adresa z prohlížeče).
+    LoginClipboard(Option<String>),
+    /// Kód převzatý místním serverem.
+    BrowserCode(Result<String, Failure>),
     /// Otevřít/zavřít menu účtů v hlavičce panelu.
     ToggleAccountMenu,
     SwitchAccount(AccountId),
@@ -108,6 +141,9 @@ pub enum Msg {
     /// Odhlásit aktivní účet (smaže přihlášení i jeho cache).
     SignOut,
     SignedOut(Result<(), Failure>),
+    /// Zjistit nepřečtené u neaktivních účtů.
+    PollOthers,
+    OtherUnread(AccountId, Result<(OtherBackend, usize), Failure>),
     /// Výsledek úlohy spuštěné v daném „období“ (při přepnutí účtu se staré zahodí).
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
@@ -231,6 +267,10 @@ impl Msg {
             Msg::LoginCode(kind, r) => debug!(%kind, result = ok(r.is_ok()), "update: LoginCode"),
             Msg::LoginDone(r) => debug!(result = ok(r.is_ok()), "update: LoginDone"),
             Msg::CancelLogin => debug!("update: CancelLogin"),
+            Msg::StartBrowserLogin(kind) => debug!(%kind, "update: StartBrowserLogin"),
+            Msg::BrowserLoginInput(_) => debug!("update: BrowserLoginInput"),
+            Msg::LoginClipboard(c) => debug!(some = c.is_some(), "update: LoginClipboard"),
+            Msg::BrowserCode(r) => debug!(result = ok(r.is_ok()), "update: BrowserCode"),
             Msg::ToggleAccountMenu => debug!("update: ToggleAccountMenu"),
             Msg::SwitchAccount(id) => debug!(account = %id, "update: SwitchAccount"),
             Msg::AddAccount => debug!("update: AddAccount"),
@@ -238,6 +278,13 @@ impl Msg {
             Msg::CancelSignOut => debug!("update: CancelSignOut"),
             Msg::SignOut => debug!("update: SignOut"),
             Msg::SignedOut(r) => debug!(result = ok(r.is_ok()), "update: SignedOut"),
+            Msg::PollOthers => trace!("update: PollOthers"),
+            Msg::OtherUnread(id, r) => debug!(
+                account = %id,
+                result = ok(r.is_ok()),
+                unread = r.as_ref().map(|(_, n)| *n).unwrap_or(0),
+                "update: OtherUnread"
+            ),
             Msg::Scoped(epoch, inner) => {
                 trace!(epoch, "update: Scoped");
                 inner.log()
@@ -441,8 +488,18 @@ pub struct App {
     accounts: Vec<AccountRecord>,
     account_menu: bool,
     confirm_sign_out: bool,
+    /// Neaktivní účty: spojení a nepřečtené; počet rozběhnutých dotazů.
+    others: HashMap<AccountId, OtherAccount>,
+    others_pending: usize,
     /// Běžící přihlašování (zruší se zahozením).
     login_task: Option<iced::task::Handle>,
+    /// Typ účtu, který se právě přihlašuje.
+    login_kind: AccountKind,
+    /// Rozběhnuté přihlášení v prohlížeči.
+    browser_login: Option<BrowserLogin>,
+    /// Pole pro adresu z prohlížeče; probíhá výměna kódu za tokeny.
+    login_input: String,
+    redeeming: bool,
     conversations: Vec<Conversation>,
     peers: PeerNames,
     /// Zprávy podle konverzace, od nejstarší.
@@ -498,6 +555,9 @@ pub struct App {
     message_hits: Vec<SearchHit>,
     /// Konverzace, které mají v cache starší zprávy, než je v paměti.
     older_in_store: HashSet<ConversationId>,
+    /// Konverzace, ke kterým server odepřel přístup (403, uživatel už není členem).
+    /// V seznamech se skryjí a znovu se nenačítají.
+    forbidden: HashSet<ConversationId>,
     /// Indexace historie na pozadí: fronta, celkem, hotovo.
     index_queue: VecDeque<ConversationId>,
     index_total: usize,
@@ -547,7 +607,13 @@ impl App {
             accounts: load_accounts(),
             account_menu: false,
             confirm_sign_out: false,
+            others: HashMap::new(),
+            others_pending: 0,
             login_task: None,
+            login_kind: AccountKind::Work,
+            browser_login: None,
+            login_input: String::new(),
+            redeeming: false,
             conversations: vec![],
             peers: PeerNames::default(),
             messages: HashMap::new(),
@@ -576,6 +642,7 @@ impl App {
             highlight: None,
             message_hits: vec![],
             older_in_store: HashSet::new(),
+            forbidden: HashSet::new(),
             index_queue: VecDeque::new(),
             index_total: 0,
             index_running: false,
@@ -643,8 +710,73 @@ impl App {
             back,
         };
         self.error = None;
+        self.login_kind = kind;
+        self.browser_login = None;
         let (task, handle) =
             Task::perform(start_login(kind), move |r| Msg::LoginCode(kind, r)).abortable();
+        self.login_task = Some(handle.abort_on_drop());
+        task
+    }
+
+    /// Přihlášení v prohlížeči: otevře přihlašovací stránku, u návratové adresy
+    /// `http://localhost` čeká na kód místní server.
+    fn start_browser_login(&mut self, kind: AccountKind) -> Task<Msg> {
+        let ep = match Config::load() {
+            Ok(c) => c.endpoints(kind, None),
+            Err(e) => return self.fail(e.into()),
+        };
+        let login = match auth::start_browser_login(&ep) {
+            Ok(l) => l,
+            Err(e) => return self.fail(e.into()),
+        };
+        self.set_login(None, true);
+        self.error = None;
+        self.login_kind = kind;
+        self.login_input.clear();
+        self.redeeming = false;
+        open_url(&login.url);
+        let task = if login.uses_loopback() {
+            let waiting = login.clone();
+            let (task, handle) = Task::perform(
+                async move { waiting.wait_loopback().await.map_err(Failure::from) },
+                Msg::BrowserCode,
+            )
+            .abortable();
+            self.login_task = Some(handle.abort_on_drop());
+            task
+        } else {
+            self.login_task = None;
+            Task::none()
+        };
+        self.browser_login = Some(login);
+        task
+    }
+
+    /// Zkusí z textu (vložená adresa, schránka) získat kód a vyměnit ho za tokeny.
+    fn accept_login_input(&mut self, input: &str, manual: bool) -> Task<Msg> {
+        let Some(login) = self.browser_login.clone() else {
+            return Task::none();
+        };
+        if self.redeeming {
+            return Task::none();
+        }
+        match login.code_from(input, manual) {
+            Ok(Some(code)) => self.redeem(login, code),
+            Ok(None) => Task::none(),
+            Err(e) => {
+                tracing::warn!(error = %e, "přihlášení v prohlížeči");
+                self.error = Some(e.to_string());
+                Task::none()
+            }
+        }
+    }
+
+    fn redeem(&mut self, login: BrowserLogin, code: String) -> Task<Msg> {
+        self.redeeming = true;
+        self.error = None;
+        let kind = self.login_kind;
+        let (task, handle) =
+            Task::perform(finish_browser_login(kind, login, code), Msg::LoginDone).abortable();
         self.login_task = Some(handle.abort_on_drop());
         task
     }
@@ -689,11 +821,14 @@ impl App {
             iced::window::close_requests().map(Msg::CloseRequested),
         ];
         match self.phase {
-            Phase::Ready(_) => Subscription::batch(
-                always
-                    .into_iter()
-                    .chain([iced::time::every(REFRESH).map(|_| Msg::Tick)]),
-            ),
+            Phase::Ready(_) => Subscription::batch(always.into_iter().chain([
+                iced::time::every(REFRESH).map(|_| Msg::Tick),
+                if self.accounts.len() > 1 {
+                    iced::time::every(OTHERS_REFRESH).map(|_| Msg::PollOthers)
+                } else {
+                    Subscription::none()
+                },
+            ])),
             _ => Subscription::batch(always),
         }
     }
@@ -707,7 +842,8 @@ impl App {
 
     fn fail(&mut self, f: Failure) -> Task<Msg> {
         tracing::error!(error = %f.text, reauth = f.reauth, "chyba");
-        if f.reauth {
+        // při přihlašování (i dalšího účtu) zůstat na obrazovce přihlášení s návratem zpět
+        if f.reauth && !matches!(self.phase, Phase::Login { .. }) {
             self.phase = Phase::Login {
                 code: None,
                 busy: false,
@@ -719,25 +855,19 @@ impl App {
     }
 
     fn unread(&self, c: &Conversation) -> bool {
-        let Some(last) = &c.last_message else {
+        let Some(s) = self.session() else {
             return false;
         };
-        let n = |id: &MessageId| id.as_str().parse::<u64>().unwrap_or(0);
-        let read = c
-            .read_up_to
-            .iter()
-            .chain(self.read_locally.get(&c.id))
-            .map(n)
-            .max()
-            .unwrap_or(0);
-        let mine = self.session().is_some_and(|s| is_me(&s.profile, last));
-        !mine && last.is_user_content() && n(&last.id) > read
+        !self.forbidden.contains(&c.id) && is_unread(c, &s.profile, self.read_locally.get(&c.id))
     }
 
     fn fetch_messages(&self, id: ConversationId, cursor: Option<String>) -> Task<Msg> {
         let Some(s) = self.session() else {
             return Task::none();
         };
+        if self.forbidden.contains(&id) {
+            return Task::none();
+        }
         let backend = s.backend.clone();
         let older = cursor.is_some();
         Task::perform(
@@ -904,6 +1034,44 @@ impl App {
             iced::clipboard::write_primary(text),
             self.show_toast(toast),
         ])
+    }
+
+    /// Spustí zjištění nepřečtených u všech neaktivních účtů (pokud už neběží).
+    fn poll_others(&mut self) -> Task<Msg> {
+        if self.others_pending > 0 {
+            return Task::none();
+        }
+        let Some(active) = self.session().map(|s| s.profile.account_id.clone()) else {
+            return Task::none();
+        };
+        let tasks: Vec<_> = self
+            .accounts
+            .iter()
+            .filter(|a| a.id != active)
+            .map(|a| {
+                let backend = self.others.get(&a.id).and_then(|o| o.backend.clone());
+                let record = a.clone();
+                let id = a.id.clone();
+                Task::perform(other_unread(record, backend), move |r| {
+                    Msg::OtherUnread(id.clone(), r)
+                })
+            })
+            .collect();
+        self.others_pending = tasks.len();
+        Task::batch(tasks)
+    }
+
+    /// Nepřečtené konverzace ve všech neaktivních účtech.
+    fn others_unread(&self) -> usize {
+        self.others.values().filter_map(|o| o.unread).sum()
+    }
+
+    /// Server odepřel přístup ke konverzaci: skrýt ji a dál nenačítat.
+    fn mark_forbidden(&mut self, id: ConversationId, e: &Failure) {
+        if self.forbidden.insert(id.clone()) {
+            tracing::warn!(%id, error = %e.text, "konverzace bez přístupu, skrývám ji");
+        }
+        self.index_queue.retain(|c| c != &id);
     }
 
     /// Krátké oznámení nad vláknem.
@@ -1166,7 +1334,7 @@ impl App {
         self.index_queue = self
             .conversations
             .iter()
-            .filter(|c| !self.is_draft(&c.id))
+            .filter(|c| !self.is_draft(&c.id) && !self.forbidden.contains(&c.id))
             .map(|c| c.id.clone())
             .collect();
         self.index_total = self.index_queue.len();
@@ -1293,7 +1461,8 @@ impl App {
         let Some(tray) = self.tray.clone() else {
             return Task::none();
         };
-        let n = self.conversations.iter().filter(|c| self.unread(c)).count();
+        // v liště součet za všechny účty
+        let n = self.conversations.iter().filter(|c| self.unread(c)).count() + self.others_unread();
         if n == self.tray_unread {
             return Task::none();
         }
@@ -1320,7 +1489,13 @@ impl App {
                 tracing::info!(account = %session.profile.account_id, "účet načten");
                 self.load_cached(&session);
                 self.phase = Phase::Ready(session);
-                self.fetch_conversations()
+                Task::batch([
+                    self.fetch_conversations(),
+                    // nepřečtené ostatních účtů až po rozběhnutí aktivního
+                    Task::perform(tokio::time::sleep(Duration::from_secs(3)), |_| {
+                        Msg::PollOthers
+                    }),
+                ])
             }
             Msg::Booted(Ok(None)) => {
                 self.accounts = load_accounts();
@@ -1350,14 +1525,29 @@ impl App {
                 self.login_task = Some(handle.abort_on_drop());
                 task
             }
-            Msg::LoginCode(_, Err(e)) | Msg::LoginDone(Err(e)) => {
+            Msg::LoginCode(_, Err(e)) | Msg::LoginDone(Err(e)) | Msg::BrowserCode(Err(e)) => {
                 self.login_task = None;
+                self.browser_login = None;
+                self.redeeming = false;
                 self.set_login(None, false);
                 self.fail(e)
             }
+            Msg::StartBrowserLogin(kind) => self.start_browser_login(kind),
+            Msg::BrowserLoginInput(text) => {
+                self.login_input = text.clone();
+                self.accept_login_input(&text, true)
+            }
+            Msg::LoginClipboard(Some(text)) => self.accept_login_input(&text, false),
+            Msg::LoginClipboard(None) => Task::none(),
+            Msg::BrowserCode(Ok(code)) => match self.browser_login.clone() {
+                Some(login) if !self.redeeming => self.redeem(login, code),
+                _ => Task::none(),
+            },
             Msg::LoginDone(Ok(id)) => self.load_account(Some(id)),
             Msg::CancelLogin => {
                 self.login_task = None;
+                self.browser_login = None;
+                self.redeeming = false;
                 if let Phase::Login {
                     back: Some(session),
                     ..
@@ -1422,6 +1612,28 @@ impl App {
                 self.load_account(None)
             }
             Msg::Scoped(..) => Task::none(),
+            Msg::PollOthers => self.poll_others(),
+            Msg::OtherUnread(id, r) => {
+                self.others_pending = self.others_pending.saturating_sub(1);
+                let entry = self.others.entry(id.clone()).or_default();
+                match r {
+                    Ok((backend, n)) => {
+                        entry.backend = Some(backend.0);
+                        entry.unread = Some(n);
+                        entry.error = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!(account = %id, error = %e.text, "nepřečtené neaktivního účtu");
+                        entry.unread = None;
+                        entry.error = Some(if e.reauth {
+                            "přihlášení vypršelo".into()
+                        } else {
+                            "nedostupné".into()
+                        });
+                    }
+                }
+                Task::none()
+            }
 
             Msg::OpenUrl(url) => {
                 open_url(&url);
@@ -1626,6 +1838,10 @@ impl App {
                     self.messages.entry(id).or_default();
                     return Task::none();
                 }
+                if e.forbidden {
+                    self.mark_forbidden(id, &e);
+                    return Task::none();
+                }
                 self.fail(e)
             }
             Msg::LoadOlder => {
@@ -1751,6 +1967,10 @@ impl App {
             Msg::OpenPerson(person) => self.open_person(person),
             Msg::WindowFocus(f) => {
                 self.focused = f;
+                // návrat z prohlížeče: adresa stránky může být ve schránce
+                if f && self.browser_login.is_some() && !self.redeeming {
+                    return iced::clipboard::read().map(Msg::LoginClipboard);
+                }
                 Task::none()
             }
             Msg::NotificationClicked(id) => {
@@ -2026,6 +2246,9 @@ impl App {
             Msg::Indexed(conv, Err(e)) => {
                 tracing::warn!(%conv, error = %e.text, "indexace konverzace selhala, přeskakuji");
                 self.index_queue.retain(|c| c != &conv);
+                if e.forbidden {
+                    self.mark_forbidden(conv.clone(), &e);
+                }
                 if e.reauth {
                     self.index_running = false;
                     return self.fail(e);
@@ -2348,6 +2571,7 @@ impl App {
         back: Option<&'a Session>,
     ) -> Element<'a, Msg> {
         let content: Element<'_, Msg> = match code {
+            _ if self.browser_login.is_some() => self.browser_login_view(),
             Some(code) => column![
                 text("Přihlášení").size(22).font(BOLD),
                 text("1. Otevřete přihlašovací stránku Microsoftu").style(muted),
@@ -2376,6 +2600,13 @@ impl App {
                 text("3. Potvrďte přihlášení. Okno pak pokračuje samo.")
                     .size(13)
                     .style(muted),
+                space().height(4),
+                button(
+                    text("Organizace přihlášení kódem blokuje? Přihlásit v prohlížeči").size(12)
+                )
+                .padding(0)
+                .style(|t: &Theme, s| style::link(t, s, false))
+                .on_press(Msg::StartBrowserLogin(self.login_kind)),
             ]
             .spacing(10)
             .into(),
@@ -2398,7 +2629,19 @@ impl App {
                 .width(Length::Fill)
                 .padding([11, 20])
                 .style(style::primary)
+                .on_press_maybe((!busy).then_some(Msg::StartBrowserLogin(AccountKind::Work))),
+                button(
+                    text("Přihlásit pracovní účet kódem")
+                        .center()
+                        .width(Length::Fill)
+                )
+                .width(Length::Fill)
+                .padding([11, 20])
+                .style(style::secondary)
                 .on_press_maybe((!busy).then_some(Msg::StartLogin(AccountKind::Work))),
+                text("Kódem se lze přihlásit i z jiného zařízení; některé organizace ho blokují.")
+                    .size(11)
+                    .style(muted),
                 button(
                     text("Přihlásit osobní účet (experimentální)")
                         .center()
@@ -2426,10 +2669,70 @@ impl App {
                 .push(space().height(8))
                 .push(text("Nebo pokračovat účtem").size(12).style(muted));
             for a in &self.accounts {
-                col = col.push(account_item(a, false, Msg::SwitchAccount(a.id.clone())));
+                col = col.push(account_item(
+                    a,
+                    false,
+                    None,
+                    Msg::SwitchAccount(a.id.clone()),
+                ));
             }
         }
         centered(container(col).padding(32).max_width(440).style(style::card))
+    }
+
+    /// Krok přihlášení v prohlížeči: odkaz na stránku a pole pro adresu, kde prohlížeč skončil.
+    fn browser_login_view(&self) -> Element<'_, Msg> {
+        let Some(login) = &self.browser_login else {
+            return space().into();
+        };
+        let mut col = column![
+            text("Přihlášení v prohlížeči").size(22).font(BOLD),
+            text("1. V prohlížeči se otevřela přihlašovací stránka Microsoftu.").style(muted),
+            row![
+                button(text("Otevřít znovu").size(12))
+                    .padding([4, 10])
+                    .style(style::secondary)
+                    .on_press(Msg::OpenUrl(login.url.clone())),
+                copy_button(&login.url, "Odkaz zkopírován"),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10);
+        if login.uses_loopback() {
+            col = col.push(
+                text("2. Přihlaste se. Okno pak pokračuje samo.")
+                    .size(13)
+                    .style(muted),
+            );
+        } else {
+            col = col
+                .push(
+                    text(
+                        "2. Po přihlášení zkopírujte adresu stránky, na které prohlížeč \
+                         skončí (Ctrl+L, Ctrl+C), a vraťte se sem. Tymy ji převezme ze \
+                         schránky samo.",
+                    )
+                    .size(13)
+                    .style(muted),
+                )
+                .push(
+                    text_input("Nebo adresu vložte sem", &self.login_input)
+                        .on_input(Msg::BrowserLoginInput)
+                        .padding([8, 12])
+                        .size(13)
+                        .style(style::search_input),
+                );
+        }
+        col = col.push(
+            text(if self.redeeming {
+                "Ověřuji přihlášení…".to_owned()
+            } else {
+                self.toast.clone().unwrap_or_default()
+            })
+            .size(12)
+            .style(style::accent),
+        );
+        col.into()
     }
 
     /// Rozbalené menu účtů pod hlavičkou panelu (prázdné, když je zavřené).
@@ -2441,7 +2744,23 @@ impl App {
         let mut col = Column::new().spacing(2);
         for a in &self.accounts {
             let is_active = &a.id == active;
-            col = col.push(account_item(a, is_active, Msg::SwitchAccount(a.id.clone())));
+            let status = if is_active {
+                AccountStatus::Unread(self.conversations.iter().filter(|c| self.unread(c)).count())
+            } else {
+                match self.others.get(&a.id) {
+                    Some(OtherAccount {
+                        unread: Some(n), ..
+                    }) => AccountStatus::Unread(*n),
+                    Some(OtherAccount { error: Some(e), .. }) => AccountStatus::Note(e.clone()),
+                    _ => AccountStatus::Note("zjišťuji…".into()),
+                }
+            };
+            col = col.push(account_item(
+                a,
+                is_active,
+                Some(status),
+                Msg::SwitchAccount(a.id.clone()),
+            ));
         }
         col = col.push(
             button(text("＋  Přidat účet").size(13))
@@ -2520,6 +2839,17 @@ impl App {
                 ]
                 .spacing(1)
                 .width(Length::Fill),
+                match self.others_unread() {
+                    0 => Element::from(space().width(0)),
+                    n => iced::widget::tooltip(
+                        badge(n),
+                        container(text("Nepřečtené v ostatních účtech").size(11))
+                            .padding([3, 8])
+                            .style(style::tooltip),
+                        iced::widget::tooltip::Position::Bottom,
+                    )
+                    .into(),
+                },
                 text(if self.account_menu { "▴" } else { "▾" })
                     .size(12)
                     .style(muted),
@@ -2606,7 +2936,9 @@ impl App {
     /// Záložka Chaty: připnuté v ručním pořadí, ostatní podle poslední komunikace, pak lidé.
     fn chat_list<'a>(&'a self, session: &'a Session, query: &str) -> Vec<Element<'a, Msg>> {
         let matches = |c: &&Conversation| {
-            c.is_chat() && (query.is_empty() || self.peers.title(c).to_lowercase().contains(query))
+            c.is_chat()
+                && self.listed(c)
+                && (query.is_empty() || self.peers.title(c).to_lowercase().contains(query))
         };
         let (pinned, rest) = order_chats(self.conversations.iter().filter(matches), &self.pins);
         let mut items: Vec<Element<'a, Msg>> = vec![];
@@ -2721,12 +3053,17 @@ impl App {
     }
 
     /// Záložka Týmy: týmy podle názvu, pod nimi kanály.
+    /// Zobrazit konverzaci v seznamu? Nepřístupné ne (kromě právě otevřené).
+    fn listed(&self, c: &Conversation) -> bool {
+        !self.forbidden.contains(&c.id) || self.selected.as_ref() == Some(&c.id)
+    }
+
     fn team_list<'a>(&'a self, query: &str) -> Vec<Element<'a, Msg>> {
         let mut items: Vec<Element<'a, Msg>> = vec![];
         let channels = self
             .conversations
             .iter()
-            .filter(|c| c.kind == ConversationKind::Channel);
+            .filter(|c| c.kind == ConversationKind::Channel && self.listed(c));
         for g in group_teams(channels) {
             let team_match = g.name.to_lowercase().contains(query);
             let shown: Vec<_> = g
@@ -2952,6 +3289,27 @@ impl App {
         .padding([12, 20])
         .width(Length::Fill)
         .style(style::header);
+
+        if self.forbidden.contains(&conv.id) {
+            let notice = centered(
+                column![
+                    text("K této konverzaci nemáte přístup")
+                        .size(15)
+                        .font(SEMIBOLD),
+                    text(
+                        "Server hlásí, že nejste jejím členem (například jste opustili tým \
+                         nebo vás z něj odebrali). V seznamu se už nezobrazí."
+                    )
+                    .size(13)
+                    .style(muted)
+                    .center(),
+                ]
+                .spacing(8)
+                .max_width(420)
+                .align_x(iced::Alignment::Center),
+            );
+            return column![header, notice].into();
+        }
 
         let mut list = Column::new().spacing(3).padding([16, 24]);
         // Some(true) = jsou starší zprávy (na serveru nebo aspoň v cache), None = načítá se
@@ -3421,8 +3779,19 @@ fn copy_button<'a>(value: &str, toast: &'static str) -> Element<'a, Msg> {
         .into()
 }
 
-/// Položka účtu v menu: avatar, jméno, e-mail a typ; aktivní účet má ✓.
-fn account_item<'a>(a: &AccountRecord, active: bool, msg: Msg) -> Element<'a, Msg> {
+/// Co ukázat u účtu v menu vpravo.
+enum AccountStatus {
+    Unread(usize),
+    Note(String),
+}
+
+/// Položka účtu v menu: avatar, jméno, e-mail a typ, nepřečtené; aktivní účet má ✓.
+fn account_item<'a>(
+    a: &AccountRecord,
+    active: bool,
+    status: Option<AccountStatus>,
+    msg: Msg,
+) -> Element<'a, Msg> {
     let name = a.display_name.clone().unwrap_or_else(|| "Účet".into());
     let kind = match a.kind {
         AccountKind::Work => "pracovní",
@@ -3441,6 +3810,11 @@ fn account_item<'a>(a: &AccountRecord, active: bool, msg: Msg) -> Element<'a, Ms
             ]
             .spacing(1)
             .width(Length::Fill),
+            match status {
+                Some(AccountStatus::Unread(n)) if n > 0 => badge(n),
+                Some(AccountStatus::Note(t)) => text(t).size(11).style(muted).into(),
+                _ => space().width(0).into(),
+            },
             text(if active { "✓" } else { "" })
                 .size(13)
                 .style(style::accent),
@@ -4268,14 +4642,55 @@ async fn start_login(kind: AccountKind) -> Result<DeviceCode, Failure> {
 }
 
 async fn finish_login(kind: AccountKind, code: DeviceCode) -> Result<AccountId, Failure> {
-    let mut config = Config::load()?;
-    let ep = config.endpoints(kind, None);
+    let ep = Config::load()?.endpoints(kind, None);
     let tokens = auth::poll_device_code(&Http::new()?, &ep, &code).await?;
+    save_login(kind, tokens).await
+}
+
+async fn finish_browser_login(
+    kind: AccountKind,
+    login: BrowserLogin,
+    code: String,
+) -> Result<AccountId, Failure> {
+    let ep = Config::load()?.endpoints(kind, None);
+    let tokens = auth::redeem_code(&Http::new()?, &ep, &login, &code).await?;
+    save_login(kind, tokens).await
+}
+
+/// Uloží refresh token do Secret Service a účet do konfigurace.
+async fn save_login(kind: AccountKind, tokens: auth::TokenSet) -> Result<AccountId, Failure> {
+    let mut config = Config::load()?;
     let store = SecretServiceStore::new().await?;
     let profile = complete_login(kind, &tokens, &store).await?;
     config.upsert(AccountRecord::from_profile(&profile, None));
     config.save()?;
     Ok(profile.account_id)
+}
+
+/// Počet nepřečtených konverzací neaktivního účtu (spojení se vytvoří při prvním dotazu
+/// a pak se používá znovu, ať se zbytečně neobnovují tokeny).
+async fn other_unread(
+    record: AccountRecord,
+    backend: Option<Arc<TeamsBackend>>,
+) -> Result<(OtherBackend, usize), Failure> {
+    let backend = match backend {
+        Some(b) => b,
+        None => {
+            let ep = Config::load()?.endpoints(record.kind, record.authority.as_deref());
+            let store = SecretServiceStore::new().await?;
+            Arc::new(TeamsBackend::new(
+                record.profile(),
+                ep,
+                Http::new()?,
+                Arc::new(store),
+            ))
+        }
+    };
+    let convs = backend.conversations().await?;
+    Ok((
+        OtherBackend(backend),
+        unread_count(&convs, &record.profile()),
+    ))
 }
 
 /// Smaže přihlášení účtu ze Secret Service a odebere ho z konfigurace.

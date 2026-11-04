@@ -20,11 +20,19 @@ pub struct Endpoints {
     pub authz_url: String,
     /// Výchozí chat služba, pokud ji authz odpověď neuvede.
     pub chat_service: String,
+    /// Návratová adresa přihlášení v prohlížeči (authorization code + PKCE).
+    /// `http://localhost…` = kód převezme místní server, jinak adresu vloží uživatel.
+    pub redirect_uri: String,
 }
 
 /// Teams desktop klient (first-party, public client, podporuje device code flow).
 /// Ověřeno: používají ho veřejné nástroje (AADInternals, roadtx) pro device code přihlášení.
 const TEAMS_DESKTOP_CLIENT_ID: &str = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
+
+/// Návratová adresa přihlášení v prohlížeči: místní server Tymy (port se doplní).
+/// Ověřeno 2026-11-04 s pracovním účtem. `…/oauth2/nativeclient` v systémovém prohlížeči
+/// nefunguje: Microsoft adresu s kódem hned přesměruje na `/common/wrongplace`.
+const LOOPBACK_REDIRECT: &str = "http://localhost";
 
 impl Endpoints {
     pub fn defaults(kind: AccountKind) -> Self {
@@ -35,6 +43,7 @@ impl Endpoints {
                 skype_scope: "https://api.spaces.skype.com/.default".into(),
                 authz_url: "https://authsvc.teams.microsoft.com/v1.0/authz".into(),
                 chat_service: "https://emea.ng.msg.teams.microsoft.com".into(),
+                redirect_uri: LOOPBACK_REDIRECT.into(),
             },
             // NEOVĚŘENO: hodnoty pro osobní účty jsou hypotéza, kterou je nutné potvrdit
             // odchytem provozu teams.live.com (fáze 0, krok 1).
@@ -44,6 +53,7 @@ impl Endpoints {
                 skype_scope: "https://api.fl.spaces.skype.com/.default".into(),
                 authz_url: "https://teams.live.com/api/auth/v1.0/authz/consumer".into(),
                 chat_service: "https://msgapi.teams.live.com".into(),
+                redirect_uri: LOOPBACK_REDIRECT.into(),
             },
         }
     }
@@ -56,13 +66,27 @@ impl Endpoints {
         macro_rules! apply {
             ($($f:ident),*) => { $( if let Some(v) = &o.$f { e.$f = v.clone(); } )* };
         }
-        apply!(authority, client_id, skype_scope, authz_url, chat_service);
+        apply!(
+            authority,
+            client_id,
+            skype_scope,
+            authz_url,
+            chat_service,
+            redirect_uri
+        );
         e
     }
 
     pub(crate) fn device_code_url(&self) -> String {
         format!(
             "{}/oauth2/v2.0/devicecode",
+            self.authority.trim_end_matches('/')
+        )
+    }
+
+    pub(crate) fn authorize_url(&self) -> String {
+        format!(
+            "{}/oauth2/v2.0/authorize",
             self.authority.trim_end_matches('/')
         )
     }
@@ -92,6 +116,7 @@ pub struct EndpointOverrides {
     pub skype_scope: Option<String>,
     pub authz_url: Option<String>,
     pub chat_service: Option<String>,
+    pub redirect_uri: Option<String>,
 }
 
 #[cfg(test)]

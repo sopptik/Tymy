@@ -94,6 +94,31 @@ pub fn channel_name(c: &Conversation) -> String {
 }
 
 /// Kdo jsem: podle MRI (obsahuje object id) nebo, u osobních účtů, podle jména.
+/// Je konverzace nepřečtená? Poslední zpráva je cizí, uživatelská a novější než přečtené
+/// (podle serveru, případně podle `read_locally` z tohoto okna).
+pub fn is_unread(c: &Conversation, me: &Profile, read_locally: Option<&MessageId>) -> bool {
+    let Some(last) = &c.last_message else {
+        return false;
+    };
+    let n = |id: &MessageId| id.as_str().parse::<u64>().unwrap_or(0);
+    let read = c
+        .read_up_to
+        .iter()
+        .chain(read_locally)
+        .map(n)
+        .max()
+        .unwrap_or(0);
+    c.kind != ConversationKind::System
+        && !is_me(me, last)
+        && last.is_user_content()
+        && n(&last.id) > read
+}
+
+/// Počet nepřečtených konverzací (pro neaktivní účet, bez lokálního čtení).
+pub fn unread_count(convs: &[Conversation], me: &Profile) -> usize {
+    convs.iter().filter(|c| is_unread(c, me, None)).count()
+}
+
 pub fn is_me(me: &Profile, m: &Message) -> bool {
     if let Some(sender) = &m.sender
         && sender.as_str().ends_with(me.account_id.as_str())
@@ -281,6 +306,29 @@ mod tests {
         c.last_activity =
             ms.and_then(|ms| chrono::TimeZone::timestamp_millis_opt(&chrono::Utc, ms).single());
         c
+    }
+
+    #[test]
+    fn counts_unread_conversations() {
+        let me = me();
+        let unread = |last: Option<Message>, read: Option<&str>| {
+            let mut c = conv(None);
+            c.last_message = last;
+            c.read_up_to = read.map(Into::into);
+            c
+        };
+        let convs = [
+            unread(Some(msg("20", "eva", "Eva")), Some("10")), // nepřečtená
+            unread(Some(msg("20", "eva", "Eva")), Some("20")), // přečtená
+            unread(Some(msg("30", "oid-me", "Já")), Some("10")), // moje zpráva
+            unread(Some(msg("40", "eva", "Eva")), None),       // nikdy nečtená
+            unread(None, None),                                // prázdná
+        ];
+        assert_eq!(unread_count(&convs, &me), 2);
+        assert!(
+            !is_unread(&convs[0], &me, Some(&"20".into())),
+            "přečteno v okně"
+        );
     }
 
     #[test]

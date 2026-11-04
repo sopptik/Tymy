@@ -97,7 +97,10 @@ podmínek služby Microsoftu.
 | Odpověď na zprávu | 🟡 zobrazení ✅, odeslání neověřeno proti produkci |
 | Reakce, úprava a mazání vlastních zpráv | 🟡 UI ✅, volání neověřena proti produkci |
 | Hledání ve zprávách + indexace historie na pozadí | ✅ |
-| Přepínání účtů, přidání a odhlášení účtu | 🟡 menu a Zpět ✅, přepnutí mezi dvěma účty neověřeno |
+| Přepínání účtů, přidání a odhlášení účtu | ✅ ověřeno se dvěma pracovními účty (odhlášení neověřeno) |
+| Nepřečtené v neaktivních účtech (menu, odznak u jména, lišta) | ✅ |
+| Přihlášení v prohlížeči (PKCE, `http://localhost`) | ✅ ověřeno (druhý pracovní účet) |
+| Opuštěné týmy a kanály bez přístupu (403) | ✅ skryté |
 | Skok z citace odpovědi na původní zprávu | 🟡 hotovo, klik zatím neověřen na snímku |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
@@ -127,7 +130,9 @@ podmínek služby Microsoftu.
    „Přidat účet“ se Zpět, odhlášení s potvrzením, které smaže token i cache účtu). Aktivní je
    vždy jeden účet; naposledy použitý se pamatuje (`settings.toml` → `account`). Při přepnutí se
    zahodí stav i výsledky rozběhnutých úloh předchozího účtu. Odkaz i kód přihlášení jdou
-   zkopírovat. Později: nepřečtené a notifikace i z neaktivních účtů.
+   zkopírovat. ✅ Nepřečtené z neaktivních účtů: jednou za minutu se stáhne jejich seznam
+   konverzací (spojení se drží, tokeny se zbytečně neobnovují); počet je v menu u účtu,
+   jako odznak u jména a v součtu v liště. Později: notifikace z neaktivních účtů.
 8. ✅ **Hledání ve zprávách:** fulltext SQLite FTS5 uvnitř šifrované cache (bez diakritiky,
    předpony slov, úryvky se zvýrazněním), výsledky v postranním panelu pod chaty a lidmi,
    klik otevře zprávu v kontextu a zvýrazní ji. Indexace historie na pozadí: po startu postupně
@@ -144,10 +149,18 @@ podmínek služby Microsoftu.
 4. **Odesílání souborů:** pracovní účet = OneDrive „Microsoft Teams Chat Files“ + `properties.files`;
    osobní = AMS upload. Drag & drop, dialog, průběh.
 5. **Osobní účty:** ověřit autoritu, client id, scope, authz a chat host.
-6. **Přihlášení s PKCE** pro organizace, které blokují device code. Uživatel narazil (2026-11-04)
+6. ✅ **Přihlášení s PKCE** pro organizace, které blokují device code. Uživatel narazil (2026-11-04)
    u druhého pracovního účtu na chybu 53003 (blokováno podmíněným přístupem, zařízení
    „Unregistered“). Pokud politika blokuje jen device code, pomůže přihlášení v prohlížeči;
    pokud vyžaduje spravované zařízení, neprojde žádný neoficiální klient.
+   Hotovo (2026-11-04): tlačítko „Přihlásit pracovní účet v prohlížeči“ (a odkaz z obrazovky
+   s kódem). Otevře systémový prohlížeč; adresu, na které prohlížeč skončí, Tymy převezme
+   ze schránky při návratu do okna, nebo z pole. Návratová adresa jde přepsat v
+   `endpoints.toml` (`redirect_uri`, s `http://localhost` bez kopírování). Ověřeno: výchozí je
+   `http://localhost` (místní server převezme kód sám), uživatel se tak přihlásil i účtem
+   s chybou 53003 u kódu. `…/oauth2/nativeclient` v systémovém prohlížeči nefunguje
+   (Microsoft přesměruje na `/common/wrongplace` a kód se ztratí). Přihlášení v prohlížeči
+   je teď hlavní tlačítko, kód je druhá možnost.
 
 ### Fáze 1c: distribuce
 1. Balíček `.deb` (`cargo-deb`): `.desktop` soubor, ikony, autostart (XDG).
