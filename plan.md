@@ -210,12 +210,18 @@ podmínek služby Microsoftu.
 4. Volitelně přijetí/odmítnutí pozvánky.
 
 ## 5. Moje doporučení k pořadí
-1. Teď **fáze 1a** (cache, víceřádkové psaní, notifikace, lišta): bez závislosti na odchytu provozu
-   a s největším přínosem pro každodenní použití.
-2. **Trouter** je odložený na později; doladíme ho s HAR záznamem, nejpozději před fází 2
-   (je předpokladem pro příchozí hovory).
-3. Soubory a hlášení přečtení hned po trouteru (stejný odchyt provozu).
-4. `.deb` balíček jakmile je chat použitelný na denní bázi, ještě před hovory.
+Stav 2026-11-04: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu
+(hlášení přečtení, jména účastníků, přihlášení v prohlížeči, stránkování seznamu).
+1. **Souhrnný test uživatelem** (domluveno): reakce, úpravy a mazání, odpovědi, obrázky,
+   nový 1:1 a skupinový chat, hlášení přečtení (shoduje se s mobilem/webem?), skok z citace,
+   odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení, instalace `.deb`.
+2. **Společný odchyt provozu (HAR)** z web klienta, v tomto pořadí důležitosti:
+   trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
+   případně osobní účet (teams.live.com) a kalendář.
+3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů),
+   pak **soubory**.
+4. Fáze 2 (hovory) až po trouteru; fáze 3 (kalendář) může jít paralelně, pokud HAR ukáže
+   endpoint kalendáře dostupný se stejným přihlášením.
 
 8. ✅ **Posouvání vlákna:** vždy na nejnovější zprávu, overlay „Nové zprávy“ při čtení starších.
 9. ✅ **Logování:** `--log=debug|production`, `TYMY_LOG`, `settings.toml`; `~/.local/state/tymy/logs`.
