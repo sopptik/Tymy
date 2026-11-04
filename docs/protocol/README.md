@@ -48,7 +48,7 @@ Hlavička `Authentication: skypetoken=<token>`. Id konverzací se v cestě kódu
 |---|---|---|
 | Seznam konverzací | `GET /v1/users/ME/conversations?view=msnp24Equivalent&pageSize=200` | ✅ |
 | Historie | `GET /v1/users/ME/conversations/{id}/messages?view=msnp24Equivalent\|supportsMessageProperties&pageSize=50&startTime=1`; starší stránky přes `_metadata.backwardLink` | ✅ |
-| Odeslání | `POST /v1/users/ME/conversations/{id}/messages`, tělo `{content, messagetype: "RichText/Html", contenttype: "text", clientmessageid, imdisplayname}` | 🟡 |
+| Odeslání | `POST /v1/users/ME/conversations/{id}/messages`, tělo `{content, messagetype: "RichText/Html", contenttype: "text", clientmessageid, imdisplayname}` | ✅ |
 
 Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `messagetype`
 (`RichText/Html`, `Text`, `ThreadActivity/*`, `Event/*`, `Control/Typing`, …),
@@ -86,7 +86,7 @@ pro příchozí hovory ve fázi 2).
 ## Otevřené body
 
 - [x] Ověřit přihlášení, seznam chatů a historii pro pracovní účet (2026-11-04)
-- [ ] Ověřit odeslání zprávy (`tymy-cli send` / okno)
+- [x] Ověřit odeslání zprávy (z okna, 2026-11-04)
 - [ ] Zjistit skutečné hodnoty pro osobní účty (autorita, client id, scope, authz, chat host)
 - [x] Ověřit long-poll: nefunguje (410 Gone)
 - [ ] Implementovat trouter (WebSocket) pro okamžité doručování

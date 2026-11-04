@@ -14,7 +14,7 @@ Prototyp: okno `tymy` (chaty, historie, odesílání) a vývojářské CLI `tymy
 
 | Fáze | Obsah | Stav |
 |---|---|---|
-| 0 | Přihlášení, seznam chatů, zprávy (CLI) | ověřeno pro pracovní účet; real-time chybí (trouter) |
+| 0 | Přihlášení, seznam chatů, historie, odesílání | ověřeno pro pracovní účet; real-time chybí (trouter) |
 | 1 | GUI (iced), soubory, notifikace, tray, `.deb` | prototyp okna hotový |
 | 2 | Hovory a videohovory (výzkum) | — |
 | 3 | Kalendář a připomínky schůzek | — |
