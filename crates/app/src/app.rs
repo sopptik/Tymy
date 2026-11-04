@@ -125,12 +125,14 @@ impl fmt::Debug for OtherBackend {
     }
 }
 
-/// Stav neaktivního účtu: spojení a počet nepřečtených konverzací.
+/// Stav neaktivního účtu: spojení, počet nepřečtených konverzací a poslední známé zprávy
+/// v chatech (kvůli notifikacím; `None` = ještě nic, první dotaz jen zapamatuje stav).
 #[derive(Default)]
 struct OtherAccount {
     backend: Option<Arc<TeamsBackend>>,
     unread: Option<usize>,
     error: Option<String>,
+    last_seen: Option<HashMap<ConversationId, u64>>,
 }
 
 /// Jak často zjišťovat nepřečtené u neaktivních účtů.
@@ -169,7 +171,12 @@ pub enum Msg {
     ToggleAutostart,
     /// Zjistit nepřečtené u neaktivních účtů.
     PollOthers,
-    OtherUnread(AccountId, Result<(OtherBackend, usize), Failure>),
+    OtherUnread(
+        AccountId,
+        Result<(OtherBackend, Vec<Conversation>), Failure>,
+    ),
+    /// Klik na notifikaci z neaktivního účtu: přepnout na něj a otevřít chat.
+    OtherNotificationClicked(AccountId, ConversationId),
     /// Výsledek úlohy spuštěné v daném „období“ (při přepnutí účtu se staré zahodí).
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
@@ -324,9 +331,12 @@ impl Msg {
             Msg::OtherUnread(id, r) => debug!(
                 account = %id,
                 result = ok(r.is_ok()),
-                unread = r.as_ref().map(|(_, n)| *n).unwrap_or(0),
+                conversations = r.as_ref().map(|(_, c)| c.len()).unwrap_or(0),
                 "update: OtherUnread"
             ),
+            Msg::OtherNotificationClicked(a, c) => {
+                debug!(account = %a, conversation = %c, "update: OtherNotificationClicked")
+            }
             Msg::Scoped(epoch, inner) => {
                 trace!(epoch, "update: Scoped");
                 inner.log()
@@ -555,6 +565,8 @@ pub struct App {
     others_pending: usize,
     /// Běžící přihlašování (zruší se zahozením).
     login_task: Option<iced::task::Handle>,
+    /// Chat k otevření po přepnutí účtu (klik na notifikaci z neaktivního účtu).
+    open_after_switch: Option<ConversationId>,
     /// Typ účtu, který se právě přihlašuje.
     login_kind: AccountKind,
     /// Rozběhnuté přihlášení v prohlížeči.
@@ -685,6 +697,7 @@ impl App {
             others: HashMap::new(),
             others_pending: 0,
             login_task: None,
+            open_after_switch: None,
             login_kind: AccountKind::Work,
             browser_login: None,
             login_input: String::new(),
@@ -1858,6 +1871,12 @@ impl App {
             }
             Msg::Scoped(..) => Task::none(),
             Msg::PollOthers => self.poll_others(),
+            Msg::OtherNotificationClicked(account, conv) => {
+                tracing::info!(%account, "notifikace z jiného účtu: přepínám");
+                let switch = self.load_account(Some(account));
+                self.open_after_switch = Some(conv);
+                Task::batch([switch, self.show_window()])
+            }
             Msg::ToggleAutostart => {
                 let on = !self.autostart;
                 let result = std::env::current_exe()
@@ -1897,12 +1916,20 @@ impl App {
             }
             Msg::OtherUnread(id, r) => {
                 self.others_pending = self.others_pending.saturating_sub(1);
+                let Some(record) = self.accounts.iter().find(|a| a.id == id).cloned() else {
+                    return Task::none();
+                };
                 let entry = self.others.entry(id.clone()).or_default();
                 match r {
-                    Ok((backend, n)) => {
+                    Ok((backend, convs)) => {
+                        let profile = record.profile();
                         entry.backend = Some(backend.0);
-                        entry.unread = Some(n);
+                        entry.unread = Some(unread_count(&convs, &profile));
                         entry.error = None;
+                        let previous = entry.last_seen.replace(last_seen(&convs));
+                        if let Some(previous) = previous {
+                            return notify_other(&record, &profile, &convs, &previous);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(account = %id, error = %e.text, "nepřečtené neaktivního účtu");
@@ -1996,6 +2023,11 @@ impl App {
                 }
                 // jména účastníků chatů bez názvu (nové chaty i za běhu)
                 tasks.push(self.resolve_names());
+                // po přepnutí z notifikace jiného účtu otevřít její chat
+                if let Some(conv) = self.open_after_switch.take() {
+                    self.tab = Tab::Chats;
+                    tasks.push(Task::done(Msg::Select(conv)));
+                }
                 Task::batch(tasks)
             }
             Msg::Conversations(Err(e)) => {
@@ -5281,7 +5313,7 @@ async fn resolve_names(
 async fn other_unread(
     record: AccountRecord,
     backend: Option<Arc<TeamsBackend>>,
-) -> Result<(OtherBackend, usize), Failure> {
+) -> Result<(OtherBackend, Vec<Conversation>), Failure> {
     let backend = match backend {
         Some(b) => b,
         None => {
@@ -5296,10 +5328,77 @@ async fn other_unread(
         }
     };
     let convs = backend.conversations().await?;
-    Ok((
-        OtherBackend(backend),
-        unread_count(&convs, &record.profile()),
-    ))
+    Ok((OtherBackend(backend), convs))
+}
+
+/// Poslední zpráva každého chatu (id v ms) pro porovnání při dalším dotazu.
+fn last_seen(convs: &[Conversation]) -> HashMap<ConversationId, u64> {
+    convs
+        .iter()
+        .filter(|c| c.is_chat())
+        .filter_map(|c| Some((c.id.clone(), msg_num(&c.last_message.as_ref()?.id))))
+        .collect()
+}
+
+/// Notifikace o nových zprávách v chatech neaktivního účtu (od minulého dotazu).
+fn notify_other(
+    record: &AccountRecord,
+    me: &Profile,
+    convs: &[Conversation],
+    previous: &HashMap<ConversationId, u64>,
+) -> Task<Msg> {
+    let fresh: Vec<(&Conversation, &Message)> = convs
+        .iter()
+        .filter(|c| c.is_chat())
+        .filter_map(|c| {
+            let m = c.last_message.as_ref()?;
+            let newer = previous.get(&c.id).is_none_or(|p| msg_num(&m.id) > *p);
+            (newer && m.is_user_content() && !m.deleted && !is_me(me, m)).then_some((c, m))
+        })
+        .collect();
+    let account = record
+        .display_name
+        .clone()
+        .or_else(|| record.username.clone())
+        .unwrap_or_else(|| "jiný účet".into());
+    if fresh.is_empty() {
+        return Task::none();
+    }
+    if fresh.len() > MAX_NOTIFICATIONS {
+        let n = fresh.len();
+        return Task::perform(
+            notify::show(
+                format!("Tymy · {account}"),
+                format!("Nové zprávy v {n} chatech"),
+            ),
+            |_| Msg::Noop,
+        );
+    }
+    Task::batch(fresh.into_iter().map(|(c, m)| {
+        let who = m.sender_name.clone().unwrap_or_default();
+        let title = match c.topic.as_deref().filter(|t| !t.trim().is_empty()) {
+            Some(t) => t.to_owned(),
+            None if !who.is_empty() => who.clone(),
+            None => "Chat".into(),
+        };
+        let text = truncate(&preview_text(&m.content), 200);
+        let body = if c.topic.is_none() || who.is_empty() {
+            text
+        } else {
+            format!("{who}: {text}")
+        };
+        let (account_id, conv) = (record.id.clone(), c.id.clone());
+        Task::perform(
+            notify::show(format!("{title} · {account}"), body),
+            move |clicked| {
+                if clicked {
+                    Msg::OtherNotificationClicked(account_id.clone(), conv.clone())
+                } else {
+                    Msg::Noop
+                }
+            },
+        )
+    }))
 }
 
 /// Smaže přihlášení účtu ze Secret Service a odebere ho z konfigurace.
