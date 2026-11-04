@@ -99,6 +99,12 @@ pub trait ChatBackend: Send + Sync {
         topic: Option<&str>,
     ) -> Result<ConversationId>;
 
+    /// Profily lidí podle MRI (jména pro seznam chatů).
+    async fn profiles(&self, mris: &[crate::UserId]) -> Result<Vec<Person>>;
+
+    /// Členové chatu (MRI), včetně mě.
+    async fn members(&self, conversation: &ConversationId) -> Result<Vec<crate::UserId>>;
+
     /// Hledání lidí ve vlastní organizaci (adresář).
     async fn search_people(&self, query: &str) -> Result<Vec<Person>>;
 

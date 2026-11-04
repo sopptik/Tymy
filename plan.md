@@ -155,7 +155,10 @@ podmínek služby Microsoftu.
    jen při viditelném okně (dřív se otevřený chat označil jako přečtený i ve skrytém okně).
    Priorita uživatele (2026-11-04): 1. hlášení přečtení, 2. založení skupinového chatu,
    dál podle mých priorit; každý bod samostatný commit, testovat bude uživatel najednou.
-3. **Jména účastníků** 1:1 chatů z profilů (middle tier), místo procházení historie.
+3. ✅ **Jména účastníků** chatů bez názvu z profilů (middle tier), místo procházení historie:
+   u 1:1 podle id chatu, u skupin podle členů vlákna (ověřeno), pak `fetchShortProfile`;
+   i u chatů, které přibudou za běhu. Lidé z jiných organizací profil nevrátí, pro ně
+   zůstává záloha z historie zpráv.
 4. **Odesílání souborů:** pracovní účet = OneDrive „Microsoft Teams Chat Files“ + `properties.files`;
    osobní = AMS upload. Drag & drop, dialog, průběh.
 5. **Osobní účty:** ověřit autoritu, client id, scope, authz a chat host.

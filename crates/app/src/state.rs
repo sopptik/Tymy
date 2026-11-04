@@ -180,6 +180,11 @@ impl PeerNames {
         list.insert(0, name.to_owned());
     }
 
+    /// Jména účastníků známá z profilů (nahradí dosavadní).
+    pub fn replace(&mut self, id: &ConversationId, names: Vec<String>) {
+        self.names.insert(id.clone(), names);
+    }
+
     pub fn knows(&self, id: &ConversationId) -> bool {
         self.names.get(id).is_some_and(|n| !n.is_empty())
     }

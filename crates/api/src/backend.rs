@@ -173,6 +173,20 @@ impl ChatBackend for TeamsBackend {
         .await
     }
 
+    async fn profiles(&self, mris: &[tymy_core::UserId]) -> Result<Vec<Person>> {
+        let mris: Vec<&str> = mris.iter().map(|m| m.as_str()).collect();
+        self.call(|s| {
+            let mris = &mris;
+            async move { crate::people::fetch_profiles(&self.http, &s, mris).await }
+        })
+        .await
+    }
+
+    async fn members(&self, conversation: &ConversationId) -> Result<Vec<tymy_core::UserId>> {
+        self.call(|s| async move { chat::thread_members(&self.http, &s, conversation).await })
+            .await
+    }
+
     async fn search_people(&self, query: &str) -> Result<Vec<Person>> {
         self.call(|s| async move { crate::people::search_directory(&self.http, &s, query).await })
             .await
