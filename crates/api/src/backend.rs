@@ -1,0 +1,296 @@
+//! Implementace [`ChatBackend`] nad interními API Teams.
+//!
+//! Pracovní i osobní účty sdílí stejný protokol chat služby; liší se jen
+//! autoritou, client id a hostiteli, což zachycuje [`Endpoints`].
+
+use std::future::Future;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::Duration;
+use tokio::sync::Mutex;
+use tymy_core::{
+    AccountKind, ChatBackend, Conversation, ConversationId, Error, Event, MessagePage, Profile,
+    Result, SentMessage, text,
+};
+
+use crate::auth::{self, CredentialStore, SkypeSession};
+use crate::realtime::poll::{self, PollRegistration};
+use crate::{Endpoints, chat, http::Http};
+
+/// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
+const REFRESH_MARGIN_MINUTES: i64 = 5;
+
+pub struct TeamsBackend {
+    profile: Profile,
+    endpoints: Endpoints,
+    http: Http,
+    credentials: Arc<dyn CredentialStore>,
+    session: Mutex<Option<SkypeSession>>,
+    /// Oddělený zámek: long-poll ho drží desítky sekund a nesmí blokovat ostatní volání.
+    poll: Mutex<Option<PollRegistration>>,
+}
+
+impl TeamsBackend {
+    pub fn new(
+        profile: Profile,
+        endpoints: Endpoints,
+        http: Http,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Self {
+        Self {
+            profile,
+            endpoints,
+            http,
+            credentials,
+            session: Mutex::new(None),
+            poll: Mutex::new(None),
+        }
+    }
+
+    /// Vrátí platnou relaci; v případě potřeby obnoví tokeny.
+    pub async fn session(&self) -> Result<SkypeSession> {
+        let mut guard = self.session.lock().await;
+        if let Some(s) = guard
+            .as_ref()
+            .filter(|s| s.valid_for(Duration::minutes(REFRESH_MARGIN_MINUTES)))
+        {
+            return Ok(s.clone());
+        }
+        let account = &self.profile.account_id;
+        let refresh_token = self.credentials.load(account).await?.ok_or_else(|| {
+            Error::ReauthRequired(format!("pro účet {account} chybí uložené přihlášení"))
+        })?;
+        let tokens = auth::refresh(
+            &self.http,
+            &self.endpoints,
+            &refresh_token,
+            &self.endpoints.skype_scope,
+        )
+        .await?;
+        if let Some(new_rt) = tokens
+            .refresh_token
+            .as_deref()
+            .filter(|t| *t != refresh_token)
+        {
+            self.credentials.save(account, new_rt).await?;
+        }
+        let session =
+            auth::exchange_for_skype_token(&self.http, &self.endpoints, &tokens.access_token)
+                .await?;
+        tracing::debug!(?session, "nová relace");
+        *guard = Some(session.clone());
+        Ok(session)
+    }
+
+    async fn invalidate_session(&self) {
+        *self.session.lock().await = None;
+    }
+
+    /// Provede požadavek; při 401 jednou obnoví relaci a zkusí to znovu.
+    async fn call<T, F, Fut>(&self, f: F) -> Result<T>
+    where
+        F: Fn(SkypeSession) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        match f(self.session().await?).await {
+            Err(Error::Auth(msg)) => {
+                tracing::info!(%msg, "relace odmítnuta, obnovuji");
+                self.invalidate_session().await;
+                f(self.session().await?).await
+            }
+            r => r,
+        }
+    }
+
+    pub fn http(&self) -> &Http {
+        &self.http
+    }
+}
+
+#[async_trait]
+impl ChatBackend for TeamsBackend {
+    fn kind(&self) -> AccountKind {
+        self.profile.kind
+    }
+
+    async fn profile(&self) -> Result<Profile> {
+        Ok(self.profile.clone())
+    }
+
+    async fn conversations(&self) -> Result<Vec<Conversation>> {
+        self.call(|s| async move { chat::list_conversations(&self.http, &s).await })
+            .await
+    }
+
+    async fn messages(
+        &self,
+        conversation: &ConversationId,
+        cursor: Option<&str>,
+    ) -> Result<MessagePage> {
+        self.call(
+            |s| async move { chat::list_messages(&self.http, &s, conversation, cursor).await },
+        )
+        .await
+    }
+
+    async fn send_text(&self, conversation: &ConversationId, text: &str) -> Result<SentMessage> {
+        let html = text::plain_to_html(text);
+        let name = self.profile.display_name.as_deref();
+        self.call(|s| {
+            let html = &html;
+            async move { chat::send_html(&self.http, &s, conversation, html, name).await }
+        })
+        .await
+    }
+
+    async fn poll_events(&self) -> Result<Vec<Event>> {
+        let session = self.session().await?;
+        let mut reg = self.poll.lock().await;
+        if reg.is_none() {
+            *reg = Some(poll::register(&self.http, &session).await?);
+        }
+        let current = reg.clone().unwrap_or_default();
+        match poll::poll(&self.http, &session, &current).await {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                // Registrace mohla vypršet; příště ji vytvoříme znovu.
+                *reg = None;
+                match e {
+                    Error::Auth(_) => {
+                        self.invalidate_session().await;
+                        Err(e)
+                    }
+                    // Zaniklá subscription: nic nehlásíme, další volání se přeregistruje.
+                    Error::Http {
+                        status: 404 | 410, ..
+                    } => Ok(vec![]),
+                    e => Err(e),
+                }
+            }
+        }
+    }
+}
+
+/// Dokončí přihlášení: uloží refresh token a vrátí profil účtu.
+pub async fn complete_login(
+    kind: AccountKind,
+    tokens: &auth::TokenSet,
+    credentials: &dyn CredentialStore,
+) -> Result<Profile> {
+    let profile = auth::profile_from_tokens(kind, tokens)?;
+    let rt = tokens.refresh_token.as_deref().ok_or_else(|| {
+        Error::Auth("server nevrátil refresh token (chybí offline_access?)".into())
+    })?;
+    credentials.save(&profile.account_id, rt).await?;
+    Ok(profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::MemoryStore;
+    use serde_json::json;
+    use tymy_core::AccountId;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn setup() -> (MockServer, TeamsBackend, Arc<MemoryStore>) {
+        let server = MockServer::start().await;
+        let ep = Endpoints {
+            authority: format!("{}/organizations", server.uri()),
+            authz_url: format!("{}/authz", server.uri()),
+            chat_service: server.uri(),
+            ..Default::default()
+        };
+        let store = Arc::new(MemoryStore::default());
+        let profile = Profile {
+            account_id: AccountId("acc".into()),
+            kind: AccountKind::Work,
+            display_name: Some("Jan".into()),
+            username: None,
+            tenant_id: None,
+        };
+        store.save(&profile.account_id, "rt-old").await.unwrap();
+        let backend = TeamsBackend::new(profile, ep, Http::new().unwrap(), store.clone());
+        (server, backend, store)
+    }
+
+    async fn mount_auth(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/organizations/oauth2/v2.0/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "at", "refresh_token": "rt-new", "expires_in": 3600
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tokens": {"skypeToken": "st", "expiresIn": 3600},
+                "regionGtms": {"chatService": server.uri()}
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn refresh_rotates_token_and_caches_session() {
+        let (server, backend, store) = setup().await;
+        mount_auth(&server).await;
+        let s1 = backend.session().await.unwrap();
+        let s2 = backend.session().await.unwrap();
+        assert_eq!(s1.token, "st");
+        assert_eq!(s1.expires_at, s2.expires_at, "druhé volání použije cache");
+        assert_eq!(
+            store
+                .load(&AccountId("acc".into()))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("rt-new")
+        );
+        // token endpoint se volal jen jednou
+        let refreshes = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/token"))
+            .count();
+        assert_eq!(refreshes, 1);
+    }
+
+    #[tokio::test]
+    async fn retries_once_after_401() {
+        let (server, backend, _store) = setup().await;
+        mount_auth(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/ME/conversations"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/ME/conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "conversations": [{"id": "19:x@thread.v2", "threadProperties": {"topic": "T", "threadType": "chat"}}]
+            })))
+            .mount(&server)
+            .await;
+        let convs = backend.conversations().await.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].topic.as_deref(), Some("T"));
+    }
+
+    #[tokio::test]
+    async fn missing_credentials_require_reauth() {
+        let (_server, backend, store) = setup().await;
+        store.delete(&AccountId("acc".into())).await.unwrap();
+        assert!(matches!(
+            backend.session().await.unwrap_err(),
+            Error::ReauthRequired(_)
+        ));
+    }
+}

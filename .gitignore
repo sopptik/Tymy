@@ -1,0 +1,11 @@
+/target
+
+# IDE
+.idea/workspace.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+
+# Záznamy provozu a dumpy mohou obsahovat tokeny – nikdy necommitovat
+*.har
+/dumps/
+*.tokens.json

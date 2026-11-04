@@ -1,0 +1,19 @@
+[package]
+name = "tymy"
+description = "Lehký Teams klient pro Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tymy-core.workspace = true
+tymy-api.workspace = true
+tymy-config.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+iced = { version = "0.14", features = ["tokio"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

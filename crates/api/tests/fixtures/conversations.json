@@ -1,0 +1,42 @@
+{
+  "conversations": [
+    {
+      "id": "19:11111111-1111-1111-1111-111111111111_22222222-2222-2222-2222-222222222222@unq.gbl.spaces",
+      "type": "Conversation",
+      "version": 1700000005000,
+      "lastUpdatedMessageArrivalTime": 1700000005000,
+      "threadProperties": { "threadType": "chat", "productThreadType": "OneOnOneChat" },
+      "properties": { "consumptionhorizon": "1700000000000;1700000000123;5555555555555555555" },
+      "lastMessage": {
+        "id": "1700000005000",
+        "clientmessageid": "1234567890123456789",
+        "content": "<p>Ahoj, máš chvilku?</p>",
+        "messagetype": "RichText/Html",
+        "from": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:11111111-1111-1111-1111-111111111111",
+        "imdisplayname": "Alice Nováková",
+        "composetime": "2023-11-14T22:13:25.000Z",
+        "originalarrivaltime": "2023-11-14T22:13:25.000Z",
+        "conversationLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:11111111-1111-1111-1111-111111111111_22222222-2222-2222-2222-222222222222@unq.gbl.spaces"
+      }
+    },
+    {
+      "id": "19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2",
+      "type": "Thread",
+      "threadProperties": { "topic": "Projekt Tymy", "threadType": "chat", "productThreadType": "Chat" },
+      "properties": { "consumptionhorizon": "0;0;0" },
+      "lastMessage": {}
+    },
+    {
+      "id": "19:meeting_ZmFrZW1lZXRpbmc@thread.v2",
+      "type": "Thread",
+      "threadProperties": { "topic": "Týdenní porada", "threadType": "meeting" },
+      "lastMessage": {}
+    },
+    {
+      "id": "48:notifications",
+      "type": "Conversation",
+      "lastMessage": {}
+    }
+  ],
+  "_metadata": { "syncState": "opaque", "backwardLink": null }
+}

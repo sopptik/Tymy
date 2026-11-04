@@ -1,0 +1,47 @@
+{
+  "eventMessages": [
+    {
+      "id": 1001,
+      "type": "EventMessage",
+      "resourceType": "NewMessage",
+      "time": "2023-11-14T22:20:00Z",
+      "resourceLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:abc@thread.v2/messages/1700000500000",
+      "resource": {
+        "id": "1700000500000",
+        "clientmessageid": "333",
+        "content": "<p>Ahoj</p>",
+        "messagetype": "RichText/Html",
+        "from": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:22222222-2222-2222-2222-222222222222",
+        "imdisplayname": "Bob Svoboda",
+        "composetime": "2023-11-14T22:20:00.000Z",
+        "originalarrivaltime": "2023-11-14T22:20:00.000Z",
+        "conversationLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:abc@thread.v2"
+      }
+    },
+    {
+      "id": 1002,
+      "type": "EventMessage",
+      "resourceType": "NewMessage",
+      "resourceLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:abc@thread.v2/messages/0",
+      "resource": {
+        "messagetype": "Control/Typing",
+        "from": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:22222222-2222-2222-2222-222222222222",
+        "conversationLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:abc@thread.v2"
+      }
+    },
+    {
+      "id": 1003,
+      "type": "EventMessage",
+      "resourceType": "ConversationUpdate",
+      "resourceLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:abc@thread.v2",
+      "resource": { "id": "19:abc@thread.v2", "type": "Conversation" }
+    },
+    {
+      "id": 1004,
+      "type": "EventMessage",
+      "resourceType": "UserPresence",
+      "resourceLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/8:orgid:2222/presenceDocs/messagingService",
+      "resource": { "status": "Online" }
+    }
+  ]
+}

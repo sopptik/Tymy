@@ -1,0 +1,47 @@
+{
+  "messages": [
+    {
+      "id": "1700000300000",
+      "clientmessageid": "111",
+      "content": "<p>Posílám <b>zprávu</b></p>",
+      "messagetype": "RichText/Html",
+      "from": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:22222222-2222-2222-2222-222222222222",
+      "imdisplayname": "Bob Svoboda",
+      "composetime": "2023-11-14T22:18:20.000Z",
+      "originalarrivaltime": "2023-11-14T22:18:20.000Z",
+      "conversationLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2",
+      "properties": {
+        "edittime": "1700000400000",
+        "files": "[{\"@type\":\"http://schema.skype.com/File\",\"version\":2,\"id\":\"f1\",\"itemid\":\"f1\",\"fileName\":\"zprava.pdf\",\"fileType\":\"pdf\",\"objectUrl\":\"https://contoso-my.sharepoint.com/personal/bob/Documents/Microsoft%20Teams%20Chat%20Files/zprava.pdf\",\"fileInfo\":{\"fileUrl\":\"https://contoso-my.sharepoint.com/personal/bob/Documents/Microsoft%20Teams%20Chat%20Files/zprava.pdf\",\"shareUrl\":\"https://contoso-my.sharepoint.com/:b:/g/personal/bob/abc\"}}]"
+      }
+    },
+    {
+      "id": "1700000200000",
+      "clientmessageid": "222",
+      "content": "",
+      "messagetype": "RichText/Html",
+      "from": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:22222222-2222-2222-2222-222222222222",
+      "imdisplayname": "Bob Svoboda",
+      "composetime": "2023-11-14T22:16:40.000Z",
+      "originalarrivaltime": "2023-11-14T22:16:40.000Z",
+      "conversationLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2",
+      "properties": { "deletetime": 1700000250000 }
+    },
+    {
+      "id": "1700000100000",
+      "content": "<addmember><eventtime>1700000100000</eventtime><target>8:orgid:3333</target></addmember>",
+      "messagetype": "ThreadActivity/AddMember",
+      "from": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/contacts/19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2",
+      "composetime": "2023-11-14T22:15:00.000Z",
+      "originalarrivaltime": "2023-11-14T22:15:00.000Z"
+    },
+    {}
+  ],
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "_metadata": {
+    "backwardLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2/messages?startTime=1&syncState=opaque&view=msnp24Equivalent",
+    "syncState": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2/messages?syncState=opaque2",
+    "lastCompleteSegmentStartTime": 1,
+    "lastCompleteSegmentEndTime": 1700000300000
+  }
+}

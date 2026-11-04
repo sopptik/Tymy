@@ -1,0 +1,97 @@
+# Protokol Teams: pracovní poznámky
+
+Tymy používá **interní, nedokumentovaná API** web klienta Teams. Tento dokument je
+živý záznam toho, co víme, a hlavně co je potřeba ověřit. Všechny adresy
+a identifikátory jsou v `crates/api/src/endpoints.rs` a dají se přepsat bez
+rekompilace v `~/.config/tymy/endpoints.toml`:
+
+```toml
+[work]
+# client_id = "..."
+# authz_url = "..."
+
+[personal]
+# authority = "https://login.microsoftonline.com/consumers"
+# client_id = "..."
+# skype_scope = "..."
+# authz_url = "..."
+# chat_service = "..."
+```
+
+Legenda: ✅ ověřeno proti produkci · 🟡 převzato z veřejných zdrojů, neověřeno námi · ❓ hypotéza
+
+## 1. Přihlášení
+
+| Krok | Pracovní účet | Osobní účet |
+|---|---|---|
+| Autorita | `login.microsoftonline.com/organizations` ✅ | `login.microsoftonline.com/consumers` ❓ |
+| Client id | `1fec8e78-bce4-4aaf-ab1b-5451cc387264` (Teams desktop) ✅ | stejné ❓ |
+| Flow | device code (RFC 8628) ✅ | device code ❓ |
+| Scope | `https://api.spaces.skype.com/.default` ✅ | `https://api.fl.spaces.skype.com/.default` ❓ |
+
+Device code flow může být v organizaci zablokovaný podmíněným přístupem
+(chyba `AADSTS50199`/`AADSTS53003` apod.). Pak bude potřeba authorization code
+flow s PKCE, viz otevřené body.
+
+## 2. Výměna za skypetoken
+
+- Pracovní: `POST https://authsvc.teams.microsoft.com/v1.0/authz`, `Authorization: Bearer <access token>`, prázdné tělo ✅
+  - Odpověď: `tokens.skypeToken`, `tokens.expiresIn`, `regionGtms.chatService` (např. `https://emea.ng.msg.teams.microsoft.com`) ✅
+- Osobní: `POST https://teams.live.com/api/auth/v1.0/authz/consumer` ❓
+- Parser (`auth/skype.rs`) je záměrně tolerantní: token i expiraci hledá podle názvu klíče kdekoli v odpovědi.
+
+## 3. Chat služba (chatsvc)
+
+Hlavička `Authentication: skypetoken=<token>`. Id konverzací se v cestě kódují jako segment.
+
+| Operace | Požadavek | Stav |
+|---|---|---|
+| Seznam konverzací | `GET /v1/users/ME/conversations?view=msnp24Equivalent&pageSize=200` | ✅ |
+| Historie | `GET /v1/users/ME/conversations/{id}/messages?view=msnp24Equivalent\|supportsMessageProperties&pageSize=50&startTime=1`; starší stránky přes `_metadata.backwardLink` | ✅ |
+| Odeslání | `POST /v1/users/ME/conversations/{id}/messages`, tělo `{content, messagetype: "RichText/Html", contenttype: "text", clientmessageid, imdisplayname}` | 🟡 |
+
+Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `messagetype`
+(`RichText/Html`, `Text`, `ThreadActivity/*`, `Event/*`, `Control/Typing`, …),
+`from` (URL končící MRI odesílatele), `imdisplayname`, `composetime`,
+`originalarrivaltime`, `properties` (`edittime`, `deletetime`, `files` jako JSON řetězec,
+`emotions` = reakce).
+
+## 4. Real-time
+
+Implementováno, ale **nefunguje** (❌, ověřeno 2026-11-04): long-poll zděděný ze Skype protokolu.
+`POST /v1/users/ME/endpoints` vrací `410 Gone`, Microsoft ho vypnul. Okno proto zatím
+obnovuje seznam konverzací každých 5 s. Původní postup:
+1. `POST /v1/users/ME/endpoints` `{endpointFeatures}` → hlavička `Set-RegistrationToken`
+2. `POST /v1/users/ME/endpoints/SELF/subscriptions` `{channelType: "httpLongPoll", template: "raw", interestedResources}`
+3. opakovaně `POST /v1/users/ME/endpoints/SELF/subscriptions/0/poll` → `{eventMessages: [{resourceType, resourceLink, resource}]}`
+
+Současný web klient používá WebSocket **trouter** (`*.trouter.teams.microsoft.com`).
+Pokud long-poll nebude fungovat, je trouter další krok (stejně ho budeme potřebovat
+pro příchozí hovory ve fázi 2).
+
+## Jak odchytit provoz (fáze 0, krok 1)
+
+1. V Chromiu/Firefoxu otevřete DevTools → Network, zapněte *Preserve log*, filtr `Fetch/XHR` + `WS`.
+2. Přihlaste se na `teams.microsoft.com` (resp. `teams.live.com` pro osobní účet).
+3. Proveďte: otevření chatu, odeslání zprávy, odeslání souboru, přijetí zprávy z jiného účtu.
+4. Uložte jako HAR **do adresáře mimo repozitář** (`*.har` je v `.gitignore`, obsahuje tokeny!).
+5. Zajímá nás:
+   - požadavek na `login.microsoftonline.com/.../token` (client_id, scope, redirect_uri),
+   - `authsvc` / `authz` požadavek a jeho odpověď,
+   - hostitel a hlavičky požadavků na `*/v1/users/ME/conversations*`,
+   - WebSocket rámce trouteru.
+6. Ladicí výstup Tymy: `tymy-cli -vv chats` vypíše těla odpovědí se zredigovanými tokeny.
+   Anonymizované vzorky pak nahraďte za syntetické fixtury v `crates/api/tests/fixtures/`.
+
+## Otevřené body
+
+- [x] Ověřit přihlášení, seznam chatů a historii pro pracovní účet (2026-11-04)
+- [ ] Ověřit odeslání zprávy (`tymy-cli send` / okno)
+- [ ] Zjistit skutečné hodnoty pro osobní účty (autorita, client id, scope, authz, chat host)
+- [x] Ověřit long-poll: nefunguje (410 Gone)
+- [ ] Implementovat trouter (WebSocket) pro okamžité doručování
+- [ ] Hlásit přečtení serveru (consumption horizon)
+- [ ] Jména účastníků 1:1 chatů bez nutnosti číst historii (profily z middle tier)
+- [ ] Authorization code + PKCE pro organizace s blokovaným device code
+- [ ] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty
+- [ ] Odesílání souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS
