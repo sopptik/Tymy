@@ -10,12 +10,14 @@ Jen to podstatné, jako kdysi Skype: chat, soubory, hovory, kalendář s připom
 
 ## Stav
 
-Prototyp: okno `tymy` (chaty, historie, odesílání) a vývojářské CLI `tymy-cli`.
+Použitelný chat: okno `tymy` a vývojářské CLI `tymy-cli`. Podrobný stav je v `plan.md`.
 
 | Fáze | Obsah | Stav |
 |---|---|---|
-| 0 | Přihlášení, seznam chatů, historie, odesílání | ověřeno pro pracovní účet; real-time chybí (trouter) |
-| 1 | GUI (iced), soubory, notifikace, tray, `.deb` | prototyp okna hotový |
+| 0 | Přihlášení, seznam chatů, historie, odesílání | ověřeno pro pracovní účet |
+| 1a | Chat: cache, formátování, odpovědi, reakce, úpravy, hledání, více účtů, skupinové chaty | hotovo, část čeká na test |
+| 1b | Real-time (trouter), soubory, osobní účty | čeká na odchyt provozu; přihlášení v prohlížeči, hlášení přečtení a jména hotové |
+| 1c | Balíček `.deb`, spouštění po přihlášení | hotovo |
 | 2 | Hovory a videohovory (výzkum) | — |
 | 3 | Kalendář a připomínky schůzek | — |
 
