@@ -9,8 +9,10 @@ pub mod chat;
 mod endpoints;
 mod http;
 pub mod media;
+pub mod people;
 mod realtime;
 
 pub use backend::{TeamsBackend, complete_login};
 pub use endpoints::{EndpointOverrides, Endpoints};
 pub use http::{Http, redact};
+pub use reqwest::Method;

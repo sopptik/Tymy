@@ -77,6 +77,15 @@ enum Command {
         /// Cesta včetně query, začíná `/`.
         path: String,
     },
+    /// Ladění: požadavek na middle tier, např. `mt GET beta/users/...`.
+    Mt {
+        /// HTTP metoda (GET, POST, …).
+        method: String,
+        /// Cesta relativní k `…/api/mt/<region>/`.
+        path: String,
+        /// Volitelné JSON tělo.
+        body: Option<String>,
+    },
     /// Stáhne médium (obrázek) vložené do zprávy.
     Media {
         /// URL z atributu `src` obrázku (…asm.skype.com/…).
@@ -160,6 +169,19 @@ async fn main() -> Result<()> {
         Command::Raw { path } => {
             let backend = backend(&config, cli.account.as_deref()).await?;
             print_json(&backend.raw_get(&path).await?)
+        }
+        Command::Mt { method, path, body } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let method: tymy_api::Method = method
+                .to_ascii_uppercase()
+                .parse()
+                .context("neplatná HTTP metoda")?;
+            let body: Option<serde_json::Value> = body
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("tělo není platný JSON")?;
+            print_json(&backend.mt_request(method, &path, body.as_ref()).await?)
         }
         Command::Media { url, output } => {
             let backend = backend(&config, cli.account.as_deref()).await?;

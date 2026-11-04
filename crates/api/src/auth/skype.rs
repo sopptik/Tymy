@@ -5,6 +5,7 @@ use serde_json::Value;
 use tymy_core::{Error, Result};
 use url::Url;
 
+use crate::http::SendLogged;
 use crate::{Endpoints, http::Http, http::check, http::json, http::net_err};
 
 /// Platná relace vůči chat službě.
@@ -14,6 +15,10 @@ pub struct SkypeSession {
     pub expires_at: DateTime<Utc>,
     /// Regionální chat služba, např. `https://emea.ng.msg.teams.microsoft.com`.
     pub chat_service: Url,
+    /// OAuth access token (scope `skype_scope`), kterým se autorizuje middle tier.
+    pub bearer: String,
+    /// Middle tier (profily, hledání lidí), např. `https://teams.microsoft.com/api/mt/emea`.
+    pub middle_tier: Option<Url>,
 }
 
 impl std::fmt::Debug for SkypeSession {
@@ -22,6 +27,7 @@ impl std::fmt::Debug for SkypeSession {
             .field("token", &"<redacted>")
             .field("expires_at", &self.expires_at)
             .field("chat_service", &self.chat_service.as_str())
+            .field("middle_tier", &self.middle_tier.as_ref().map(Url::as_str))
             .finish()
     }
 }
@@ -43,11 +49,13 @@ pub async fn exchange_for_skype_token(
         .post(&ep.authz_url)
         .bearer_auth(access_token)
         .header(reqwest::header::CONTENT_LENGTH, 0)
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let body: Value = json(check(resp).await?).await?;
-    parse_authz(&body, &ep.chat_service)
+    let mut session = parse_authz(&body, &ep.chat_service)?;
+    session.bearer = access_token.to_owned();
+    Ok(session)
 }
 
 /// Formát odpovědi není dokumentovaný a liší se mezi pracovními a osobními účty,
@@ -72,10 +80,18 @@ pub(crate) fn parse_authz(body: &Value, default_chat_service: &str) -> Result<Sk
             "chatService musí být https, je {chat_service}"
         )));
     }
+    let middle_tier = body
+        .get("regionGtms")
+        .and_then(|g| g.get("middleTier"))
+        .and_then(Value::as_str)
+        .and_then(|u| Url::parse(u).ok())
+        .filter(|u| u.scheme() == "https");
     Ok(SkypeSession {
         token: token.to_owned(),
         expires_at: Utc::now() + Duration::seconds(expires_in),
         chat_service,
+        bearer: String::new(),
+        middle_tier,
     })
 }
 
@@ -121,6 +137,7 @@ mod tests {
             "https://emea.ng.msg.teams.microsoft.com/"
         );
         assert!(s.valid_for(Duration::hours(23)));
+        assert_eq!(s.middle_tier.as_ref().unwrap().as_str(), "https://x/");
     }
 
     #[test]

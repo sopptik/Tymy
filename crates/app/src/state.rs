@@ -4,6 +4,92 @@ use std::collections::HashMap;
 
 use tymy_core::{Conversation, ConversationId, ConversationKind, Message, MessageId, Profile};
 
+/// Chaty rozdělené na připnuté (v ručním pořadí) a ostatní (od poslední aktivity;
+/// nové chaty bez aktivity nahoře).
+pub fn order_chats<'a>(
+    chats: impl IntoIterator<Item = &'a Conversation>,
+    pins: &[ConversationId],
+) -> (Vec<&'a Conversation>, Vec<&'a Conversation>) {
+    let (mut pinned, mut rest): (Vec<_>, Vec<_>) =
+        chats.into_iter().partition(|c| pins.contains(&c.id));
+    pinned.sort_by_key(|c| pins.iter().position(|p| p == &c.id));
+    rest.sort_by_key(|c| {
+        std::cmp::Reverse(
+            c.last_activity
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(i64::MAX),
+        )
+    });
+    (pinned, rest)
+}
+
+/// Posune připnutý chat o `delta` míst (záporné = nahoru).
+pub fn move_pin(pins: &mut [ConversationId], id: &ConversationId, delta: isize) {
+    let Some(i) = pins.iter().position(|p| p == id) else {
+        return;
+    };
+    let j = (i as isize + delta).clamp(0, pins.len() as isize - 1) as usize;
+    if i != j {
+        let item = pins[i].clone();
+        if i < j {
+            pins[i..=j].rotate_left(1);
+        } else {
+            pins[j..=i].rotate_right(1);
+        }
+        pins[j] = item;
+    }
+}
+
+/// Tým s kanály pro záložku Týmy.
+pub struct TeamGroup<'a> {
+    pub name: String,
+    pub channels: Vec<&'a Conversation>,
+}
+
+/// Seskupí kanály podle týmu. Týmy podle názvu, v týmu obecný kanál první, pak podle názvu.
+pub fn group_teams<'a>(convs: impl IntoIterator<Item = &'a Conversation>) -> Vec<TeamGroup<'a>> {
+    let mut groups: Vec<(ConversationId, TeamGroup<'a>)> = Vec::new();
+    for c in convs {
+        let Some(team) = &c.team else { continue };
+        let idx = match groups.iter().position(|(id, _)| id == &team.id) {
+            Some(i) => i,
+            None => {
+                groups.push((
+                    team.id.clone(),
+                    TeamGroup {
+                        name: String::new(),
+                        channels: vec![],
+                    },
+                ));
+                groups.len() - 1
+            }
+        };
+        let g = &mut groups[idx].1;
+        if let Some(name) = &team.name {
+            g.name = name.clone();
+        }
+        g.channels.push(c);
+    }
+    let mut out: Vec<TeamGroup<'a>> = groups
+        .into_iter()
+        .map(|(id, mut g)| {
+            if g.name.is_empty() {
+                g.name = "Tým".into();
+            }
+            g.channels
+                .sort_by_key(|c| (c.id != id, channel_name(c).to_lowercase()));
+            g
+        })
+        .collect();
+    out.sort_by_key(|g| g.name.to_lowercase());
+    out
+}
+
+/// Název kanálu; kořen týmu (bez tématu) je obecný kanál.
+pub fn channel_name(c: &Conversation) -> String {
+    c.topic.clone().unwrap_or_else(|| "Obecný".into())
+}
+
 /// Kdo jsem: podle MRI (obsahuje object id) nebo, u osobních účtů, podle jména.
 pub fn is_me(me: &Profile, m: &Message) -> bool {
     if let Some(sender) = &m.sender
@@ -57,6 +143,13 @@ impl PeerNames {
             list.retain(|n| n != name);
             list.insert(0, name.to_owned());
         }
+    }
+
+    /// Jméno známé z jiného zdroje (např. z hledání lidí) – pro nový 1:1 chat.
+    pub fn set(&mut self, id: &ConversationId, name: &str) {
+        let list = self.names.entry(id.clone()).or_default();
+        list.retain(|n| n != name);
+        list.insert(0, name.to_owned());
     }
 
     pub fn knows(&self, id: &ConversationId) -> bool {
@@ -127,7 +220,68 @@ mod tests {
             last_message: None,
             last_activity: None,
             read_up_to: None,
+            team: None,
         }
+    }
+
+    fn at(id: &str, ms: Option<i64>) -> Conversation {
+        let mut c = conv(None);
+        c.id = id.into();
+        c.last_activity =
+            ms.and_then(|ms| chrono::TimeZone::timestamp_millis_opt(&chrono::Utc, ms).single());
+        c
+    }
+
+    #[test]
+    fn pinned_first_in_manual_order_rest_by_activity() {
+        let convs = [
+            at("a", Some(1)),
+            at("b", Some(3)),
+            at("c", Some(2)),
+            at("new", None),
+            at("p", Some(0)),
+        ];
+        let pins: Vec<ConversationId> = vec!["p".into(), "a".into(), "gone".into()];
+        let (pinned, rest) = order_chats(&convs, &pins);
+        let ids = |v: &[&Conversation]| v.iter().map(|c| c.id.0.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&pinned), ["p", "a"]);
+        assert_eq!(ids(&rest), ["new", "b", "c"]);
+    }
+
+    #[test]
+    fn move_pin_up_and_down_with_bounds() {
+        let mut pins: Vec<ConversationId> = vec!["a".into(), "b".into(), "c".into()];
+        move_pin(&mut pins, &"c".into(), -1);
+        assert_eq!(pins, ["a", "c", "b"].map(ConversationId::from));
+        move_pin(&mut pins, &"a".into(), -1);
+        assert_eq!(pins, ["a", "c", "b"].map(ConversationId::from));
+        move_pin(&mut pins, &"a".into(), 5);
+        assert_eq!(pins, ["c", "b", "a"].map(ConversationId::from));
+    }
+
+    #[test]
+    fn groups_channels_by_team() {
+        let team = |c: &mut Conversation, root: &str, name: Option<&str>| {
+            c.kind = ConversationKind::Channel;
+            c.team = Some(tymy_core::TeamRef {
+                id: root.into(),
+                name: name.map(Into::into),
+            });
+        };
+        let mut root = at("r1", None);
+        team(&mut root, "r1", Some("BOOTIQ"));
+        let mut ch = at("c1", None);
+        ch.topic = Some("Bootiq-crew".into());
+        team(&mut ch, "r1", None);
+        let mut orphan = at("c2", None);
+        orphan.topic = Some("Kanál".into());
+        team(&mut orphan, "r2", None);
+        let groups = group_teams([&ch, &orphan, &root]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "BOOTIQ");
+        let names: Vec<_> = groups[0].channels.iter().map(|c| channel_name(c)).collect();
+        assert_eq!(names, ["Obecný", "Bootiq-crew"]);
+        assert_eq!(groups[1].name, "Tým");
     }
 
     #[test]

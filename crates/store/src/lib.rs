@@ -12,7 +12,7 @@ use tymy_core::text::html_to_plain;
 use tymy_core::{AccountId, Conversation, ConversationId, Error, Message, Result};
 
 /// Verze schématu; při zvýšení přidat migraci do [`migrate`].
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct Store {
@@ -298,11 +298,46 @@ impl Store {
         })
     }
 
+    /// Ručně nastavené pořadí připnutých konverzací (první = nahoře).
+    pub fn load_pins(&self, account: &AccountId) -> Result<Vec<ConversationId>> {
+        self.with(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT conversation_id FROM pins WHERE account = ?1 ORDER BY position")?;
+            stmt.query_map([account.as_str()], |r| {
+                r.get::<_, String>(0).map(ConversationId)
+            })?
+            .collect()
+        })
+    }
+
+    /// Nahradí pořadí připnutých konverzací.
+    pub fn save_pins(&self, account: &AccountId, pins: &[ConversationId]) -> Result<()> {
+        self.with(|conn| {
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM pins WHERE account = ?1", [account.as_str()])?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO pins (account, conversation_id, position) VALUES (?1, ?2, ?3)",
+                )?;
+                for (i, id) in pins.iter().enumerate() {
+                    stmt.execute(params![account.as_str(), id.as_str(), i as i64])?;
+                }
+            }
+            tx.commit()
+        })
+    }
+
     /// Smaže všechna data účtu (např. při odhlášení).
     pub fn forget_account(&self, account: &AccountId) -> Result<()> {
         self.with(|conn| {
             let tx = conn.transaction()?;
-            for table in ["conversations", "messages", "conversation_state", "media"] {
+            for table in [
+                "conversations",
+                "messages",
+                "conversation_state",
+                "media",
+                "pins",
+            ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE account = ?1"),
                     [account.as_str()],
@@ -420,6 +455,20 @@ fn migrate(conn: &Connection) -> Result<()> {
         )
         .map_err(db_err)?;
     }
+    if version < 3 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE pins (
+                 account TEXT NOT NULL,
+                 conversation_id TEXT NOT NULL,
+                 position INTEGER NOT NULL,
+                 PRIMARY KEY (account, conversation_id)
+             );
+             PRAGMA user_version = 3;
+             COMMIT;",
+        )
+        .map_err(db_err)?;
+    }
     Ok(())
 }
 
@@ -459,6 +508,7 @@ mod tests {
             last_message: None,
             last_activity: Utc.timestamp_millis_opt(ms).single(),
             read_up_to: None,
+            team: None,
         }
     }
 
@@ -577,6 +627,20 @@ mod tests {
         assert!(s.load_media(&"jiny".into(), "u1").unwrap().is_none());
         s.forget_account(&acc()).unwrap();
         assert!(s.load_media(&acc(), "u1").unwrap().is_none());
+    }
+
+    #[test]
+    fn pins_keep_order_and_replace() {
+        let s = Store::open_in_memory().unwrap();
+        let ids: Vec<ConversationId> = vec!["b".into(), "a".into(), "c".into()];
+        s.save_pins(&acc(), &ids).unwrap();
+        assert_eq!(s.load_pins(&acc()).unwrap(), ids);
+        s.save_pins(&acc(), &["c".into()]).unwrap();
+        assert_eq!(
+            s.load_pins(&acc()).unwrap(),
+            vec![ConversationId::from("c")]
+        );
+        assert!(s.load_pins(&"jiny".into()).unwrap().is_empty());
     }
 
     fn temp_db(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {

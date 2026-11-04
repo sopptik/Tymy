@@ -29,6 +29,12 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   Týká se jen aktuální konverzace.
 - **Reakce (2026-11-04):** reakce na zprávy musí být vidět.
 - **Pracovní postup:** po každé změně aplikaci přebuildovat (a restartovat okno).
+- **Logování (2026-11-04):** dočasné detailní logování pro snadný debug, s přepínačem
+  na produkční provoz, který loguje jen chyby.
+- **Hledání lidí (2026-11-04):** hledat lidi nejen z adresáře.
+- **Týmy a chaty (2026-11-04):** oddělit týmy a chaty (zvoleno: dvě záložky). Chaty ručně
+  řadit (zvoleno: připnutí + šipky); nepřipnuté podle data poslední komunikace.
+- **Značky nepřečtených (2026-11-04):** na záložkách a u týmů ukázat, kde je něco nového.
 
 ## 2. Architektura (návrh, realizováno)
 
@@ -62,6 +68,12 @@ podmínek služby Microsoftu.
 | Reakce na zprávy | ✅ zobrazení |
 | Šifrovaná lokální cache (SQLCipher, klíč v Secret Service) | ✅ |
 | Posouvání na nejnovější + overlay „Nové zprávy“ | ✅ |
+| Logování debug/production (soubor, rotace) | ✅ |
+| Hledání lidí v adresáři | ✅ |
+| Hledání lidí mimo organizaci | ❌ endpoint vrací 400, potřeba HAR |
+| Nový 1:1 chat z hledání | 🟡 prázdné vlákno ✅, založení první zprávou neověřeno |
+| Záložky Chaty/Týmy, kanály po týmech, odznaky nepřečtených | ✅ |
+| Ruční pořadí chatů (připnutí, ▲▼) | ✅ lokálně |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -119,6 +131,9 @@ podmínek služby Microsoftu.
 4. `.deb` balíček jakmile je chat použitelný na denní bázi, ještě před hovory.
 
 8. ✅ **Posouvání vlákna:** vždy na nejnovější zprávu, overlay „Nové zprávy“ při čtení starších.
+9. ✅ **Logování:** `--log=debug|production`, `TYMY_LOG`, `settings.toml`; `~/.local/state/tymy/logs`.
+10. ✅ **Hledání lidí** v adresáři + otevření/založení 1:1 chatu. Zbývá: lidé mimo organizaci (HAR).
+11. ✅ **Záložky Chaty / Týmy**, odznaky nepřečtených, **ruční pořadí** připnutých chatů.
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).

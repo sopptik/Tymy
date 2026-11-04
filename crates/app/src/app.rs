@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use iced::widget::{
-    Column, Id, button, column, container, image, operation, row, rule, scrollable, space, stack,
-    text, text_input,
+    Column, Id, button, column, container, image, mouse_area, operation, row, rule, scrollable,
+    space, stack, text, text_input,
 };
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme, font};
 use tymy_api::auth::{self, DeviceCode, SecretServiceStore};
@@ -16,13 +16,15 @@ use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config};
 use tymy_core::text::{InlineImage, Part, message_parts};
 use tymy_core::{
-    AccountId, AccountKind, ChatBackend, Conversation, ConversationId, Error, Message, MessageId,
-    MessageKind, MessagePage, Profile,
+    AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind, Error,
+    Message, MessageId, MessageKind, MessagePage, Person, Profile, one_on_one_id,
 };
 
 use tymy_store::Store;
 
-use crate::state::{PeerNames, is_me, merge_messages};
+use crate::state::{
+    PeerNames, channel_name, group_teams, is_me, merge_messages, move_pin, order_chats,
+};
 
 const COMPOSER: Id = Id::new("composer");
 const MESSAGES: Id = Id::new("messages");
@@ -40,12 +42,15 @@ const BOLD: Font = Font {
 pub struct Failure {
     text: String,
     reauth: bool,
+    /// Server odpověděl 404 (např. vlákno nového chatu ještě neexistuje).
+    not_found: bool,
 }
 
 impl From<Error> for Failure {
     fn from(e: Error) -> Self {
         Self {
             reauth: matches!(e, Error::ReauthRequired(_)),
+            not_found: matches!(e, Error::Http { status: 404, .. }),
             text: e.to_string(),
         }
     }
@@ -56,6 +61,7 @@ impl From<anyhow::Error> for Failure {
         Self {
             text: format!("{e:#}"),
             reauth: false,
+            not_found: false,
         }
     }
 }
@@ -95,14 +101,107 @@ pub enum Msg {
     /// Klik na „Nové zprávy“: posunout na nejnovější.
     JumpToNewest,
     Search(String),
+    /// Uplynula pauza v psaní hledaného výrazu (`u64` = pořadí dotazu).
+    SearchFire(u64),
+    People(u64, Result<Vec<Person>, Failure>),
+    External(u64, Result<Vec<Person>, Failure>),
+    OpenPerson(Person),
+    SetTab(Tab),
+    /// Myš nad položkou seznamu (zobrazí ovládání připnutí).
+    Hover(ConversationId),
+    Unhover(ConversationId),
+    Pin(ConversationId),
+    Unpin(ConversationId),
+    /// Posun připnutého chatu (záporně = nahoru).
+    MovePin(ConversationId, isize),
     Draft(String),
     Send,
-    Sent(ConversationId, String, Result<(), Failure>),
+    /// Odesláno: (chat, text pro případ chyby, výsledek = skutečné id chatu).
+    Sent(ConversationId, String, Result<ConversationId, Failure>),
     DismissError,
     MediaLoaded(String, Result<Arc<Vec<u8>>, Failure>),
     OpenImage(InlineImage),
     /// Stažený originál obrázku: (URL originálu, URL náhledu, výsledek).
     FullImage(String, String, Result<Arc<Vec<u8>>, Failure>),
+}
+
+impl Msg {
+    /// Ladicí záznam o události: název a stručná metadata, nikdy obsah zpráv.
+    fn log(&self) {
+        use tracing::{debug, trace};
+        let ok = |r: bool| if r { "ok" } else { "chyba" };
+        match self {
+            // časté a nezajímavé
+            Msg::Scrolled(_) | Msg::Draft(_) | Msg::Search(_) => {
+                trace!(event = ?std::mem::discriminant(self), "update")
+            }
+            Msg::Tick => trace!("update: Tick"),
+            Msg::Booted(r) => debug!(
+                result = ok(r.is_ok()),
+                account = matches!(r, Ok(Some(_))),
+                "update: Booted"
+            ),
+            Msg::StartLogin(kind) => debug!(%kind, "update: StartLogin"),
+            Msg::LoginCode(kind, r) => debug!(%kind, result = ok(r.is_ok()), "update: LoginCode"),
+            Msg::LoginDone(r) => debug!(result = ok(r.is_ok()), "update: LoginDone"),
+            Msg::OpenUrl(_) => debug!("update: OpenUrl"),
+            Msg::Conversations(r) => debug!(
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: Conversations"
+            ),
+            Msg::PeersScanned(m) => debug!(messages = m.len(), "update: PeersScanned"),
+            Msg::Select(id) => debug!(%id, "update: Select"),
+            Msg::Messages(id, r, older) => debug!(
+                %id,
+                older,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(|p| p.messages.len()).unwrap_or(0),
+                has_older = r.as_ref().map(|p| p.older.is_some()).unwrap_or(false),
+                "update: Messages"
+            ),
+            Msg::LoadOlder => debug!("update: LoadOlder"),
+            Msg::JumpToNewest => debug!("update: JumpToNewest"),
+            Msg::Send => debug!("update: Send"),
+            Msg::Sent(id, _, r) => debug!(
+                %id,
+                result = ok(r.is_ok()),
+                actual = ?r.as_ref().ok().filter(|a| *a != id).map(|a| a.as_str()),
+                "update: Sent"
+            ),
+            Msg::DismissError => debug!("update: DismissError"),
+            Msg::MediaLoaded(_, r) => debug!(
+                result = ok(r.is_ok()),
+                bytes = r.as_ref().map(|b| b.len()).unwrap_or(0),
+                "update: MediaLoaded"
+            ),
+            Msg::OpenImage(_) => debug!("update: OpenImage"),
+            Msg::SearchFire(seq) => debug!(seq, "update: SearchFire"),
+            Msg::People(seq, r) => debug!(
+                seq,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: People"
+            ),
+            Msg::External(seq, r) => debug!(
+                seq,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: External"
+            ),
+            Msg::OpenPerson(p) => debug!(mri = %p.mri, external = p.external, "update: OpenPerson"),
+            Msg::SetTab(tab) => debug!(?tab, "update: SetTab"),
+            Msg::Hover(_) | Msg::Unhover(_) => trace!("update: Hover"),
+            Msg::Pin(id) => debug!(%id, "update: Pin"),
+            Msg::Unpin(id) => debug!(%id, "update: Unpin"),
+            Msg::MovePin(id, delta) => debug!(%id, delta, "update: MovePin"),
+            Msg::FullImage(_, _, r) => debug!(
+                result = ok(r.is_ok()),
+                bytes = r.as_ref().map(|b| b.len()).unwrap_or(0),
+                "update: FullImage"
+            ),
+        }
+    }
 }
 
 /// Stav staženého obrázku ze zprávy.
@@ -111,6 +210,10 @@ enum Media {
     Ready(image::Handle, Arc<Vec<u8>>),
     Failed,
 }
+
+/// Hledání lidí: pauza v psaní před dotazem a minimální délka dotazu.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+const MIN_PEOPLE_QUERY: usize = 2;
 
 /// Za „dole“ ve vláknu považujeme i pozici do tolika pixelů od konce.
 const BOTTOM_TOLERANCE: f32 = 40.0;
@@ -123,6 +226,13 @@ const CACHED_MESSAGES: usize = 300;
 
 /// Maximální šířka obrázku v bublině.
 const IMAGE_MAX_WIDTH: f32 = 360.0;
+
+/// Záložka levého panelu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Chats,
+    Teams,
+}
 
 enum Phase {
     Starting,
@@ -157,8 +267,23 @@ pub struct App {
     /// Konverzace, jejichž nejnovější stránku jsme v tomto běhu už stáhli ze sítě.
     fresh: std::collections::HashSet<ConversationId>,
     error: Option<String>,
+    /// Pořadí posledního dotazu na hledání lidí (starší odpovědi se zahodí).
+    search_seq: u64,
+    /// Výsledky hledání lidí (adresář + externí).
+    people: Vec<Person>,
+    searching_people: bool,
+    /// Poznámka k hledání (např. že externí hledání není k dispozici).
+    people_note: Option<String>,
+    /// Nové 1:1 chaty založené z hledání, které server zatím nezná (do první zprávy).
+    draft_chats: Vec<Conversation>,
+    /// S kým je rozpracovaný nový chat (pro založení vlákna při první zprávě).
+    draft_people: HashMap<ConversationId, Person>,
     /// Obrázky ze zpráv podle URL.
     media: HashMap<String, Media>,
+    tab: Tab,
+    /// Ručně seřazené připnuté chaty (první = nahoře).
+    pins: Vec<ConversationId>,
+    hovered: Option<ConversationId>,
     /// Originály obrázků uložené na disk (URL originálu → soubor).
     originals: HashMap<String, std::path::PathBuf>,
 }
@@ -184,6 +309,15 @@ impl App {
             fresh: Default::default(),
             error: None,
             media: HashMap::new(),
+            tab: Tab::Chats,
+            pins: vec![],
+            hovered: None,
+            search_seq: 0,
+            people: vec![],
+            searching_people: false,
+            people_note: None,
+            draft_chats: vec![],
+            draft_people: HashMap::new(),
             originals: HashMap::new(),
         };
         (app, Task::perform(load_session(), Msg::Booted))
@@ -213,7 +347,7 @@ impl App {
     }
 
     fn fail(&mut self, f: Failure) -> Task<Msg> {
-        tracing::warn!(error = %f.text, "chyba");
+        tracing::error!(error = %f.text, reauth = f.reauth, "chyba");
         if f.reauth {
             self.phase = Phase::Login {
                 code: None,
@@ -247,17 +381,16 @@ impl App {
         let backend = s.backend.clone();
         let older = cursor.is_some();
         Task::perform(
-            async move {
-                backend
-                    .messages(&id, cursor.as_deref())
-                    .await
-                    .map_err(Failure::from)
-                    .map(|p| (id, p))
+            {
+                let id = id.clone();
+                async move {
+                    backend
+                        .messages(&id, cursor.as_deref())
+                        .await
+                        .map_err(Failure::from)
+                }
             },
-            move |r| match r {
-                Ok((id, page)) => Msg::Messages(id, Ok(page), older),
-                Err(e) => Msg::Messages(ConversationId(String::new()), Err(e), older),
-            },
+            move |r| Msg::Messages(id.clone(), r, older),
         )
     }
 
@@ -291,13 +424,113 @@ impl App {
         }
     }
 
+    /// Přidá výsledky hledání (bez duplicit a beze mě).
+    fn add_people(&mut self, found: Vec<Person>) {
+        let me = self.session().map(|s| s.profile.account_id.clone());
+        for p in found {
+            let is_me = me
+                .as_ref()
+                .is_some_and(|m| p.mri.as_str().ends_with(m.as_str()));
+            if !is_me && !self.people.iter().any(|q| q.mri == p.mri) {
+                self.people.push(p);
+            }
+        }
+    }
+
+    /// Otevře 1:1 chat s osobou; pokud ještě neexistuje, připraví nový (vznikne první zprávou).
+    fn open_person(&mut self, person: Person) -> Task<Msg> {
+        let Some(me) = self.session().map(|s| s.profile.account_id.clone()) else {
+            return Task::none();
+        };
+        let Some(other) = person.object_id() else {
+            self.error = Some(format!(
+                "Chat s {} zatím neumím založit (účet mimo Microsoft 365).",
+                person.display_name
+            ));
+            return Task::none();
+        };
+        let id = one_on_one_id(me.as_str(), other);
+        self.peers.set(&id, &person.display_name);
+        if !self.conversations.iter().any(|c| c.id == id) {
+            let draft = Conversation {
+                id: id.clone(),
+                kind: tymy_core::ConversationKind::OneOnOne,
+                topic: None,
+                last_message: None,
+                last_activity: None,
+                read_up_to: None,
+                team: None,
+            };
+            self.draft_chats.push(draft);
+            self.draft_people.insert(id.clone(), person.clone());
+            self.merge_draft_chats();
+        }
+        self.search.clear();
+        self.people.clear();
+        self.people_note = None;
+        self.search_seq += 1;
+        self.update(Msg::Select(id))
+    }
+
+    fn save_pins(&self) {
+        if let Some((store, account)) = self.store()
+            && let Err(e) = store.save_pins(&account, &self.pins)
+        {
+            tracing::warn!(error = %e, "uložení připnutých chatů");
+        }
+    }
+
+    /// Název pro zobrazení; u kanálu případně s týmem („Tým › kanál“).
+    fn conv_title(&self, c: &Conversation, with_team: bool) -> String {
+        if c.kind != ConversationKind::Channel {
+            return self.peers.title(c);
+        }
+        let channel = channel_name(c);
+        match self.team_name(c) {
+            Some(team) if with_team => format!("{team} › {channel}"),
+            _ => channel,
+        }
+    }
+
+    fn team_name(&self, c: &Conversation) -> Option<String> {
+        let team = c.team.as_ref()?;
+        team.name.clone().or_else(|| {
+            self.conversations
+                .iter()
+                .find(|x| x.id == team.id)
+                .and_then(|x| x.team.as_ref()?.name.clone())
+        })
+    }
+
+    fn is_draft(&self, id: &ConversationId) -> bool {
+        self.draft_chats.iter().any(|d| &d.id == id)
+    }
+
+    /// Rozpracované nové chaty drží nahoře, dokud je server nezná.
+    fn merge_draft_chats(&mut self) {
+        let known: std::collections::HashSet<_> =
+            self.conversations.iter().map(|c| c.id.clone()).collect();
+        self.draft_chats.retain(|d| !known.contains(&d.id));
+        for d in self.draft_chats.iter().rev() {
+            self.conversations.insert(0, d.clone());
+        }
+    }
+
     /// Při startu: seznam chatů a jména účastníků z lokální cache (než odpoví síť).
     fn load_cached(&mut self, session: &Session) {
         let Some(store) = &session.store else { return };
         let account = &session.profile.account_id;
+        match store.load_pins(account) {
+            Ok(pins) => self.pins = pins,
+            Err(e) => tracing::warn!(error = %e, "načtení připnutých chatů"),
+        }
         match store.load_conversations(account) {
             Ok(list) => {
-                self.conversations = list.into_iter().filter(Conversation::is_chat).collect();
+                self.conversations = list
+                    .into_iter()
+                    .filter(|c| c.kind != ConversationKind::System)
+                    .collect();
+                self.merge_draft_chats();
                 self.peers.learn(
                     &session.profile,
                     self.conversations
@@ -391,6 +624,7 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
+        msg.log();
         match msg {
             Msg::Booted(Ok(Some(session))) => {
                 self.load_cached(&session);
@@ -455,7 +689,11 @@ impl App {
                 {
                     tracing::warn!(error = %e, "uložení konverzací do cache");
                 }
-                self.conversations = list.into_iter().filter(Conversation::is_chat).collect();
+                self.conversations = list
+                    .into_iter()
+                    .filter(|c| c.kind != ConversationKind::System)
+                    .collect();
+                self.merge_draft_chats();
                 self.peers.learn(
                     &session.profile,
                     self.conversations
@@ -486,7 +724,7 @@ impl App {
                     let ids: Vec<_> = self
                         .conversations
                         .iter()
-                        .filter(|c| c.topic.is_none() && !self.peers.knows(&c.id))
+                        .filter(|c| c.is_chat() && c.topic.is_none() && !self.peers.knows(&c.id))
                         .take(PEER_SCAN_LIMIT)
                         .map(|c| c.id.clone())
                         .collect();
@@ -590,9 +828,17 @@ impl App {
                 }
                 Task::batch([media, scroll])
             }
-            Msg::Messages(_, Err(e), older) => {
+            Msg::Messages(id, Err(e), older) => {
                 if older {
                     self.loading_older = false;
+                }
+                // Nový chat z hledání: vlákno na serveru ještě není → prázdná historie.
+                if e.not_found && self.is_draft(&id) {
+                    tracing::debug!(%id, "nový chat zatím bez vlákna na serveru");
+                    self.fresh.insert(id.clone());
+                    self.older.insert(id.clone(), None);
+                    self.messages.entry(id).or_default();
+                    return Task::none();
                 }
                 self.fail(e)
             }
@@ -611,6 +857,100 @@ impl App {
 
             Msg::Search(s) => {
                 self.search = s;
+                self.search_seq += 1;
+                self.people_note = None;
+                if self.tab != Tab::Chats || self.search.trim().chars().count() < MIN_PEOPLE_QUERY {
+                    self.people.clear();
+                    self.searching_people = false;
+                    return Task::none();
+                }
+                let seq = self.search_seq;
+                Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
+                    Msg::SearchFire(seq)
+                })
+            }
+            Msg::SearchFire(seq) => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                if seq != self.search_seq {
+                    return Task::none();
+                }
+                let query = self.search.trim().to_owned();
+                self.searching_people = true;
+                self.people.clear();
+                let mut tasks = vec![Task::perform(
+                    {
+                        let (backend, query) = (backend.clone(), query.clone());
+                        async move { backend.search_people(&query).await.map_err(Failure::from) }
+                    },
+                    move |r| Msg::People(seq, r),
+                )];
+                if looks_like_email(&query) {
+                    tasks.push(Task::perform(
+                        async move { backend.find_external(&query).await.map_err(Failure::from) },
+                        move |r| Msg::External(seq, r),
+                    ));
+                }
+                Task::batch(tasks)
+            }
+            Msg::People(seq, r) | Msg::External(seq, r) if seq != self.search_seq => {
+                let _ = r;
+                Task::none()
+            }
+            Msg::People(_, Ok(found)) => {
+                self.searching_people = false;
+                self.add_people(found);
+                Task::none()
+            }
+            Msg::External(_, Ok(found)) => {
+                self.add_people(found);
+                Task::none()
+            }
+            Msg::People(_, Err(e)) => {
+                self.searching_people = false;
+                self.fail(e)
+            }
+            Msg::External(_, Err(e)) => {
+                tracing::warn!(error = %e.text, "hledání mimo organizaci");
+                self.people_note =
+                    Some("Hledání lidí mimo organizaci zatím není k dispozici.".into());
+                Task::none()
+            }
+            Msg::OpenPerson(person) => self.open_person(person),
+            Msg::SetTab(tab) => {
+                self.tab = tab;
+                self.search.clear();
+                self.people.clear();
+                self.people_note = None;
+                self.search_seq += 1;
+                Task::none()
+            }
+            Msg::Hover(id) => {
+                self.hovered = Some(id);
+                Task::none()
+            }
+            Msg::Unhover(id) => {
+                if self.hovered.as_ref() == Some(&id) {
+                    self.hovered = None;
+                }
+                Task::none()
+            }
+            Msg::Pin(id) => {
+                if !self.pins.contains(&id) {
+                    self.pins.push(id);
+                    self.save_pins();
+                }
+                Task::none()
+            }
+            Msg::Unpin(id) => {
+                self.pins.retain(|p| p != &id);
+                self.save_pins();
+                Task::none()
+            }
+            Msg::MovePin(id, delta) => {
+                move_pin(&mut self.pins, &id, delta);
+                self.save_pins();
                 Task::none()
             }
             Msg::Draft(s) => {
@@ -630,22 +970,40 @@ impl App {
                 }
                 self.sending = true;
                 self.draft.clear();
+                // U nového chatu: když vlákno neexistuje, založit ho a poslat znovu.
+                let draft_peer = self.draft_people.get(&id).map(|p| p.mri.clone());
                 Task::perform(
                     {
                         let (id, text) = (id.clone(), text.clone());
                         async move {
-                            backend
-                                .send_text(&id, &text)
-                                .await
-                                .map(|_| ())
-                                .map_err(Failure::from)
+                            match backend.send_text(&id, &text).await {
+                                Ok(_) => Ok(id),
+                                Err(Error::Http { status: 404, .. }) if draft_peer.is_some() => {
+                                    let peer = draft_peer.expect("ověřeno výše");
+                                    tracing::info!(%id, "vlákno neexistuje, zakládám chat");
+                                    let created = backend.create_chat(&[peer]).await?;
+                                    backend.send_text(&created, &text).await?;
+                                    Ok(created)
+                                }
+                                Err(e) => Err(e),
+                            }
+                            .map_err(Failure::from)
                         }
                     },
                     move |r| Msg::Sent(id.clone(), text.clone(), r),
                 )
             }
-            Msg::Sent(id, _, Ok(())) => {
+            Msg::Sent(requested, _, Ok(id)) => {
                 self.sending = false;
+                if id != requested {
+                    // nový chat dostal od serveru jiné id než odhadnuté
+                    if let Some(person) = self.draft_people.remove(&requested) {
+                        self.peers.set(&id, &person.display_name);
+                    }
+                    self.draft_chats.retain(|d| d.id != requested);
+                    self.conversations.retain(|c| c.id != requested);
+                    self.selected = Some(id.clone());
+                }
                 // vlastní zprávu vždy ukázat
                 self.at_bottom = true;
                 self.new_below = false;
@@ -810,16 +1168,38 @@ impl App {
 
     fn sidebar<'a>(&'a self, session: &'a Session) -> Element<'a, Msg> {
         let me = session.profile.display_name.as_deref().unwrap_or("Já");
-        let query = self.search.to_lowercase();
-        let items = self
-            .conversations
-            .iter()
-            .filter(|c| query.is_empty() || self.peers.title(c).to_lowercase().contains(&query))
-            .map(|c| self.chat_item(session, c));
+        let query = self.search.trim().to_lowercase();
+        let unread_in = |pred: fn(&Conversation) -> bool| {
+            self.conversations
+                .iter()
+                .filter(|c| pred(c) && self.unread(c))
+                .count()
+        };
+        let tabs = row![
+            tab_button(
+                "Chaty",
+                unread_in(Conversation::is_chat),
+                self.tab == Tab::Chats,
+                Tab::Chats
+            ),
+            tab_button(
+                "Týmy",
+                unread_in(|c| c.kind == ConversationKind::Channel),
+                self.tab == Tab::Teams,
+                Tab::Teams
+            ),
+        ]
+        .spacing(4);
+        let (items, placeholder) = match self.tab {
+            Tab::Chats => (self.chat_list(session, &query), "Hledat chat nebo osobu…"),
+            Tab::Teams => (self.team_list(&query), "Hledat tým nebo kanál…"),
+        };
         column![
             container(text(me).size(16).font(BOLD)).padding([12, 14]),
+            container(tabs).padding([0, 8]),
+            space().height(6),
             container(
-                text_input("Hledat chat…", &self.search)
+                text_input(placeholder, &self.search)
                     .on_input(Msg::Search)
                     .padding(8)
             )
@@ -829,6 +1209,164 @@ impl App {
                 .height(Length::Fill),
         ]
         .width(300)
+        .into()
+    }
+
+    /// Záložka Chaty: připnuté v ručním pořadí, ostatní podle poslední komunikace, pak lidé.
+    fn chat_list<'a>(&'a self, session: &'a Session, query: &str) -> Vec<Element<'a, Msg>> {
+        let matches = |c: &&Conversation| {
+            c.is_chat() && (query.is_empty() || self.peers.title(c).to_lowercase().contains(query))
+        };
+        let (pinned, rest) = order_chats(self.conversations.iter().filter(matches), &self.pins);
+        let mut items: Vec<Element<'a, Msg>> = vec![];
+        if !pinned.is_empty() {
+            items.push(section_label("Připnuté"));
+            let n = pinned.len();
+            for (i, c) in pinned.into_iter().enumerate() {
+                items.push(self.chat_row(session, c, Some((i, n))));
+            }
+            if !rest.is_empty() {
+                items.push(section_label("Ostatní"));
+            }
+        }
+        items.extend(rest.into_iter().map(|c| self.chat_row(session, c, None)));
+
+        if query.chars().count() >= MIN_PEOPLE_QUERY {
+            items.push(section_label("Lidé"));
+            if self.searching_people {
+                items.push(note("Hledám…"));
+            } else if self.people.is_empty() {
+                items.push(note("Nikdo nenalezen"));
+            }
+            items.extend(self.people.iter().map(person_item));
+            if let Some(n) = &self.people_note {
+                items.push(note(n));
+            } else if !looks_like_email(&self.search) {
+                items.push(note(
+                    "Tip: celou e-mailovou adresou najdete i lidi mimo organizaci.",
+                ));
+            }
+        }
+        items
+    }
+
+    /// Záložka Týmy: týmy podle názvu, pod nimi kanály.
+    fn team_list<'a>(&'a self, query: &str) -> Vec<Element<'a, Msg>> {
+        let mut items: Vec<Element<'a, Msg>> = vec![];
+        let channels = self
+            .conversations
+            .iter()
+            .filter(|c| c.kind == ConversationKind::Channel);
+        for g in group_teams(channels) {
+            let team_match = g.name.to_lowercase().contains(query);
+            let shown: Vec<_> = g
+                .channels
+                .iter()
+                .filter(|c| {
+                    query.is_empty() || team_match || channel_name(c).to_lowercase().contains(query)
+                })
+                .collect();
+            if shown.is_empty() {
+                continue;
+            }
+            // nepřečtené kanály týmu, i ty skryté hledáním
+            let unread = g.channels.iter().filter(|c| self.unread(c)).count();
+            let mut header = row![text(g.name.clone()).size(13).font(BOLD)]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+            if unread > 0 {
+                header = header.push(space::horizontal()).push(badge(unread));
+            }
+            items.push(
+                container(header)
+                    .width(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 10.0,
+                        right: 10.0,
+                        bottom: 2.0,
+                        left: 10.0,
+                    })
+                    .into(),
+            );
+            items.extend(shown.into_iter().map(|c| self.channel_item(c)));
+        }
+        if items.is_empty() {
+            items.push(note(if query.is_empty() {
+                "Nejste v žádném týmu"
+            } else {
+                "Nic nenalezeno"
+            }));
+        }
+        items
+    }
+
+    fn channel_item<'a>(&'a self, c: &'a Conversation) -> Element<'a, Msg> {
+        let selected = self.selected.as_ref() == Some(&c.id);
+        let unread = self.unread(c);
+        let font = if unread { BOLD } else { Font::DEFAULT };
+        button(
+            row![
+                text("#").size(13).style(muted),
+                text(truncate(&channel_name(c), 30)).size(13).font(font),
+                space::horizontal(),
+                text(short_time(c.last_activity)).size(11).style(muted),
+                text(if unread { "●" } else { "" }).size(12).style(accent),
+            ]
+            .spacing(6),
+        )
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: 6.0,
+            right: 10.0,
+            bottom: 6.0,
+            left: 20.0,
+        })
+        .style(move |t: &Theme, status| chat_item_style(t, status, selected))
+        .on_press(Msg::Select(c.id.clone()))
+        .into()
+    }
+
+    /// Řádek chatu s ovládáním připnutí (zobrazí se po najetí myší).
+    /// `pin` = (pořadí, počet připnutých), pokud je chat připnutý.
+    fn chat_row<'a>(
+        &'a self,
+        session: &Session,
+        c: &'a Conversation,
+        pin: Option<(usize, usize)>,
+    ) -> Element<'a, Msg> {
+        let hovered = self.hovered.as_ref() == Some(&c.id);
+        let controls: Element<'a, Msg> = match pin {
+            Some((i, n)) if hovered => row![
+                small_button(
+                    "▲",
+                    (i > 0).then(|| Msg::MovePin(c.id.clone(), -1)),
+                    "Posunout nahoru"
+                ),
+                small_button(
+                    "▼",
+                    (i + 1 < n).then(|| Msg::MovePin(c.id.clone(), 1)),
+                    "Posunout dolů"
+                ),
+                small_button("✕", Some(Msg::Unpin(c.id.clone())), "Odepnout"),
+            ]
+            .into(),
+            Some(_) => container(text("📌").size(11).style(muted))
+                .center_x(Length::Fill)
+                .into(),
+            None if hovered => small_button("📌", Some(Msg::Pin(c.id.clone())), "Připnout nahoru"),
+            None => space().into(),
+        };
+        let width = if pin.is_some() { 72.0 } else { 28.0 };
+        mouse_area(
+            row![
+                self.chat_item(session, c),
+                container(controls).width(width).center_y(Length::Shrink),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_enter(Msg::Hover(c.id.clone()))
+        .on_exit(Msg::Unhover(c.id.clone()))
         .into()
     }
 
@@ -850,7 +1388,7 @@ impl App {
             .unwrap_or_default();
         let title_font = if unread { BOLD } else { Font::DEFAULT };
         let top = row![
-            text(truncate(&self.peers.title(c), 28))
+            text(truncate(&self.peers.title(c), 24))
                 .size(14)
                 .font(title_font),
             space::horizontal(),
@@ -858,7 +1396,7 @@ impl App {
         ]
         .spacing(6);
         let bottom = row![
-            text(truncate(&preview, 38)).size(12).style(muted),
+            text(truncate(&preview, 32)).size(12).style(muted),
             space::horizontal(),
             text(if unread { "●" } else { "" }).size(12).style(accent),
         ];
@@ -878,7 +1416,7 @@ impl App {
         else {
             return centered(text("Vyberte chat vlevo").style(muted));
         };
-        let header = container(text(self.peers.title(conv)).size(18).font(BOLD))
+        let header = container(text(self.conv_title(conv, true)).size(18).font(BOLD))
             .padding([12, 16])
             .width(Length::Fill);
 
@@ -905,6 +1443,18 @@ impl App {
                 list = list.push(container(text("Načítám…").style(muted)).center_x(Length::Fill))
             }
             Some(None) => {}
+        }
+        if self.older.get(&conv.id) == Some(&None)
+            && self
+                .messages
+                .get(&conv.id)
+                .is_none_or(|m| m.iter().all(|m| !displayable(m)))
+        {
+            list = list.push(
+                container(text("Zatím žádné zprávy. Napište první zprávu.").style(muted))
+                    .center_x(Length::Fill)
+                    .padding([24, 0]),
+            );
         }
         let msgs = self
             .messages
@@ -1001,6 +1551,96 @@ impl App {
         ]
         .into()
     }
+}
+
+fn tab_button<'a>(label: &str, unread: usize, active: bool, tab: Tab) -> Element<'a, Msg> {
+    let font = if active { BOLD } else { Font::DEFAULT };
+    let mut content = row![text(label.to_owned()).size(13).font(font)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+    if unread > 0 {
+        content = content.push(badge(unread));
+    }
+    button(content)
+        .padding([6, 12])
+        .style(move |t: &Theme, status| chat_item_style(t, status, active))
+        .on_press(Msg::SetTab(tab))
+        .into()
+}
+
+/// Odznak s počtem nepřečtených (barva zvýraznění, „99+“ nad 99).
+fn badge<'a>(count: usize) -> Element<'a, Msg> {
+    let label = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    container(text(label).size(10).font(BOLD))
+        .padding([1, 6])
+        .style(|t: &Theme| {
+            let p = t.extended_palette();
+            container::Style {
+                background: Some(p.primary.base.color.into()),
+                text_color: Some(p.primary.base.text),
+                border: Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn section_label<'a>(label: &'a str) -> Element<'a, Msg> {
+    container(text(label).size(11).font(BOLD).style(muted))
+        .padding(iced::Padding {
+            top: 8.0,
+            right: 10.0,
+            bottom: 2.0,
+            left: 10.0,
+        })
+        .into()
+}
+
+fn note<'a>(t: &str) -> Element<'a, Msg> {
+    container(text(t.to_owned()).size(11).style(muted))
+        .padding([4, 10])
+        .into()
+}
+
+fn small_button<'a>(label: &'a str, msg: Option<Msg>, tip: &'a str) -> Element<'a, Msg> {
+    iced::widget::tooltip(
+        button(text(label).size(11))
+            .padding([2, 4])
+            .style(button::text)
+            .on_press_maybe(msg),
+        container(text(tip).size(11))
+            .padding([2, 6])
+            .style(container::rounded_box),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn looks_like_email(q: &str) -> bool {
+    let q = q.trim();
+    q.split_once('@')
+        .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.') && !q.contains(' '))
+}
+
+fn person_item(p: &Person) -> Element<'_, Msg> {
+    let mut title = row![text(p.display_name.as_str()).size(14)].spacing(6);
+    if p.external {
+        title = title.push(text("externí").size(11).style(accent));
+    }
+    let subtitle = p.subtitle();
+    button(column![title, text(truncate(&subtitle, 40)).size(12).style(muted)].spacing(2))
+        .width(Length::Fill)
+        .padding([8, 10])
+        .style(|t: &Theme, status| chat_item_style(t, status, false))
+        .on_press(Msg::OpenPerson(p.clone()))
+        .into()
 }
 
 fn displayable(m: &Message) -> bool {

@@ -9,7 +9,7 @@ use tymy_core::{Event, Result};
 use crate::auth::SkypeSession;
 use crate::chat::wire::PollResponse;
 use crate::chat::{api_url, authed};
-use crate::http::{Http, check, json, net_err};
+use crate::http::{Http, SendLogged, check, json, net_err};
 
 /// Jak dlouho čekáme na odpověď long-pollu (server ji drží typicky desítky sekund).
 const POLL_TIMEOUT: Duration = Duration::from_secs(90);
@@ -45,7 +45,7 @@ pub(crate) async fn register(http: &Http, session: &SkypeSession) -> Result<Poll
     let url = api_url(session, &["v1", "users", "ME", "endpoints"]);
     let resp = authed(http.client.post(url), session)
         .json(&json!({ "endpointFeatures": ENDPOINT_FEATURES }))
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let resp = check(resp).await?;
@@ -71,7 +71,7 @@ pub(crate) async fn register(http: &Http, session: &SkypeSession) -> Result<Poll
             "template": "raw",
             "interestedResources": INTERESTED_RESOURCES,
         }))
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     check(resp).await?;
@@ -99,7 +99,7 @@ pub(crate) async fn poll(
     let resp = match with_registration(http.client.post(url), session, reg)
         .header(reqwest::header::CONTENT_LENGTH, 0)
         .timeout(POLL_TIMEOUT)
-        .send()
+        .send_logged()
         .await
     {
         Ok(r) => r,
@@ -180,6 +180,8 @@ mod tests {
             token: "st".into(),
             expires_at: Utc::now() + ChronoDuration::hours(1),
             chat_service: server.uri().parse().unwrap(),
+            bearer: String::new(),
+            middle_tier: None,
         };
         let reg = register(&http, &s).await.unwrap();
         let events = poll(&http, &s, &reg).await.unwrap();

@@ -9,7 +9,7 @@ use tymy_core::{Conversation, ConversationId, Error, MessagePage, Result, SentMe
 use url::Url;
 
 use crate::auth::SkypeSession;
-use crate::http::{Http, check, json, net_err};
+use crate::http::{Http, SendLogged, check, json, net_err};
 
 /// Počet zpráv na stránku historie.
 const PAGE_SIZE: u32 = 50;
@@ -37,7 +37,7 @@ pub async fn list_conversations(http: &Http, session: &SkypeSession) -> Result<V
             ("pageSize", "200"),
             ("targetType", "Passport|Skype|Lync|Thread|Agent|ShortCircuit|PSTN|Flxt|NotificationStream|ModernBots|secureThreads|InviteFree"),
         ])
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let r: wire::ConversationsResponse = json(check(resp).await?).await?;
@@ -78,7 +78,7 @@ pub async fn list_messages(
             ])
         }
     };
-    let resp = authed(rb, session).send().await.map_err(net_err)?;
+    let resp = authed(rb, session).send_logged().await.map_err(net_err)?;
     let r: wire::MessagesResponse = json(check(resp).await?).await?;
     let messages: Vec<_> = r
         .messages
@@ -118,7 +118,7 @@ pub async fn send_html(
     });
     let resp = authed(http.client.post(url), session)
         .json(&body)
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     let resp = check(resp).await?;
@@ -134,6 +134,56 @@ pub async fn send_html(
     })
 }
 
+/// Založí vlákno chatu (`POST /v1/threads`). Pro dvě osoby žádá „unikátní“ 1:1 chat.
+/// NEOVĚŘENO proti produkci: formát převzatý z protokolu Skype.
+pub async fn create_thread(
+    http: &Http,
+    session: &SkypeSession,
+    me: &str,
+    members: &[&str],
+) -> Result<ConversationId> {
+    let mut list = vec![json!({"id": me, "role": "Admin"})];
+    list.extend(members.iter().map(|m| json!({"id": m, "role": "Admin"})));
+    let one_on_one = members.len() == 1;
+    let body = json!({
+        "members": list,
+        "properties": {
+            "threadType": "chat",
+            "fixedRoster": one_on_one.to_string(),
+            "uniquerosterthread": one_on_one.to_string(),
+        }
+    });
+    let url = api_url(session, &["v1", "threads"]);
+    let resp = authed(http.client.post(url), session)
+        .json(&body)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    let resp = check(resp).await?;
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let text = resp.text().await.map_err(net_err)?;
+    tracing::debug!(?location, body = %crate::redact(&text), "vlákno založeno");
+    let from_body = || {
+        let v: Value = serde_json::from_str(&text).ok()?;
+        v.get("threadResource")
+            .and_then(|t| t.get("id"))
+            .or_else(|| v.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    location
+        .as_deref()
+        .and_then(|l| l.rsplit_once("/threads/").map(|(_, id)| id.to_owned()))
+        .or_else(from_body)
+        .filter(|id| id.starts_with("19:"))
+        .map(ConversationId)
+        .ok_or_else(|| Error::Protocol("server nevrátil id založeného chatu".into()))
+}
+
 /// Ladění: GET na libovolnou cestu chat služby (`/v1/...?...`), vrátí surový JSON.
 pub async fn raw_get(http: &Http, session: &SkypeSession, path_and_query: &str) -> Result<Value> {
     if !path_and_query.starts_with('/') {
@@ -145,7 +195,7 @@ pub async fn raw_get(http: &Http, session: &SkypeSession, path_and_query: &str) 
         .map_err(|e| Error::Other(format!("cesta {path_and_query}: {e}")))?;
     let url = same_origin(session, url.as_str())?;
     let resp = authed(http.client.get(url), session)
-        .send()
+        .send_logged()
         .await
         .map_err(net_err)?;
     json(check(resp).await?).await
@@ -182,6 +232,8 @@ mod tests {
             token: "st".into(),
             expires_at: Utc::now() + Duration::hours(1),
             chat_service: Url::parse(base).unwrap(),
+            bearer: String::new(),
+            middle_tier: None,
         }
     }
 

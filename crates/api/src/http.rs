@@ -29,6 +29,37 @@ impl Http {
     }
 }
 
+/// Odeslání požadavku s logováním (metoda, URL, stav, doba trvání).
+/// Používat místo `RequestBuilder::send` v celém crate.
+pub(crate) trait SendLogged {
+    fn send_logged(self) -> impl std::future::Future<Output = reqwest::Result<Response>> + Send;
+}
+
+impl SendLogged for reqwest::RequestBuilder {
+    #[allow(clippy::manual_async_fn)] // trait vyžaduje `+ Send`, které `async fn` v traitu nezaručí
+    fn send_logged(self) -> impl std::future::Future<Output = reqwest::Result<Response>> + Send {
+        async move {
+            let (client, req) = self.build_split();
+            let req = req?;
+            let method = req.method().clone();
+            let url = redact(req.url().as_str());
+            let start = std::time::Instant::now();
+            tracing::debug!(%method, %url, "→ HTTP");
+            let result = client.execute(req).await;
+            let ms = start.elapsed().as_millis() as u64;
+            match &result {
+                Ok(resp) => {
+                    tracing::debug!(%method, %url, status = resp.status().as_u16(), ms, "← HTTP")
+                }
+                Err(e) => {
+                    tracing::debug!(%method, %url, ms, error = %e, timeout = e.is_timeout(), "✗ HTTP")
+                }
+            }
+            result
+        }
+    }
+}
+
 pub(crate) fn net_err(e: reqwest::Error) -> Error {
     if e.is_decode() {
         Error::Protocol(e.to_string())

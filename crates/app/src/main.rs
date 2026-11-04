@@ -1,15 +1,28 @@
 //! Tymy – lehký Teams klient pro Linux.
+//!
+//! Parametry: `--log=debug|production` (viz `tymy_config::logging`).
 
 mod app;
 mod state;
 
+use tymy_config::logging;
+
 fn main() -> iced::Result {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,tymy=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
+    let log_arg = std::env::args()
+        .skip(1)
+        .find_map(|a| a.strip_prefix("--log=").map(str::to_owned));
+    let settings = tymy_config::Config::load()
+        .map(|c| c.settings)
+        .unwrap_or_default();
+    let mode = match logging::resolve_mode(log_arg.as_deref(), settings.log) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("tymy: {e}");
+            std::process::exit(2);
+        }
+    };
+    // Guard musí žít do konce programu, jinak se nezapíšou poslední řádky logu.
+    let _log = logging::init("tymy", mode, false);
 
     iced::application(app::App::boot, app::App::update, app::App::view)
         .title(app::App::title)
