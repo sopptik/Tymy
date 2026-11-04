@@ -11,7 +11,7 @@ use iced::widget::{
     scrollable, space, span, stack, text, text_editor, text_input,
 };
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme};
-use tymy_api::auth::{self, DeviceCode, SecretServiceStore};
+use tymy_api::auth::{self, CredentialStore, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config, ThemeMode};
 use tymy_core::text::rich::{self, Block, QuoteKind};
@@ -94,7 +94,22 @@ pub enum Msg {
     Booted(Result<Option<Session>, Failure>),
     StartLogin(AccountKind),
     LoginCode(AccountKind, Result<DeviceCode, Failure>),
-    LoginDone(Result<(), Failure>),
+    /// Přihlášení dokončeno: id účtu.
+    LoginDone(Result<AccountId, Failure>),
+    /// Zpět z přihlášení dalšího účtu.
+    CancelLogin,
+    /// Otevřít/zavřít menu účtů v hlavičce panelu.
+    ToggleAccountMenu,
+    SwitchAccount(AccountId),
+    /// Přihlásit další účet.
+    AddAccount,
+    AskSignOut,
+    CancelSignOut,
+    /// Odhlásit aktivní účet (smaže přihlášení i jeho cache).
+    SignOut,
+    SignedOut(Result<(), Failure>),
+    /// Výsledek úlohy spuštěné v daném „období“ (při přepnutí účtu se staré zahodí).
+    Scoped(u64, Box<Msg>),
     OpenUrl(String),
     Tick,
     Conversations(Result<Vec<Conversation>, Failure>),
@@ -126,6 +141,8 @@ pub enum Msg {
     UnhoverMessage(MessageId),
     /// Zkopírovat celý text zprávy.
     CopyMessage(MessageId),
+    /// Zkopírovat text (např. přihlašovací kód) a ukázat potvrzení.
+    CopyText(String, &'static str),
     /// Přepnout zprávu do režimu výběru textu.
     StartSelect(MessageId),
     StopSelect,
@@ -179,6 +196,8 @@ pub enum Msg {
     Deleted(ConversationId, Result<(), Failure>),
     /// Otevřít zprávu nalezenou hledáním.
     OpenHit(ConversationId, MessageId),
+    /// Klik na citaci odpovědi: přejít na původní zprávu.
+    JumpToQuoted(MessageId),
     /// Další krok indexace historie na pozadí.
     IndexNext,
     Indexed(ConversationId, Result<MessagePage, Failure>),
@@ -211,6 +230,18 @@ impl Msg {
             Msg::StartLogin(kind) => debug!(%kind, "update: StartLogin"),
             Msg::LoginCode(kind, r) => debug!(%kind, result = ok(r.is_ok()), "update: LoginCode"),
             Msg::LoginDone(r) => debug!(result = ok(r.is_ok()), "update: LoginDone"),
+            Msg::CancelLogin => debug!("update: CancelLogin"),
+            Msg::ToggleAccountMenu => debug!("update: ToggleAccountMenu"),
+            Msg::SwitchAccount(id) => debug!(account = %id, "update: SwitchAccount"),
+            Msg::AddAccount => debug!("update: AddAccount"),
+            Msg::AskSignOut => debug!("update: AskSignOut"),
+            Msg::CancelSignOut => debug!("update: CancelSignOut"),
+            Msg::SignOut => debug!("update: SignOut"),
+            Msg::SignedOut(r) => debug!(result = ok(r.is_ok()), "update: SignedOut"),
+            Msg::Scoped(epoch, inner) => {
+                trace!(epoch, "update: Scoped");
+                inner.log()
+            }
             Msg::OpenUrl(_) => debug!("update: OpenUrl"),
             Msg::Conversations(r) => debug!(
                 result = ok(r.is_ok()),
@@ -272,6 +303,7 @@ impl Msg {
             Msg::RemovePending(i) => debug!(i, "update: RemovePending"),
             Msg::RemoveLastPending => debug!("update: RemoveLastPending"),
             Msg::CopyMessage(id) => debug!(%id, "update: CopyMessage"),
+            Msg::CopyText(..) => debug!("update: CopyText"),
             Msg::StartSelect(id) => debug!(%id, "update: StartSelect"),
             Msg::StopSelect => debug!("update: StopSelect"),
             Msg::Reply(id) => debug!(%id, "update: Reply"),
@@ -288,6 +320,7 @@ impl Msg {
             Msg::Delete(id) => debug!(%id, "update: Delete"),
             Msg::Deleted(id, r) => debug!(%id, result = ok(r.is_ok()), "update: Deleted"),
             Msg::OpenHit(c, id) => debug!(conversation = %c, %id, "update: OpenHit"),
+            Msg::JumpToQuoted(id) => debug!(%id, "update: JumpToQuoted"),
             Msg::IndexNext => trace!("update: IndexNext"),
             Msg::Indexed(id, r) => debug!(
                 %id,
@@ -394,12 +427,22 @@ enum Phase {
     Login {
         code: Option<DeviceCode>,
         busy: bool,
+        /// Přihlašuje se další účet: původní relace pro návrat tlačítkem Zpět.
+        back: Option<Session>,
     },
     Ready(Session),
 }
 
 pub struct App {
     phase: Phase,
+    /// Období úloh: zvýší se při přepnutí účtu, výsledky starších úloh se zahodí.
+    epoch: u64,
+    /// Přihlášené účty (z `accounts.toml`).
+    accounts: Vec<AccountRecord>,
+    account_menu: bool,
+    confirm_sign_out: bool,
+    /// Běžící přihlašování (zruší se zahozením).
+    login_task: Option<iced::task::Handle>,
     conversations: Vec<Conversation>,
     peers: PeerNames,
     /// Zprávy podle konverzace, od nejstarší.
@@ -488,8 +531,23 @@ pub struct App {
 
 impl App {
     pub fn boot() -> (Self, Task<Msg>) {
-        let app = Self {
+        let app = Self::blank();
+        let system_theme = iced::system::theme().map(Msg::SystemTheme);
+        (
+            app,
+            Task::batch([Task::perform(load_session(None), Msg::Booted), system_theme]),
+        )
+    }
+
+    /// Výchozí stav bez účtu.
+    fn blank() -> Self {
+        Self {
             phase: Phase::Starting,
+            epoch: 0,
+            accounts: load_accounts(),
+            account_menu: false,
+            confirm_sign_out: false,
+            login_task: None,
             conversations: vec![],
             peers: PeerNames::default(),
             messages: HashMap::new(),
@@ -542,12 +600,61 @@ impl App {
             draft_chats: vec![],
             draft_people: HashMap::new(),
             originals: HashMap::new(),
+        }
+    }
+
+    /// Zahodí stav aktivního účtu (zprávy, výběr, indexaci…) a zneplatní běžící úlohy.
+    /// Vzhled, okno a ikona v liště zůstanou.
+    fn reset_account_state(&mut self) {
+        let mut fresh = Self::blank();
+        fresh.epoch = self.epoch + 1;
+        fresh.theme_mode = self.theme_mode;
+        fresh.system_dark = self.system_dark;
+        fresh.focused = self.focused;
+        fresh.hidden = self.hidden;
+        fresh.tray = self.tray.take();
+        fresh.tray_unread = self.tray_unread;
+        *self = fresh;
+    }
+
+    /// Přepne na účet (nebo na naposledy použitý, je-li `None`).
+    fn load_account(&mut self, id: Option<AccountId>) -> Task<Msg> {
+        self.reset_account_state();
+        Task::perform(load_session(id), Msg::Booted)
+    }
+
+    fn active_account(&self) -> Option<&AccountId> {
+        match &self.phase {
+            Phase::Ready(s) => Some(&s.profile.account_id),
+            Phase::Login { back, .. } => back.as_ref().map(|s| &s.profile.account_id),
+            Phase::Starting => None,
+        }
+    }
+
+    /// Zahájí přihlášení (pro nový účet nebo po vypršení přihlášení).
+    fn start_login(&mut self, kind: AccountKind) -> Task<Msg> {
+        let back = match std::mem::replace(&mut self.phase, Phase::Starting) {
+            Phase::Login { back, .. } => back,
+            _ => None,
         };
-        let system_theme = iced::system::theme().map(Msg::SystemTheme);
-        (
-            app,
-            Task::batch([Task::perform(load_session(), Msg::Booted), system_theme]),
-        )
+        self.phase = Phase::Login {
+            code: None,
+            busy: true,
+            back,
+        };
+        self.error = None;
+        let (task, handle) =
+            Task::perform(start_login(kind), move |r| Msg::LoginCode(kind, r)).abortable();
+        self.login_task = Some(handle.abort_on_drop());
+        task
+    }
+
+    fn set_login(&mut self, code: Option<DeviceCode>, busy: bool) {
+        let back = match std::mem::replace(&mut self.phase, Phase::Starting) {
+            Phase::Login { back, .. } => back,
+            _ => None,
+        };
+        self.phase = Phase::Login { code, busy, back };
     }
 
     pub fn title(&self) -> String {
@@ -604,6 +711,7 @@ impl App {
             self.phase = Phase::Login {
                 code: None,
                 busy: false,
+                back: None,
             };
         }
         self.error = Some(f.text);
@@ -791,16 +899,48 @@ impl App {
     /// Zapíše text do schránky i do primárního výběru (X11, vložení prostředním tlačítkem)
     /// a krátce ukáže oznámení.
     fn copy(&mut self, text: String, toast: &str) -> Task<Msg> {
-        self.toast = Some(toast.to_owned());
-        self.toast_seq += 1;
-        let seq = self.toast_seq;
         Task::batch([
             iced::clipboard::write(text.clone()),
             iced::clipboard::write_primary(text),
-            Task::perform(tokio::time::sleep(TOAST_DURATION), move |_| {
-                Msg::HideToast(seq)
-            }),
+            self.show_toast(toast),
         ])
+    }
+
+    /// Krátké oznámení nad vláknem.
+    fn show_toast(&mut self, toast: &str) -> Task<Msg> {
+        self.toast = Some(toast.to_owned());
+        self.toast_seq += 1;
+        let seq = self.toast_seq;
+        Task::perform(tokio::time::sleep(TOAST_DURATION), move |_| {
+            Msg::HideToast(seq)
+        })
+    }
+
+    /// Klik na citaci odpovědi: přejít na původní zprávu v otevřeném chatu.
+    fn jump_to_quoted(&mut self, id: MessageId) -> Task<Msg> {
+        let Some(conv) = self.selected.clone() else {
+            return Task::none();
+        };
+        let cached = self.store().is_some_and(|(store, account)| {
+            store
+                .load_messages_since(&account, &conv, msg_num(&id) as i64, 1)
+                .ok()
+                .and_then(|v| v.into_iter().next())
+                .is_some_and(|m| m.id == id)
+        });
+        if cached {
+            return self.open_hit(conv, id);
+        }
+        if self
+            .messages
+            .get(&conv)
+            .is_some_and(|v| v.iter().any(|m| m.id == id))
+        {
+            // bez cache neumíme posunout přesně, aspoň zvýraznit
+            self.highlight = Some(id);
+            return Task::none();
+        }
+        self.show_toast("Původní zpráva není ve stažené historii")
     }
 
     fn save_pins(&self) {
@@ -1126,8 +1266,26 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
+        let msg = match msg {
+            Msg::Scoped(epoch, inner) if epoch == self.epoch => *inner,
+            Msg::Scoped(epoch, inner) => {
+                tracing::debug!(
+                    epoch,
+                    current = self.epoch,
+                    "zahazuji výsledek úlohy jiného účtu"
+                );
+                inner.log();
+                return Task::none();
+            }
+            msg => msg,
+        };
         let task = self.handle(msg);
-        Task::batch([task, self.sync_tray()])
+        // výsledky úloh nesou období, ve kterém vznikly (viz `reset_account_state`)
+        let epoch = self.epoch;
+        Task::batch([
+            task.map(move |m| Msg::Scoped(epoch, Box::new(m))),
+            self.sync_tray(),
+        ])
     }
 
     /// Aktualizuje počet nepřečtených v liště, pokud se změnil.
@@ -1158,45 +1316,112 @@ impl App {
         msg.log();
         match msg {
             Msg::Booted(Ok(Some(session))) => {
+                self.accounts = load_accounts();
+                tracing::info!(account = %session.profile.account_id, "účet načten");
                 self.load_cached(&session);
                 self.phase = Phase::Ready(session);
                 self.fetch_conversations()
             }
             Msg::Booted(Ok(None)) => {
+                self.accounts = load_accounts();
                 self.phase = Phase::Login {
                     code: None,
                     busy: false,
+                    back: None,
                 };
                 Task::none()
             }
-            Msg::Booted(Err(e)) => self.fail(e),
-
-            Msg::StartLogin(kind) => {
-                self.phase = Phase::Login {
-                    code: None,
-                    busy: true,
-                };
-                self.error = None;
-                Task::perform(start_login(kind), move |r| Msg::LoginCode(kind, r))
-            }
-            Msg::LoginCode(kind, Ok(code)) => {
-                self.phase = Phase::Login {
-                    code: Some(code.clone()),
-                    busy: true,
-                };
-                Task::perform(finish_login(kind, code), Msg::LoginDone)
-            }
-            Msg::LoginCode(_, Err(e)) | Msg::LoginDone(Err(e)) => {
+            Msg::Booted(Err(e)) => {
+                // bez relace zůstane přihlašovací obrazovka (s nabídkou jiných účtů)
+                self.accounts = load_accounts();
                 self.phase = Phase::Login {
                     code: None,
                     busy: false,
+                    back: None,
                 };
                 self.fail(e)
             }
-            Msg::LoginDone(Ok(())) => {
-                self.phase = Phase::Starting;
-                Task::perform(load_session(), Msg::Booted)
+
+            Msg::StartLogin(kind) => self.start_login(kind),
+            Msg::LoginCode(kind, Ok(code)) => {
+                self.set_login(Some(code.clone()), true);
+                let (task, handle) =
+                    Task::perform(finish_login(kind, code), Msg::LoginDone).abortable();
+                self.login_task = Some(handle.abort_on_drop());
+                task
             }
+            Msg::LoginCode(_, Err(e)) | Msg::LoginDone(Err(e)) => {
+                self.login_task = None;
+                self.set_login(None, false);
+                self.fail(e)
+            }
+            Msg::LoginDone(Ok(id)) => self.load_account(Some(id)),
+            Msg::CancelLogin => {
+                self.login_task = None;
+                if let Phase::Login {
+                    back: Some(session),
+                    ..
+                } = std::mem::replace(&mut self.phase, Phase::Starting)
+                {
+                    self.phase = Phase::Ready(session);
+                }
+                self.error = None;
+                Task::none()
+            }
+            Msg::ToggleAccountMenu => {
+                self.account_menu = !self.account_menu;
+                self.confirm_sign_out = false;
+                Task::none()
+            }
+            Msg::SwitchAccount(id) => {
+                self.account_menu = false;
+                if self.session().is_some_and(|s| s.profile.account_id == id) {
+                    return Task::none();
+                }
+                tracing::info!(account = %id, "přepínám účet");
+                self.load_account(Some(id))
+            }
+            Msg::AddAccount => {
+                self.account_menu = false;
+                if let Phase::Ready(session) = std::mem::replace(&mut self.phase, Phase::Starting) {
+                    self.phase = Phase::Login {
+                        code: None,
+                        busy: false,
+                        back: Some(session),
+                    };
+                }
+                Task::none()
+            }
+            Msg::AskSignOut => {
+                self.confirm_sign_out = true;
+                Task::none()
+            }
+            Msg::CancelSignOut => {
+                self.confirm_sign_out = false;
+                Task::none()
+            }
+            Msg::SignOut => {
+                let Some(id) = self.active_account().cloned() else {
+                    return Task::none();
+                };
+                tracing::info!(account = %id, "odhlašuji účet");
+                if let Some((store, account)) = self.store()
+                    && let Err(e) = store.forget_account(&account)
+                {
+                    tracing::warn!(error = %e, "smazání cache účtu");
+                }
+                // nic dalšího pro tento účet už nespouštět
+                self.reset_account_state();
+                Task::perform(sign_out(id), Msg::SignedOut)
+            }
+            Msg::SignedOut(r) => {
+                if let Err(e) = r {
+                    self.error = Some(e.text.clone());
+                    tracing::error!(error = %e.text, "odhlášení");
+                }
+                self.load_account(None)
+            }
+            Msg::Scoped(..) => Task::none(),
 
             Msg::OpenUrl(url) => {
                 open_url(&url);
@@ -1777,7 +2002,9 @@ impl App {
                     move |r| Msg::Deleted(conv.clone(), r),
                 )
             }
+            Msg::CopyText(value, toast) => self.copy(value, toast),
             Msg::OpenHit(conv, id) => self.open_hit(conv, id),
+            Msg::JumpToQuoted(id) => self.jump_to_quoted(id),
             Msg::IndexNext => self.index_next(),
             Msg::Indexed(conv, Ok(page)) => {
                 if let Some((store, account)) = self.store() {
@@ -2096,7 +2323,9 @@ impl App {
     pub fn view(&self) -> Element<'_, Msg> {
         let body: Element<'_, Msg> = match &self.phase {
             Phase::Starting => centered(text("Načítám…").size(15).style(muted)),
-            Phase::Login { code, busy } => self.login_view(code.as_ref(), *busy),
+            Phase::Login { code, busy, back } => {
+                self.login_view(code.as_ref(), *busy, back.as_ref())
+            }
             Phase::Ready(session) => {
                 row![self.sidebar(session), vline(), self.chat_pane(session),].into()
             }
@@ -2112,21 +2341,38 @@ impl App {
             .into()
     }
 
-    fn login_view(&self, code: Option<&DeviceCode>, busy: bool) -> Element<'_, Msg> {
+    fn login_view<'a>(
+        &'a self,
+        code: Option<&DeviceCode>,
+        busy: bool,
+        back: Option<&'a Session>,
+    ) -> Element<'a, Msg> {
         let content: Element<'_, Msg> = match code {
             Some(code) => column![
                 text("Přihlášení").size(22).font(BOLD),
                 text("1. Otevřete přihlašovací stránku Microsoftu").style(muted),
-                button(text(code.verification_uri.clone()).size(14))
-                    .padding(0)
-                    .style(|t: &Theme, s| style::link(t, s, false))
-                    .on_press(Msg::OpenUrl(code.verification_uri.clone())),
+                row![
+                    button(text(code.verification_uri.clone()).size(14))
+                        .padding(0)
+                        .style(|t: &Theme, s| style::link(t, s, false))
+                        .on_press(Msg::OpenUrl(code.verification_uri.clone())),
+                    copy_button(&code.verification_uri, "Odkaz zkopírován"),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
                 space().height(4),
                 text("2. Zadejte tento kód").style(muted),
-                container(text(code.user_code.clone()).size(28).font(Font::MONOSPACE))
-                    .padding([10, 18])
-                    .style(style::day_pill),
-                space().height(4),
+                row![
+                    container(text(code.user_code.clone()).size(28).font(Font::MONOSPACE))
+                        .padding([10, 18])
+                        .style(style::day_pill),
+                    copy_button(&code.user_code, "Kód zkopírován"),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+                text(self.toast.clone().unwrap_or_default())
+                    .size(12)
+                    .style(style::accent),
                 text("3. Potvrďte přihlášení. Okno pak pokračuje samo.")
                     .size(13)
                     .style(muted),
@@ -2137,7 +2383,12 @@ impl App {
                 row![logo(40.0), text("Tymy").size(30).font(BOLD)]
                     .spacing(12)
                     .align_y(iced::Alignment::Center),
-                text("Lehký klient Teams pro Linux").style(muted),
+                text(if back.is_some() {
+                    "Přihlášení dalšího účtu"
+                } else {
+                    "Lehký klient Teams pro Linux"
+                })
+                .style(muted),
                 space().height(18),
                 button(
                     text("Přihlásit pracovní / školní účet")
@@ -2161,12 +2412,84 @@ impl App {
             .spacing(10)
             .into(),
         };
-        centered(
-            container(content)
-                .padding(32)
-                .max_width(440)
-                .style(style::card),
-        )
+        let mut col = column![content].spacing(10);
+        if back.is_some() {
+            col = col.push(space().height(4)).push(
+                button(text("← Zpět").size(13))
+                    .padding([6, 12])
+                    .style(style::ghost)
+                    .on_press(Msg::CancelLogin),
+            );
+        } else if code.is_none() && !self.accounts.is_empty() {
+            // např. po vypršení přihlášení: lze pokračovat jiným účtem
+            col = col
+                .push(space().height(8))
+                .push(text("Nebo pokračovat účtem").size(12).style(muted));
+            for a in &self.accounts {
+                col = col.push(account_item(a, false, Msg::SwitchAccount(a.id.clone())));
+            }
+        }
+        centered(container(col).padding(32).max_width(440).style(style::card))
+    }
+
+    /// Rozbalené menu účtů pod hlavičkou panelu (prázdné, když je zavřené).
+    fn account_menu_view<'a>(&'a self, session: &'a Session) -> Element<'a, Msg> {
+        if !self.account_menu {
+            return space().height(0).into();
+        }
+        let active = &session.profile.account_id;
+        let mut col = Column::new().spacing(2);
+        for a in &self.accounts {
+            let is_active = &a.id == active;
+            col = col.push(account_item(a, is_active, Msg::SwitchAccount(a.id.clone())));
+        }
+        col = col.push(
+            button(text("＋  Přidat účet").size(13))
+                .padding([7, 10])
+                .width(Length::Fill)
+                .style(|t: &Theme, st| style::list_item(t, st, false))
+                .on_press(Msg::AddAccount),
+        );
+        if self.confirm_sign_out {
+            let name = session.profile.display_name.as_deref().unwrap_or("účet");
+            col = col.push(
+                column![
+                    text(format!(
+                        "Odhlásit {name}? Z počítače se smaže přihlášení i stažené zprávy tohoto účtu."
+                    ))
+                    .size(12),
+                    row![
+                        button(text("Odhlásit").size(12).font(SEMIBOLD))
+                            .padding([3, 10])
+                            .style(style::danger_button)
+                            .on_press(Msg::SignOut),
+                        button(text("Zrušit").size(12))
+                            .padding([3, 10])
+                            .style(style::ghost)
+                            .on_press(Msg::CancelSignOut),
+                    ]
+                    .spacing(4),
+                ]
+                .spacing(6)
+                .padding([6, 10]),
+            );
+        } else {
+            col = col.push(
+                button(text("Odhlásit tento účet").size(13).style(style::danger))
+                    .padding([7, 10])
+                    .width(Length::Fill)
+                    .style(|t: &Theme, st| style::list_item(t, st, false))
+                    .on_press(Msg::AskSignOut),
+            );
+        }
+        container(container(col).padding(6).style(style::card))
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 12.0,
+                bottom: 10.0,
+                left: 12.0,
+            })
+            .into()
     }
 
     fn sidebar<'a>(&'a self, session: &'a Session) -> Element<'a, Msg> {
@@ -2183,22 +2506,42 @@ impl App {
             ThemeMode::Light => ("☀", "Vzhled: světlý (klikněte pro tmavý)"),
             ThemeMode::Dark => ("☾", "Vzhled: tmavý (klikněte pro systémový)"),
         };
-        let profile = row![
-            avatar(me, 34.0),
-            column![
-                text(truncate(me, 22)).size(14).font(SEMIBOLD),
-                text(truncate(
-                    session.profile.username.as_deref().unwrap_or_default(),
-                    28
-                ))
-                .size(11)
-                .style(muted),
+        let who = button(
+            row![
+                avatar(me, 34.0),
+                column![
+                    text(truncate(me, 20)).size(14).font(SEMIBOLD),
+                    text(truncate(
+                        session.profile.username.as_deref().unwrap_or_default(),
+                        26
+                    ))
+                    .size(11)
+                    .style(muted),
+                ]
+                .spacing(1)
+                .width(Length::Fill),
+                text(if self.account_menu { "▴" } else { "▾" })
+                    .size(12)
+                    .style(muted),
             ]
-            .spacing(1),
-            space::horizontal(),
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([4, 6])
+        .width(Length::Fill)
+        .style(move |t: &Theme, st| style::list_item(t, st, self.account_menu))
+        .on_press(Msg::ToggleAccountMenu);
+        let profile = row![
+            iced::widget::tooltip(
+                who,
+                container(text("Účty").size(11))
+                    .padding([3, 8])
+                    .style(style::tooltip),
+                iced::widget::tooltip::Position::Bottom,
+            ),
             icon_button(theme_icon, Some(Msg::ToggleTheme), theme_tip),
         ]
-        .spacing(10)
+        .spacing(6)
         .align_y(iced::Alignment::Center);
         let tabs = container(
             row![
@@ -2225,11 +2568,12 @@ impl App {
         };
         container(column![
             container(profile).padding(iced::Padding {
-                top: 14.0,
+                top: 10.0,
                 right: 12.0,
-                bottom: 12.0,
-                left: 14.0
+                bottom: 8.0,
+                left: 8.0
             }),
+            self.account_menu_view(session),
             container(tabs).padding([0, 12]),
             container(
                 text_input(placeholder, &self.search)
@@ -3068,6 +3412,49 @@ fn icon_button<'a>(label: &'a str, msg: Option<Msg>, tip: &'a str) -> Element<'a
     .into()
 }
 
+/// Tlačítko „Kopírovat“ (do schránky i primárního výběru) s potvrzením `toast`.
+fn copy_button<'a>(value: &str, toast: &'static str) -> Element<'a, Msg> {
+    button(text("Kopírovat").size(12))
+        .padding([4, 10])
+        .style(style::secondary)
+        .on_press(Msg::CopyText(value.to_owned(), toast))
+        .into()
+}
+
+/// Položka účtu v menu: avatar, jméno, e-mail a typ; aktivní účet má ✓.
+fn account_item<'a>(a: &AccountRecord, active: bool, msg: Msg) -> Element<'a, Msg> {
+    let name = a.display_name.clone().unwrap_or_else(|| "Účet".into());
+    let kind = match a.kind {
+        AccountKind::Work => "pracovní",
+        AccountKind::Personal => "osobní",
+    };
+    let detail = match &a.username {
+        Some(u) => format!("{} · {kind}", truncate(u, 26)),
+        None => kind.to_owned(),
+    };
+    button(
+        row![
+            avatar(&name, 28.0),
+            column![
+                text(truncate(&name, 24)).size(13).font(SEMIBOLD),
+                text(detail).size(11).style(muted),
+            ]
+            .spacing(1)
+            .width(Length::Fill),
+            text(if active { "✓" } else { "" })
+                .size(13)
+                .style(style::accent),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([6, 8])
+    .width(Length::Fill)
+    .style(move |t: &Theme, st| style::list_item(t, st, active))
+    .on_press(msg)
+    .into()
+}
+
 /// Kulatý avatar s iniciálami a barvou odvozenou ze jména.
 fn avatar<'a>(name: &str, size: f32) -> Element<'a, Msg> {
     container(text(style::initials(name)).size(size * 0.38).font(SEMIBOLD))
@@ -3541,7 +3928,7 @@ fn block_view<'a>(
             }
             let inner = blocks_view(&q.blocks, mine, true, media, c);
             col = col.extend(inner);
-            container(
+            let quote = container(
                 container(col)
                     .padding([5, 10])
                     .style(move |t: &Theme| style::quote(t, mine)),
@@ -3550,8 +3937,18 @@ fn block_view<'a>(
                 left: 3.0,
                 ..iced::Padding::ZERO
             })
-            .style(move |t: &Theme| style::quote_frame(t, mine))
-            .into()
+            .style(move |t: &Theme| style::quote_frame(t, mine));
+            match &q.kind {
+                // klik na citaci odpovědi skočí na původní zprávu
+                QuoteKind::Reply {
+                    message_id: Some(id),
+                    ..
+                } => mouse_area(quote)
+                    .on_press(Msg::JumpToQuoted(MessageId::from(id.as_str())))
+                    .interaction(iced::mouse::Interaction::Pointer)
+                    .into(),
+                _ => quote.into(),
+            }
         }
         Block::Table(rows) => {
             let table = Column::with_children(rows.iter().map(|r| {
@@ -3810,9 +4207,25 @@ fn open_url(url: &str) {
     }
 }
 
-async fn load_session() -> Result<Option<Session>, Failure> {
-    let config = Config::load()?;
-    let Ok(record) = config.find(None) else {
+/// Účty z konfigurace (pro menu účtů).
+fn load_accounts() -> Vec<AccountRecord> {
+    Config::load()
+        .map(|c| c.accounts.accounts)
+        .unwrap_or_default()
+}
+
+/// Připraví relaci účtu `id` (bez něj naposledy použitého) a zapamatuje si ho jako aktivní.
+async fn load_session(id: Option<AccountId>) -> Result<Option<Session>, Failure> {
+    let mut config = Config::load()?;
+    if let Some(id) = id
+        && config.settings.account.as_ref() != Some(&id)
+    {
+        config.settings.account = Some(id);
+        if let Err(e) = config.save_settings() {
+            tracing::warn!(error = %e, "uložení aktivního účtu");
+        }
+    }
+    let Some(record) = config.active().cloned() else {
         return Ok(None);
     };
     let ep = config.endpoints(record.kind, record.authority.as_deref());
@@ -3854,7 +4267,7 @@ async fn start_login(kind: AccountKind) -> Result<DeviceCode, Failure> {
     Ok(auth::start_device_code(&Http::new()?, &ep).await?)
 }
 
-async fn finish_login(kind: AccountKind, code: DeviceCode) -> Result<(), Failure> {
+async fn finish_login(kind: AccountKind, code: DeviceCode) -> Result<AccountId, Failure> {
     let mut config = Config::load()?;
     let ep = config.endpoints(kind, None);
     let tokens = auth::poll_device_code(&Http::new()?, &ep, &code).await?;
@@ -3862,6 +4275,17 @@ async fn finish_login(kind: AccountKind, code: DeviceCode) -> Result<(), Failure
     let profile = complete_login(kind, &tokens, &store).await?;
     config.upsert(AccountRecord::from_profile(&profile, None));
     config.save()?;
+    Ok(profile.account_id)
+}
+
+/// Smaže přihlášení účtu ze Secret Service a odebere ho z konfigurace.
+async fn sign_out(id: AccountId) -> Result<(), Failure> {
+    let store = SecretServiceStore::new().await?;
+    store.delete(&id).await?;
+    let mut config = Config::load()?;
+    config.remove(&id);
+    config.save()?;
+    config.save_settings()?;
     Ok(())
 }
 

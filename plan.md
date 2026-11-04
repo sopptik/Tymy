@@ -97,6 +97,8 @@ podmínek služby Microsoftu.
 | Odpověď na zprávu | 🟡 zobrazení ✅, odeslání neověřeno proti produkci |
 | Reakce, úprava a mazání vlastních zpráv | 🟡 UI ✅, volání neověřena proti produkci |
 | Hledání ve zprávách + indexace historie na pozadí | ✅ |
+| Přepínání účtů, přidání a odhlášení účtu | 🟡 menu a Zpět ✅, přepnutí mezi dvěma účty neověřeno |
+| Skok z citace odpovědi na původní zprávu | 🟡 hotovo, klik zatím neověřen na snímku |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -105,7 +107,7 @@ podmínek služby Microsoftu.
 
 ### Fáze 1a: dokončení chatu (nepotřebuje odchyt provozu)
 1. ✅ **Lokální cache (`crates/store`)**: šifrovaná (SQLCipher), konverzace, zprávy i obrázky;
-   rychlý start, historie offline, fulltext bez diakritiky (FTS5). Zbývá: hledání v UI.
+   rychlý start, historie offline, fulltext bez diakritiky (FTS5).
 2. ✅ **Víceřádkové psaní:** Enter odešle, Shift+Enter nový řádek (iced `text_editor`).
 3. ✅ **Desktopové notifikace** (D-Bus, `notify-rust`): nová zpráva mimo otevřený chat,
    klik otevře chat.
@@ -115,13 +117,17 @@ podmínek služby Microsoftu.
    adresy), ✅ tučně/kurzíva/podtržení/přeškrtnutí, ✅ zmínky, ✅ kód v řádku i bloky kódu,
    ✅ seznamy, nadpisy, tabulky, ✅ citace, přeposlané zprávy a odpovědi, 🟡 odpovídání na zprávy
    (tlačítko ↩, Esc zruší; odeslání neověřeno proti produkci), 🟡 posílání reakcí (☺ u zprávy,
-   klik na reakci pod zprávou ji přidá/odebere; neověřeno proti produkci). Zbývá: klik na citaci
-   odpovědi skočí na původní zprávu.
+   klik na reakci pod zprávou ji přidá/odebere; neověřeno proti produkci), ✅ klik na citaci
+   odpovědi skočí na původní zprávu (z cache; když tam není, ukáže oznámení).
 6. 🟡 **Úpravy a mazání vlastních zpráv:** ✎ (nebo ↑ v prázdném poli) načte text do psacího pole,
    Enter uloží, Esc zruší; citace odpovědi a obrázky zůstanou, ostatní formátování se nahradí
    textem. 🗑 se potvrzuje. Změna se projeví hned, při chybě se vrátí stav ze serveru.
    Neověřeno proti produkci.
-7. **Přepínání účtů** v okně (podpora více účtů je už v konfiguraci).
+7. ✅ **Přepínání účtů** v okně: klik na profil v hlavičce panelu otevře menu účtů (přepnutí,
+   „Přidat účet“ se Zpět, odhlášení s potvrzením, které smaže token i cache účtu). Aktivní je
+   vždy jeden účet; naposledy použitý se pamatuje (`settings.toml` → `account`). Při přepnutí se
+   zahodí stav i výsledky rozběhnutých úloh předchozího účtu. Odkaz i kód přihlášení jdou
+   zkopírovat. Později: nepřečtené a notifikace i z neaktivních účtů.
 8. ✅ **Hledání ve zprávách:** fulltext SQLite FTS5 uvnitř šifrované cache (bez diakritiky,
    předpony slov, úryvky se zvýrazněním), výsledky v postranním panelu pod chaty a lidmi,
    klik otevře zprávu v kontextu a zvýrazní ji. Indexace historie na pozadí: po startu postupně
@@ -138,7 +144,10 @@ podmínek služby Microsoftu.
 4. **Odesílání souborů:** pracovní účet = OneDrive „Microsoft Teams Chat Files“ + `properties.files`;
    osobní = AMS upload. Drag & drop, dialog, průběh.
 5. **Osobní účty:** ověřit autoritu, client id, scope, authz a chat host.
-6. **Přihlášení s PKCE** pro organizace, které blokují device code.
+6. **Přihlášení s PKCE** pro organizace, které blokují device code. Uživatel narazil (2026-11-04)
+   u druhého pracovního účtu na chybu 53003 (blokováno podmíněným přístupem, zařízení
+   „Unregistered“). Pokud politika blokuje jen device code, pomůže přihlášení v prohlížeči;
+   pokud vyžaduje spravované zařízení, neprojde žádný neoficiální klient.
 
 ### Fáze 1c: distribuce
 1. Balíček `.deb` (`cargo-deb`): `.desktop` soubor, ikony, autostart (XDG).
