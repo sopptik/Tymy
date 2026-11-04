@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- stejná bublina jako ikona v liště (crates/app/src/tray.rs) -->
+  <g fill="#1E889E">
+    <rect x="6" y="14" width="88" height="64" rx="20"/>
+    <path d="M20 74 L42 74 L16 95 Z"/>
+  </g>
+  <g fill="#FFFFFF">
+    <circle cx="30" cy="47" r="6.5"/>
+    <circle cx="48" cy="47" r="6.5"/>
+    <circle cx="66" cy="47" r="6.5"/>
+  </g>
+</svg>

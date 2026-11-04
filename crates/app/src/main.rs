@@ -32,7 +32,16 @@ fn main() -> iced::Result {
         .title(app::App::title)
         .subscription(app::App::subscription)
         .theme(app::App::theme)
-        .window_size((1100.0, 720.0))
+        .window(iced::window::Settings {
+            size: iced::Size::new(1100.0, 720.0),
+            icon: tray::window_icon(64),
+            // WM_CLASS / app id = název .desktop souboru (ikona a seskupení v panelu)
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: "tymy".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
         // zavření okna řeší aplikace (skrytí do lišty, viz Msg::CloseRequested)
         .exit_on_close_request(false)
         .run()

@@ -102,6 +102,7 @@ podmínek služby Microsoftu.
 | Nepřečtené v neaktivních účtech (menu, odznak u jména, lišta) | ✅ |
 | Přihlášení v prohlížeči (PKCE, `http://localhost`) | ✅ ověřeno (druhý pracovní účet) |
 | Opuštěné týmy a kanály bez přístupu (403) | ✅ skryté |
+| Balíček `.deb`, instalace na čistém Ubuntu 24.04 | ✅ (Docker + Xvfb) |
 | Hlášení přečtení serveru | 🟡 hotovo, neověřeno proti produkci |
 | Skok z citace odpovědi na původní zprávu | 🟡 hotovo, klik zatím neověřen na snímku |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
@@ -176,8 +177,13 @@ podmínek služby Microsoftu.
    je teď hlavní tlačítko, kód je druhá možnost.
 
 ### Fáze 1c: distribuce
-1. Balíček `.deb` (`cargo-deb`): `.desktop` soubor, ikony, autostart (XDG).
-2. Test instalace na čistém Ubuntu 24.04.
+1. ✅ Balíček `.deb`: `packaging/build-deb.sh` (místo `cargo-deb` jen `dpkg-deb` a
+   `dpkg-shlibdeps`), `tymy` + `tymy-cli`, `.desktop` soubor, ikony (SVG + PNG 16–256),
+   okno má WM_CLASS/app id `tymy` a vlastní ikonu. Závislosti: knihovny z `dpkg-shlibdeps` +
+   ručně ty, které winit/wgpu načítají za běhu (X11, xkbcommon, Wayland, font); GPU ovladače
+   jen doporučené (bez nich iced kreslí softwarově). Autostart: samostatný bod (volba v okně).
+2. ✅ Test instalace na čistém Ubuntu 24.04 (Docker, 2026-11-04): instalace bez chybějících
+   knihoven, okno pod Xvfb běží (přihlašovací obrazovka).
 3. Volitelně Flatpak později.
 
 ### Fáze 2: hovory a videohovory (výzkum s rozhodovacím bodem)

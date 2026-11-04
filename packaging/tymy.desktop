@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Tymy
+GenericName=Chat Microsoft Teams
+Comment=Lehký klient Microsoft Teams pro Linux
+Comment[cs]=Lehký klient Microsoft Teams pro Linux
+Exec=tymy
+Icon=tymy
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+Keywords=Teams;chat;Microsoft;
+StartupNotify=true
+StartupWMClass=tymy
