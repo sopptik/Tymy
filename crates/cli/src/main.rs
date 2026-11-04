@@ -72,6 +72,11 @@ enum Command {
     },
     /// Sleduje události v reálném čase (Ctrl+C ukončí).
     Watch,
+    /// Ladění: surový GET na chat službu, např. `/v1/users/ME/conversations?pageSize=1`.
+    Raw {
+        /// Cesta včetně query, začíná `/`.
+        path: String,
+    },
     /// Stáhne médium (obrázek) vložené do zprávy.
     Media {
         /// URL z atributu `src` obrázku (…asm.skype.com/…).
@@ -100,6 +105,13 @@ async fn main() -> Result<()> {
             let record = config.find(cli.account.as_deref())?.clone();
             let store = auth::SecretServiceStore::new().await?;
             auth::CredentialStore::delete(&store, &record.id).await?;
+            if let Some(dirs) = directories::ProjectDirs::from("", "", "tymy") {
+                let path = dirs.data_dir().join("cache.sqlite");
+                if path.exists() {
+                    tymy_store::Store::open(&path, &store.cache_key().await?)?
+                        .forget_account(&record.id)?;
+                }
+            }
             config.accounts.accounts.retain(|a| a.id != record.id);
             config.save()?;
             println!("Odhlášen: {}", record.label());
@@ -144,6 +156,10 @@ async fn main() -> Result<()> {
             let sent = backend.send_text(&id, &text.join(" ")).await?;
             println!("Odesláno (clientmessageid {})", sent.client_message_id);
             Ok(())
+        }
+        Command::Raw { path } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            print_json(&backend.raw_get(&path).await?)
         }
         Command::Media { url, output } => {
             let backend = backend(&config, cli.account.as_deref()).await?;

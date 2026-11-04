@@ -166,6 +166,45 @@ pub struct Message {
     pub edited_at: Option<DateTime<Utc>>,
     pub deleted: bool,
     pub attachments: Vec<Attachment>,
+    /// Reakce (👍, ❤️, …); `default` kvůli starším záznamům v cache.
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+}
+
+/// Jedna reakce na zprávu a kdo ji dal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    /// Klíč z Teams: `like`, `heart`, … nebo `1f44d_thumbsup` (kód emoji + název).
+    pub key: String,
+    pub users: Vec<UserId>,
+}
+
+impl Reaction {
+    /// Emoji pro zobrazení; neznámý klíč vrátí tak, jak je.
+    pub fn emoji(&self) -> String {
+        let fixed = match self.key.as_str() {
+            "like" => "👍",
+            "heart" => "❤️",
+            "laugh" => "😆",
+            "surprised" => "😮",
+            "sad" => "😢",
+            "angry" => "😠",
+            _ => "",
+        };
+        if !fixed.is_empty() {
+            return fixed.into();
+        }
+        // `1f44d_thumbsup`, `1f1e8-1f1ff_flag` → znaky z hex kódů před podtržítkem
+        let code = self.key.split('_').next().unwrap_or_default();
+        let chars: Option<String> = code
+            .split('-')
+            .map(|h| u32::from_str_radix(h, 16).ok().and_then(char::from_u32))
+            .collect();
+        match chars {
+            Some(c) if !c.is_empty() && code.len() >= 4 => c,
+            _ => self.key.clone(),
+        }
+    }
 }
 
 impl Message {
@@ -237,7 +276,24 @@ mod tests {
             edited_at: None,
             deleted: false,
             attachments: vec![],
+            reactions: vec![],
         }
+    }
+
+    #[test]
+    fn reaction_emoji() {
+        let r = |k: &str| {
+            Reaction {
+                key: k.into(),
+                users: vec![],
+            }
+            .emoji()
+        };
+        assert_eq!(r("like"), "👍");
+        assert_eq!(r("heart"), "❤️");
+        assert_eq!(r("1f44d_thumbsup"), "👍");
+        assert_eq!(r("1f1e8-1f1ff_flagczechia"), "🇨🇿");
+        assert_eq!(r("yes-tone1"), "yes-tone1");
     }
 
     fn conv(last: Option<&str>, read: Option<&str>) -> Conversation {

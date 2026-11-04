@@ -69,6 +69,21 @@ Současný web klient používá WebSocket **trouter** (`*.trouter.teams.microso
 Pokud long-poll nebude fungovat, je trouter další krok (stejně ho budeme potřebovat
 pro příchozí hovory ve fázi 2).
 
+### Reakce ✅
+
+`properties.emotions` (pole, případně JSON řetězec s polem):
+
+```json
+[{"key": "like", "users": [{"mri": "8:orgid:<oid>", "time": 1793780837849, "value": "1793780837690"}]}]
+```
+
+Klíče: `like`, `heart`, `laugh`, `surprised`, `sad`, `angry` a nově kódy emoji ve tvaru
+`<hex>[-<hex>]_<název>` (např. `1f44d_thumbsup`). Položky s prázdným `users` ignorujeme.
+Další pozorované klíče `properties` (zatím nepoužité): `deltaEmotions`, `mentions`, `links`,
+`qtdMsgs` (citované zprávy), `cards`, `pinned`, `originalMessageContext`.
+
+Ladění: `tymy-cli raw "/v1/users/ME/conversations/<id>/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=50&startTime=1"`.
+
 ## 5. Média ve zprávách (AMS)
 
 Obrázky vložené do zprávy nejsou přílohy (`properties.files`), ale `<img>` značky

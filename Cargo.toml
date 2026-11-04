@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/api", "crates/config", "crates/cli", "crates/app"]
+members = ["crates/core", "crates/api", "crates/config", "crates/store", "crates/cli", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ rust-version = "1.92"
 tymy-core = { path = "crates/core" }
 tymy-api = { path = "crates/api" }
 tymy-config = { path = "crates/config" }
+tymy-store = { path = "crates/store" }
 
 anyhow = "1"
 async-trait = "0.1"

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use iced::widget::{
-    Column, Id, button, column, container, image, operation, row, rule, scrollable, space, text,
-    text_input,
+    Column, Id, button, column, container, image, operation, row, rule, scrollable, space, stack,
+    text, text_input,
 };
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme, font};
 use tymy_api::auth::{self, DeviceCode, SecretServiceStore};
@@ -16,9 +16,11 @@ use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config};
 use tymy_core::text::{InlineImage, Part, message_parts};
 use tymy_core::{
-    AccountKind, ChatBackend, Conversation, ConversationId, Error, Message, MessageId, MessageKind,
-    MessagePage, Profile,
+    AccountId, AccountKind, ChatBackend, Conversation, ConversationId, Error, Message, MessageId,
+    MessageKind, MessagePage, Profile,
 };
+
+use tymy_store::Store;
 
 use crate::state::{PeerNames, is_me, merge_messages};
 
@@ -62,6 +64,8 @@ impl From<anyhow::Error> for Failure {
 pub struct Session {
     profile: Profile,
     backend: Arc<TeamsBackend>,
+    /// Lokální cache; bez ní aplikace funguje dál, jen bez offline historie.
+    store: Option<Store>,
 }
 
 impl fmt::Debug for Session {
@@ -86,6 +90,10 @@ pub enum Msg {
     /// `bool` = jde o starší stránku historie.
     Messages(ConversationId, Result<MessagePage, Failure>, bool),
     LoadOlder,
+    /// Posun ve vláknu zpráv (sleduje, jestli je uživatel dole).
+    Scrolled(scrollable::Viewport),
+    /// Klik na „Nové zprávy“: posunout na nejnovější.
+    JumpToNewest,
     Search(String),
     Draft(String),
     Send,
@@ -103,6 +111,15 @@ enum Media {
     Ready(image::Handle, Arc<Vec<u8>>),
     Failed,
 }
+
+/// Za „dole“ ve vláknu považujeme i pozici do tolika pixelů od konce.
+const BOTTOM_TOLERANCE: f32 = 40.0;
+
+/// Horní mez velikosti obrázků v cache.
+const MEDIA_CACHE_LIMIT: u64 = 500 * 1024 * 1024;
+
+/// Kolik zpráv konverzace načíst z cache při otevření.
+const CACHED_MESSAGES: usize = 300;
 
 /// Maximální šířka obrázku v bublině.
 const IMAGE_MAX_WIDTH: f32 = 360.0;
@@ -132,7 +149,13 @@ pub struct App {
     sending: bool,
     refreshing: bool,
     loading_older: bool,
+    /// Je vlákno posunuté na konec (nejnovější zprávy)?
+    at_bottom: bool,
+    /// Přišla nová zpráva, zatímco uživatel četl starší (zobrazí overlay).
+    new_below: bool,
     peer_scan_done: bool,
+    /// Konverzace, jejichž nejnovější stránku jsme v tomto běhu už stáhli ze sítě.
+    fresh: std::collections::HashSet<ConversationId>,
     error: Option<String>,
     /// Obrázky ze zpráv podle URL.
     media: HashMap<String, Media>,
@@ -155,7 +178,10 @@ impl App {
             sending: false,
             refreshing: false,
             loading_older: false,
+            at_bottom: true,
+            new_below: false,
             peer_scan_done: false,
+            fresh: Default::default(),
             error: None,
             media: HashMap::new(),
             originals: HashMap::new(),
@@ -265,6 +291,64 @@ impl App {
         }
     }
 
+    /// Při startu: seznam chatů a jména účastníků z lokální cache (než odpoví síť).
+    fn load_cached(&mut self, session: &Session) {
+        let Some(store) = &session.store else { return };
+        let account = &session.profile.account_id;
+        match store.load_conversations(account) {
+            Ok(list) => {
+                self.conversations = list.into_iter().filter(Conversation::is_chat).collect();
+                self.peers.learn(
+                    &session.profile,
+                    self.conversations
+                        .iter()
+                        .filter_map(|c| c.last_message.as_ref()),
+                );
+                for c in &self.conversations {
+                    if c.topic.is_none()
+                        && !self.peers.knows(&c.id)
+                        && let Ok(msgs) = store.load_messages(account, &c.id, 50)
+                    {
+                        self.peers.learn(&session.profile, msgs.iter());
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "načtení cache"),
+        }
+    }
+
+    /// Načte historii konverzace z cache, pokud ji ještě nemáme v paměti.
+    fn load_cached_messages(&mut self, id: &ConversationId) -> Task<Msg> {
+        if self.messages.contains_key(id) {
+            return Task::none();
+        }
+        let Some((store, account)) = self
+            .session()
+            .and_then(|s| s.store.clone().map(|st| (st, s.profile.account_id.clone())))
+        else {
+            return Task::none();
+        };
+        let msgs = match store.load_messages(&account, id, CACHED_MESSAGES) {
+            Ok(m) if !m.is_empty() => m,
+            Ok(_) => return Task::none(),
+            Err(e) => {
+                tracing::warn!(error = %e, "načtení zpráv z cache");
+                return Task::none();
+            }
+        };
+        if let Ok(Some(cursor)) = store.older_cursor(&account, id) {
+            self.older.insert(id.clone(), cursor);
+        }
+        let media = self.fetch_media_for(&msgs);
+        self.messages.insert(id.clone(), msgs);
+        media
+    }
+
+    fn store(&self) -> Option<(Store, AccountId)> {
+        self.session()
+            .and_then(|s| s.store.clone().map(|st| (st, s.profile.account_id.clone())))
+    }
+
     /// Spustí stažení obrázků ze zpráv, které ještě nemáme.
     fn fetch_media_for(&mut self, messages: &[Message]) -> Task<Msg> {
         let Some(backend) = self.session().map(|s| s.backend.clone()) else {
@@ -275,6 +359,14 @@ impl App {
             for part in message_parts(&m.content) {
                 let Part::Image(img) = part else { continue };
                 if self.media.contains_key(&img.url) {
+                    continue;
+                }
+                if let Some((store, account)) = self.store()
+                    && let Ok(Some(bytes)) = store.load_media(&account, &img.url)
+                {
+                    let handle = image::Handle::from_bytes(bytes.clone());
+                    self.media
+                        .insert(img.url, Media::Ready(handle, Arc::new(bytes)));
                     continue;
                 }
                 self.media.insert(img.url.clone(), Media::Loading);
@@ -301,6 +393,7 @@ impl App {
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
             Msg::Booted(Ok(Some(session))) => {
+                self.load_cached(&session);
                 self.phase = Phase::Ready(session);
                 self.fetch_conversations()
             }
@@ -354,10 +447,15 @@ impl App {
             }
             Msg::Conversations(Ok(list)) => {
                 self.refreshing = false;
-                self.conversations = list.into_iter().filter(Conversation::is_chat).collect();
                 let Some(session) = self.session().cloned() else {
                     return Task::none();
                 };
+                if let Some(store) = &session.store
+                    && let Err(e) = store.save_conversations(&session.profile.account_id, &list)
+                {
+                    tracing::warn!(error = %e, "uložení konverzací do cache");
+                }
+                self.conversations = list.into_iter().filter(Conversation::is_chat).collect();
                 self.peers.learn(
                     &session.profile,
                     self.conversations
@@ -416,19 +514,28 @@ impl App {
             Msg::PeersScanned(found) => {
                 if let Some(s) = self.session().cloned() {
                     self.peers.learn(&s.profile, found.iter().rev());
+                    if let Some(store) = &s.store
+                        && let Err(e) = store.save_messages(&s.profile.account_id, &found)
+                    {
+                        tracing::warn!(error = %e, "uložení zpráv do cache");
+                    }
                 }
                 Task::none()
             }
 
             Msg::Select(id) => {
                 self.selected = Some(id.clone());
+                self.at_bottom = true;
+                self.new_below = false;
+                let cached = self.load_cached_messages(&id);
                 self.mark_read(&id);
-                let fetch = if self.messages.contains_key(&id) {
+                let fetch = if self.fresh.contains(&id) {
                     Task::none()
                 } else {
                     self.fetch_messages(id, None)
                 };
                 Task::batch([
+                    cached,
                     fetch,
                     operation::focus(COMPOSER),
                     operation::snap_to_end(MESSAGES),
@@ -438,19 +545,50 @@ impl App {
                 if older {
                     self.loading_older = false;
                 }
-                if let Some(s) = self.session().cloned() {
+                let session = self.session().cloned();
+                if let Some(s) = &session {
                     self.peers.learn(&s.profile, page.messages.iter().rev());
                 }
+                if !older {
+                    self.fresh.insert(id.clone());
+                }
                 let first_load = !self.older.contains_key(&id);
+                let store = session
+                    .as_ref()
+                    .and_then(|s| s.store.as_ref().map(|st| (st, &s.profile.account_id)));
+                if let Some((store, account)) = store
+                    && let Err(e) = store.save_messages(account, &page.messages)
+                {
+                    tracing::warn!(error = %e, "uložení zpráv do cache");
+                }
                 if older || first_load {
+                    if let Some((store, account)) = store
+                        && let Err(e) = store.set_older_cursor(account, &id, page.older.as_deref())
+                    {
+                        tracing::warn!(error = %e, "uložení kurzoru do cache");
+                    }
                     self.older.insert(id.clone(), page.older);
                 }
                 let media = self.fetch_media_for(&page.messages);
+                let newest = |msgs: Option<&Vec<Message>>| {
+                    msgs.and_then(|m| m.iter().rev().find(|m| displayable(m)))
+                        .map(|m| m.id.as_str().parse::<u64>().unwrap_or(0))
+                };
+                let before = newest(self.messages.get(&id));
                 merge_messages(self.messages.entry(id.clone()).or_default(), page.messages);
+                let after = newest(self.messages.get(&id));
+                let mut scroll = Task::none();
                 if self.selected.as_ref() == Some(&id) {
                     self.mark_read(&id);
+                    if !older && after > before {
+                        if before.is_none() || self.at_bottom {
+                            scroll = operation::snap_to_end(MESSAGES);
+                        } else {
+                            self.new_below = true;
+                        }
+                    }
                 }
-                media
+                Task::batch([media, scroll])
             }
             Msg::Messages(_, Err(e), older) => {
                 if older {
@@ -508,6 +646,9 @@ impl App {
             }
             Msg::Sent(id, _, Ok(())) => {
                 self.sending = false;
+                // vlastní zprávu vždy ukázat
+                self.at_bottom = true;
+                self.new_below = false;
                 Task::batch([
                     self.fetch_messages(id, None),
                     operation::snap_to_end(MESSAGES),
@@ -521,14 +662,39 @@ impl App {
                 }
                 self.fail(e)
             }
+            Msg::Scrolled(viewport) => {
+                let offset = viewport.absolute_offset().y;
+                let visible = viewport.bounds().height;
+                let content = viewport.content_bounds().height;
+                self.at_bottom = offset + visible >= content - BOTTOM_TOLERANCE;
+                if self.at_bottom {
+                    self.new_below = false;
+                }
+                Task::none()
+            }
+            Msg::JumpToNewest => {
+                self.at_bottom = true;
+                self.new_below = false;
+                operation::snap_to_end(MESSAGES)
+            }
             Msg::DismissError => {
                 self.error = None;
                 Task::none()
             }
             Msg::MediaLoaded(url, Ok(bytes)) => {
+                if let Some((store, account)) = self.store()
+                    && let Err(e) = store.save_media(&account, &url, &bytes)
+                {
+                    tracing::warn!(error = %e, "uložení obrázku do cache");
+                }
                 let handle = image::Handle::from_bytes(bytes.as_ref().clone());
                 self.media.insert(url, Media::Ready(handle, bytes));
-                Task::none()
+                // obrázek zvětšil obsah; kdo byl dole, zůstane dole
+                if self.at_bottom {
+                    operation::snap_to_end(MESSAGES)
+                } else {
+                    Task::none()
+                }
             }
             Msg::MediaLoaded(url, Err(e)) => {
                 tracing::warn!(%url, error = %e.text, "obrázek se nepodařilo stáhnout");
@@ -537,9 +703,14 @@ impl App {
             }
             Msg::OpenImage(img) => {
                 let full = img.full_size_url();
-                if let Some(path) = self.originals.get(&full) {
+                if let Some(path) = self.originals.get(&full).filter(|p| p.exists()) {
                     open_path(path);
                     return Task::none();
+                }
+                if let Some((store, account)) = self.store()
+                    && let Ok(Some(bytes)) = store.load_media(&account, &full)
+                {
+                    return self.update(Msg::FullImage(full, img.url, Ok(Arc::new(bytes))));
                 }
                 let Some(backend) = self.session().map(|s| s.backend.clone()) else {
                     return Task::none();
@@ -560,7 +731,12 @@ impl App {
                 )
             }
             Msg::FullImage(full, _, Ok(bytes)) => {
-                match save_media(&full, &bytes) {
+                if let Some((store, account)) = self.store()
+                    && let Err(e) = store.save_media(&account, &full, &bytes)
+                {
+                    tracing::warn!(error = %e, "uložení originálu do cache");
+                }
+                match write_temp_media(&full, &bytes) {
                     Ok(path) => {
                         open_path(&path);
                         self.originals.insert(full, path);
@@ -573,7 +749,7 @@ impl App {
                 // Originál není k dispozici → otevřít aspoň náhled.
                 tracing::warn!(error = %e.text, "originál obrázku nelze stáhnout, otevírám náhled");
                 if let Some(Media::Ready(_, bytes)) = self.media.get(&preview) {
-                    match save_media(&preview, bytes) {
+                    match write_temp_media(&preview, bytes) {
                         Ok(path) => open_path(&path),
                         Err(e) => tracing::warn!(error = %e, "uložení náhledu selhalo"),
                     }
@@ -768,6 +944,7 @@ impl App {
                 is_me(&session.profile, m),
                 new_group,
                 &self.media,
+                session.profile.account_id.as_str(),
             ));
             prev = Some(m);
         }
@@ -788,14 +965,40 @@ impl App {
         column![
             header,
             rule::horizontal(1),
-            scrollable(list)
-                .id(MESSAGES)
-                .anchor_bottom()
-                .height(Length::Fill),
+            self.thread_view(list),
             rule::horizontal(1),
             composer,
         ]
         .width(Length::Fill)
+        .into()
+    }
+}
+
+impl App {
+    /// Vlákno zpráv; když přišla nová zpráva a uživatel je výš, překryje ho tlačítko „Nové zprávy“.
+    fn thread_view<'a>(&'a self, list: Column<'a, Msg>) -> Element<'a, Msg> {
+        let thread = scrollable(list)
+            .id(MESSAGES)
+            .on_scroll(Msg::Scrolled)
+            .height(Length::Fill);
+        if !self.new_below {
+            return thread.into();
+        }
+        let pill = button(text("↓ Nové zprávy").size(13))
+            .padding([6, 14])
+            .style(|t: &Theme, status| {
+                let mut style = button::primary(t, status);
+                style.border.radius = 14.0.into();
+                style
+            })
+            .on_press(Msg::JumpToNewest);
+        stack![
+            thread,
+            container(pill)
+                .align_bottom(Length::Fill)
+                .center_x(Length::Fill)
+                .padding(12),
+        ]
         .into()
     }
 }
@@ -811,6 +1014,7 @@ fn message_view<'a>(
     mine: bool,
     header: bool,
     media: &'a HashMap<String, Media>,
+    me: &str,
 ) -> Element<'a, Msg> {
     let mut body = Column::new().spacing(4);
     if m.deleted {
@@ -866,7 +1070,45 @@ fn message_view<'a>(
     } else {
         Element::from(row![bubble, space::horizontal()])
     });
+    if !m.deleted && !m.reactions.is_empty() {
+        let chips = row(m.reactions.iter().map(|r| {
+            let by_me = r.users.iter().any(|u| u.as_str().ends_with(me));
+            let label = if r.users.len() > 1 {
+                format!("{} {}", r.emoji(), r.users.len())
+            } else {
+                r.emoji()
+            };
+            container(text(label).size(12))
+                .padding([1, 7])
+                .style(move |t: &Theme| reaction_style(t, by_me))
+                .into()
+        }))
+        .spacing(4);
+        col = col.push(if mine {
+            Element::from(row![space::horizontal(), chips])
+        } else {
+            Element::from(row![space().width(6), chips])
+        });
+    }
     col.into()
+}
+
+fn reaction_style(t: &Theme, by_me: bool) -> container::Style {
+    let p = t.extended_palette();
+    container::Style {
+        background: Some(p.background.weak.color.into()),
+        text_color: Some(p.background.base.text),
+        border: Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: if by_me {
+                p.primary.base.color
+            } else {
+                p.background.strong.color
+            },
+        },
+        ..Default::default()
+    }
 }
 
 /// Obrázek v bublině; velikost podle rozměrů z HTML, zmenšená na [`IMAGE_MAX_WIDTH`].
@@ -909,9 +1151,10 @@ fn preview_text(html: &str) -> String {
     parts.join(" ")
 }
 
-/// Uloží médium do `~/.cache/tymy/media/` (název podle URL, přípona podle obsahu).
-fn save_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+/// Zapíše dočasnou kopii média pro otevření v externí aplikaci.
+fn write_temp_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::PermissionsExt;
     let ext = match bytes {
         [0xFF, 0xD8, ..] => "jpg",
         [0x89, b'P', b'N', b'G', ..] => "png",
@@ -933,15 +1176,40 @@ fn save_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
         ] => "webp",
         _ => "bin",
     };
-    let dirs = directories::ProjectDirs::from("", "", "tymy")
-        .ok_or_else(|| std::io::Error::other("nelze určit adresář cache"))?;
-    let dir = dirs.cache_dir().join("media");
+    let dir = temp_media_dir()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut h);
     let path = dir.join(format!("{:016x}.{ext}", h.finish()));
-    std::fs::create_dir_all(&dir)?;
     std::fs::write(&path, bytes)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     Ok(path)
+}
+
+/// Adresář pro dočasné kopie médií pro externí prohlížeč: `$XDG_RUNTIME_DIR/tymy/media`
+/// (paměťový disk jen pro uživatele, mazaný při odhlášení). Trvalá kopie je v šifrované cache.
+fn temp_media_dir() -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("tymy").join("media");
+    std::fs::create_dir_all(&dir)?;
+    for d in [base.join("tymy"), dir.clone()] {
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
+/// Starší verze ukládaly obrázky nešifrovaně do `~/.cache/tymy/media`; smazat.
+fn remove_legacy_media_cache() {
+    if let Some(dirs) = directories::ProjectDirs::from("", "", "tymy") {
+        let legacy = dirs.cache_dir().join("media");
+        if legacy.exists()
+            && let Err(e) = std::fs::remove_dir_all(&legacy)
+        {
+            tracing::warn!(error = %e, "nelze smazat starou cache obrázků");
+        }
+    }
 }
 
 /// Otevře soubor ve výchozí aplikaci.
@@ -1073,10 +1341,33 @@ async fn load_session() -> Result<Option<Session>, Failure> {
     let ep = config.endpoints(record.kind, record.authority.as_deref());
     let store = SecretServiceStore::new().await?;
     let profile = record.profile();
+    remove_legacy_media_cache();
+    let key = match store.cache_key().await {
+        Ok(k) => Some(k),
+        Err(e) => {
+            tracing::warn!(error = %e, "klíč cache není k dispozici, pokračuji bez cache");
+            None
+        }
+    };
     let backend = TeamsBackend::new(profile.clone(), ep, Http::new()?, Arc::new(store));
+    let cache = key
+        .zip(directories::ProjectDirs::from("", "", "tymy").map(|d| d.data_dir().join("cache.sqlite")))
+        .and_then(|(key, path)| match Store::open(&path, &key) {
+            Ok(s) => {
+                if let Err(e) = s.prune_media(MEDIA_CACHE_LIMIT) {
+                    tracing::warn!(error = %e, "úklid cache obrázků");
+                }
+                Some(s)
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cache nelze otevřít, pokračuji bez ní");
+                None
+            }
+        });
     Ok(Some(Session {
         profile,
         backend: Arc::new(backend),
+        store: cache,
     }))
 }
 

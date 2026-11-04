@@ -7,7 +7,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use tymy_core::{
-    Attachment, Conversation, ConversationId, ConversationKind, Event, Message, MessageKind, UserId,
+    Attachment, Conversation, ConversationId, ConversationKind, Event, Message, MessageKind,
+    Reaction, UserId,
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -194,6 +195,7 @@ impl WireMessage {
             edited_at: prop_time(&props, "edittime"),
             deleted,
             attachments: attachments(&props),
+            reactions: reactions(&props),
         })
     }
 }
@@ -308,6 +310,31 @@ fn attachments(props: &Value) -> Vec<Attachment> {
         .collect()
 }
 
+/// Reakce jsou v `properties.emotions`, jako pole nebo JSON řetězec s polem.
+fn reactions(props: &Value) -> Vec<Reaction> {
+    let value = match props.get("emotions") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        None => return vec![],
+    };
+    let Value::Array(items) = value else {
+        return vec![];
+    };
+    items
+        .iter()
+        .filter_map(|e| {
+            let key = e.get("key")?.as_str()?.to_owned();
+            let users: Vec<UserId> = e
+                .get("users")?
+                .as_array()?
+                .iter()
+                .filter_map(|u| u.get("mri")?.as_str().map(|m| UserId(m.to_owned())))
+                .collect();
+            (!users.is_empty()).then_some(Reaction { key, users })
+        })
+        .collect()
+}
+
 fn prop_time(props: &Value, key: &str) -> Option<DateTime<Utc>> {
     let v = props.get(key)?;
     let ms = v.as_i64().or_else(|| v.as_str()?.parse().ok())?;
@@ -414,6 +441,9 @@ mod tests {
                 .starts_with("https://")
         );
         assert!(file_msg.edited_at.is_some());
+        assert_eq!(file_msg.reactions.len(), 1, "prázdná reakce se vynechá");
+        assert_eq!(file_msg.reactions[0].key, "like");
+        assert_eq!(file_msg.reactions[0].users.len(), 2);
         assert!(!file_msg.deleted);
 
         assert!(msgs[1].deleted);

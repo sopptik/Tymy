@@ -134,6 +134,23 @@ pub async fn send_html(
     })
 }
 
+/// Ladění: GET na libovolnou cestu chat služby (`/v1/...?...`), vrátí surový JSON.
+pub async fn raw_get(http: &Http, session: &SkypeSession, path_and_query: &str) -> Result<Value> {
+    if !path_and_query.starts_with('/') {
+        return Err(Error::Other("cesta musí začínat '/'".into()));
+    }
+    let url = session
+        .chat_service
+        .join(path_and_query)
+        .map_err(|e| Error::Other(format!("cesta {path_and_query}: {e}")))?;
+    let url = same_origin(session, url.as_str())?;
+    let resp = authed(http.client.get(url), session)
+        .send()
+        .await
+        .map_err(net_err)?;
+    json(check(resp).await?).await
+}
+
 /// Teams používá 19místná náhodná čísla.
 fn new_client_message_id() -> String {
     let n: u64 = rand::random_range(1_000_000_000_000_000_000..10_000_000_000_000_000_000);

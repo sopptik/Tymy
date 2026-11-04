@@ -103,6 +103,12 @@ impl TeamsBackend {
         }
     }
 
+    /// Ladění protokolu: surový GET na chat službu.
+    pub async fn raw_get(&self, path_and_query: &str) -> Result<serde_json::Value> {
+        self.call(|s| async move { chat::raw_get(&self.http, &s, path_and_query).await })
+            .await
+    }
+
     pub fn http(&self) -> &Http {
         &self.http
     }

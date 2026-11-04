@@ -21,6 +21,14 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Priorita (2026-11-04):** nejdřív okno aplikace, až potom trouter (real-time).
 - **Zpětná vazba k prototypu (2026-11-04):** okno funguje, konverzace se zobrazují,
   „prototyp vypadá dobře“, odesílání zpráv funguje.
+- **Obrázky (2026-11-04):** obrázky musí být vidět v konverzaci; po kliknutí otevřít originál, ne náhled.
+- **Šifrování cache (2026-11-04):** zprávy v lokální cache šifrovat; cache se kvůli tomu nemaže,
+  zůstává trvale (šifrovaná).
+- **Posouvání (2026-11-04):** vlákno vždy posunout na nejnovější zprávu. Když uživatel ručně
+  posune jinam a přijde zpráva, ukázat drobný overlay „nové zprávy“, po kliknutí posunout na ni.
+  Týká se jen aktuální konverzace.
+- **Reakce (2026-11-04):** reakce na zprávy musí být vidět.
+- **Pracovní postup:** po každé změně aplikaci přebuildovat (a restartovat okno).
 
 ## 2. Architektura (návrh, realizováno)
 
@@ -41,7 +49,7 @@ Zásady:
 Přijaté riziko: interní API se může bez varování změnit a jeho použití je v šedé zóně
 podmínek služby Microsoftu.
 
-## 3. Stav (2026-11-04)
+## 3. Stav (2026-11-04, aktualizováno)
 
 | Oblast | Stav |
 |---|---|
@@ -50,6 +58,10 @@ podmínek služby Microsoftu.
 | Seznam chatů, historie, stránkování | ✅ ověřeno |
 | Odeslání zprávy | ✅ ověřeno (z okna) |
 | Okno: seznam chatů, vlákno, psaní, přihlášení v okně | ✅ prototyp |
+| Vložené obrázky (náhled + originál po kliknutí) | ✅ |
+| Reakce na zprávy | ✅ zobrazení |
+| Šifrovaná lokální cache (SQLCipher, klíč v Secret Service) | ✅ |
+| Posouvání na nejnovější + overlay „Nové zprávy“ | ✅ |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -57,13 +69,14 @@ podmínek služby Microsoftu.
 ## 4. Plán dalších kroků
 
 ### Fáze 1a: dokončení chatu (nepotřebuje odchyt provozu)
-1. **Lokální cache (SQLite, `crates/store`)**: konverzace a zprávy; rychlý start, historie offline,
-   fulltext (FTS5).
+1. ✅ **Lokální cache (`crates/store`)**: šifrovaná (SQLCipher), konverzace, zprávy i obrázky;
+   rychlý start, historie offline, fulltext bez diakritiky (FTS5). Zbývá: hledání v UI.
 2. **Víceřádkové psaní:** Enter odešle, Shift+Enter nový řádek (iced `text_editor`).
 3. **Desktopové notifikace** (D-Bus, `notify-rust`): nová zpráva mimo otevřený chat,
    klik otevře chat.
 4. **Ikona v liště** (StatusNotifierItem, `ksni`) s počtem nepřečtených; zavření okna = skrytí.
-5. **Lepší zobrazení zpráv:** odkazy, citace a odpovědi, reakce, emoji, náhledy obrázků.
+5. **Lepší zobrazení zpráv:** ✅ obrázky, ✅ reakce, ✅ emoji jako text; zbývá: odkazy, citace a odpovědi,
+   zmínky, posílání reakcí.
 6. **Úpravy a mazání vlastních zpráv.**
 7. **Přepínání účtů** v okně (podpora více účtů je už v konfiguraci).
 
@@ -104,6 +117,8 @@ podmínek služby Microsoftu.
 2. Jakmile bude k dispozici HAR záznam: **trouter**. Je předpokladem i pro příchozí hovory ve fázi 2.
 3. Soubory a hlášení přečtení hned po trouteru (stejný odchyt provozu).
 4. `.deb` balíček jakmile je chat použitelný na denní bázi, ještě před hovory.
+
+8. ✅ **Posouvání vlákna:** vždy na nejnovější zprávu, overlay „Nové zprávy“ při čtení starších.
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).

@@ -12,6 +12,7 @@
       "conversationLink": "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@thread.v2",
       "properties": {
         "edittime": "1700000400000",
+        "emotions": [{"key": "like", "users": [{"mri": "8:orgid:aaaa", "time": 1700000500000, "value": "1"}, {"mri": "8:orgid:bbbb", "time": 1700000500001, "value": "2"}]}, {"key": "heart", "users": []}],
         "files": "[{\"@type\":\"http://schema.skype.com/File\",\"version\":2,\"id\":\"f1\",\"itemid\":\"f1\",\"fileName\":\"zprava.pdf\",\"fileType\":\"pdf\",\"objectUrl\":\"https://contoso-my.sharepoint.com/personal/bob/Documents/Microsoft%20Teams%20Chat%20Files/zprava.pdf\",\"fileInfo\":{\"fileUrl\":\"https://contoso-my.sharepoint.com/personal/bob/Documents/Microsoft%20Teams%20Chat%20Files/zprava.pdf\",\"shareUrl\":\"https://contoso-my.sharepoint.com/:b:/g/personal/bob/abc\"}}]"
       }
     },

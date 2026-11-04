@@ -1,0 +1,15 @@
+[package]
+name = "tymy-store"
+description = "Lokální cache klienta Tymy (SQLite)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tymy-core.workspace = true
+rusqlite = { version = "0.41", features = ["bundled-sqlcipher-vendored-openssl"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true

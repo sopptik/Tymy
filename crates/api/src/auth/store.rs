@@ -36,6 +36,33 @@ impl SecretServiceStore {
     }
 }
 
+impl SecretServiceStore {
+    /// Klíč pro šifrování lokální cache. Při prvním použití se vygeneruje náhodně.
+    pub async fn cache_key(&self) -> Result<[u8; 32]> {
+        let attrs = [("application", APP_ATTR), ("kind", "cache_key")];
+        self.keyring.unlock().await.map_err(storage_err)?;
+        let items = self
+            .keyring
+            .search_items(&attrs)
+            .await
+            .map_err(storage_err)?;
+        if let Some(item) = items.into_iter().next() {
+            item.unlock().await.map_err(storage_err)?;
+            let secret = item.secret().await.map_err(storage_err)?;
+            if let Ok(key) = <[u8; 32]>::try_from(&secret[..]) {
+                return Ok(key);
+            }
+            tracing::warn!("uložený klíč cache má špatnou délku, generuji nový");
+        }
+        let key: [u8; 32] = rand::random();
+        self.keyring
+            .create_item("Tymy – klíč lokální cache", &attrs, &key[..], true)
+            .await
+            .map_err(storage_err)?;
+        Ok(key)
+    }
+}
+
 fn storage_err(e: oo7::Error) -> Error {
     Error::Storage(format!("Secret Service: {e}"))
 }

@@ -115,6 +115,7 @@ mod tests {
             edited_at: None,
             deleted: false,
             attachments: vec![],
+            reactions: vec![],
         }
     }
 
