@@ -51,6 +51,31 @@ pub async fn mt_request(
     json(resp).await
 }
 
+/// Profily podle MRI (`8:orgid:<oid>`), po dávkách. Ověřeno 2026-11-04 (tymy-cli mt).
+pub async fn fetch_profiles(
+    http: &Http,
+    session: &SkypeSession,
+    mris: &[&str],
+) -> Result<Vec<Person>> {
+    let mut out = vec![];
+    for chunk in mris.chunks(PROFILE_BATCH) {
+        let body = json!(chunk);
+        let v = mt_request(
+            http,
+            session,
+            Method::POST,
+            "beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true",
+            Some(&body),
+        )
+        .await?;
+        out.extend(parse_people(&v, false));
+    }
+    Ok(out)
+}
+
+/// Kolik profilů žádat najednou.
+const PROFILE_BATCH: usize = 50;
+
 /// Hledání v adresáři organizace (ověřeno 2026-11-04).
 pub async fn search_directory(
     http: &Http,

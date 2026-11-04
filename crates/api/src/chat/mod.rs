@@ -5,7 +5,9 @@ pub(crate) mod wire;
 use chrono::{TimeZone, Utc};
 use reqwest::RequestBuilder;
 use serde_json::{Value, json};
-use tymy_core::{Conversation, ConversationId, Error, MessageId, MessagePage, Result, SentMessage};
+use tymy_core::{
+    Conversation, ConversationId, Error, MessageId, MessagePage, Result, SentMessage, UserId,
+};
 use url::Url;
 
 use crate::auth::SkypeSession;
@@ -357,6 +359,33 @@ pub async fn create_thread(
         .ok_or_else(|| Error::Protocol("server nevrátil id založeného chatu".into()))
 }
 
+/// Členové vlákna (skupinového chatu): `GET /v1/threads/{id}?view=msnp24Equivalent`
+/// → `{members: [{id: "8:orgid:…", role}, …]}`. NEOVĚŘENO proti produkci (protokol Skype).
+pub async fn thread_members(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+) -> Result<Vec<UserId>> {
+    let mut url = api_url(session, &["v1", "threads", conversation.as_str()]);
+    url.query_pairs_mut()
+        .append_pair("view", "msnp24Equivalent");
+    let resp = authed(http.client.get(url), session)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    let v: Value = json(check(resp).await?).await?;
+    Ok(v.get("members")
+        .and_then(Value::as_array)
+        .map(|m| {
+            m.iter()
+                .filter_map(|x| x.get("id").and_then(Value::as_str))
+                .filter(|id| id.starts_with("8:"))
+                .map(|id| UserId(id.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Ladění: GET na libovolnou cestu chat služby (`/v1/...?...`), vrátí surový JSON.
 pub async fn raw_get(http: &Http, session: &SkypeSession, path_and_query: &str) -> Result<Value> {
     if !path_and_query.starts_with('/') {
@@ -538,6 +567,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(id.as_str(), "19:new@thread.v2");
+    }
+
+    #[tokio::test]
+    async fn lists_thread_members() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/threads/19:g@thread.v2"))
+            .and(query_param("view", "msnp24Equivalent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "19:g@thread.v2",
+                "members": [
+                    {"id": "8:orgid:a", "role": "Admin"},
+                    {"id": "28:bot", "role": "User"},
+                    {"id": "8:orgid:b", "role": "User"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let m = thread_members(
+            &Http::new().unwrap(),
+            &session(&server.uri()),
+            &"19:g@thread.v2".into(),
+        )
+        .await
+        .unwrap();
+        let ids: Vec<_> = m.iter().map(|u| u.as_str()).collect();
+        assert_eq!(ids, ["8:orgid:a", "8:orgid:b"], "boti se vynechají");
     }
 
     #[tokio::test]

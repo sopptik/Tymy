@@ -21,7 +21,7 @@ use tymy_core::text::{
 use tymy_core::{
     AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind, Error,
     Message, MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile,
-    ReplyRef, one_on_one_id,
+    ReplyRef, one_on_one_id, one_on_one_peer,
 };
 
 use tymy_store::{HIT_END, HIT_START, SearchHit, Store};
@@ -42,8 +42,10 @@ const GROUP_QUERY: Id = Id::new("group-query");
 const MESSAGES: Id = Id::new("messages");
 /// Dokud nemáme trouter (WebSocket), obnovujeme seznam chatů periodicky.
 const REFRESH: Duration = Duration::from_secs(5);
-/// Kolik chatů bez známého jména projít při startu kvůli jménům účastníků.
+/// Kolik chatů bez známého jména projít v historii (záloha, když profily nevyjdou).
 const PEER_SCAN_LIMIT: usize = 25;
+/// U kolika skupinových chatů bez názvu najednou zjišťovat členy.
+const GROUP_MEMBERS_LIMIT: usize = 30;
 
 /// Chyba převedená pro UI; `reauth` = je nutné se znovu přihlásit.
 #[derive(Debug, Clone)]
@@ -172,6 +174,8 @@ pub enum Msg {
     Tick,
     Conversations(Result<Vec<Conversation>, Failure>),
     PeersScanned(Vec<Message>),
+    /// Jména účastníků z profilů: (chat, jména) a chaty, u kterých to nevyšlo.
+    NamesResolved(Vec<(ConversationId, Vec<String>)>, Vec<ConversationId>),
     Select(ConversationId),
     /// `bool` = jde o starší stránku historie.
     Messages(ConversationId, Result<MessagePage, Failure>, bool),
@@ -331,6 +335,11 @@ impl Msg {
                 "update: Conversations"
             ),
             Msg::PeersScanned(m) => debug!(messages = m.len(), "update: PeersScanned"),
+            Msg::NamesResolved(ok, rest) => debug!(
+                resolved = ok.len(),
+                unresolved = rest.len(),
+                "update: NamesResolved"
+            ),
             Msg::Select(id) => debug!(%id, "update: Select"),
             Msg::Messages(id, r, older) => debug!(
                 %id,
@@ -571,6 +580,8 @@ pub struct App {
     /// Přišla nová zpráva, zatímco uživatel četl starší (zobrazí overlay).
     new_below: bool,
     peer_scan_done: bool,
+    /// Chaty, u kterých jsme už zkoušeli zjistit jména účastníků.
+    names_tried: HashSet<ConversationId>,
     /// Konverzace, jejichž nejnovější stránku jsme v tomto běhu už stáhli ze sítě.
     fresh: std::collections::HashSet<ConversationId>,
     error: Option<String>,
@@ -686,6 +697,7 @@ impl App {
             at_bottom: true,
             new_below: false,
             peer_scan_done: false,
+            names_tried: HashSet::new(),
             fresh: Default::default(),
             error: None,
             media: HashMap::new(),
@@ -1074,6 +1086,59 @@ impl App {
         self.messages.entry(id.clone()).or_default();
         self.tab = Tab::Chats;
         self.update(Msg::Select(id))
+    }
+
+    /// Zjistí jména účastníků chatů bez názvu z profilů: u 1:1 podle id chatu, u skupin
+    /// podle členů vlákna. Každý chat zkouší jen jednou za běh.
+    fn resolve_names(&mut self) -> Task<Msg> {
+        let Some(s) = self.session() else {
+            return Task::none();
+        };
+        let (backend, me) = (s.backend.clone(), s.profile.account_id.clone());
+        let todo: Vec<(ConversationId, ConversationKind)> = self
+            .conversations
+            .iter()
+            .filter(|c| {
+                matches!(c.kind, ConversationKind::OneOnOne | ConversationKind::Group)
+                    && c.topic.is_none()
+                    && !self.peers.knows(&c.id)
+                    && !self.names_tried.contains(&c.id)
+                    && !self.is_draft(&c.id)
+            })
+            .map(|c| (c.id.clone(), c.kind.clone()))
+            .collect();
+        if todo.is_empty() {
+            return Task::none();
+        }
+        self.names_tried
+            .extend(todo.iter().map(|(id, _)| id.clone()));
+        Task::perform(resolve_names(backend, me, todo), |(ok, rest)| {
+            Msg::NamesResolved(ok, rest)
+        })
+    }
+
+    /// Záloha: jména z historie zpráv (odesílatelé) u chatů, kde profily nevyšly.
+    fn scan_peers(&self, ids: Vec<ConversationId>) -> Task<Msg> {
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        let ids: Vec<_> = ids.into_iter().take(PEER_SCAN_LIMIT).collect();
+        if ids.is_empty() {
+            return Task::none();
+        }
+        Task::perform(
+            async move {
+                let mut found = vec![];
+                for id in ids {
+                    match backend.messages(&id, None).await {
+                        Ok(page) => found.extend(page.messages),
+                        Err(e) => tracing::debug!(%id, error = %e, "sken jmen"),
+                    }
+                }
+                found
+            },
+            Msg::PeersScanned,
+        )
     }
 
     /// Notifikace pro nové zprávy v chatech od posledního obnovení. Při prvním obnovení ze sítě
@@ -1902,33 +1967,20 @@ impl App {
                     if let Ok(q) = std::env::var("TYMY_SEARCH") {
                         tasks.push(Task::done(Msg::Search(q)));
                     }
-                    let ids: Vec<_> = self
-                        .conversations
-                        .iter()
-                        .filter(|c| c.is_chat() && c.topic.is_none() && !self.peers.knows(&c.id))
-                        .take(PEER_SCAN_LIMIT)
-                        .map(|c| c.id.clone())
-                        .collect();
-                    let backend = session.backend.clone();
-                    tasks.push(Task::perform(
-                        async move {
-                            let mut found = vec![];
-                            for id in ids {
-                                match backend.messages(&id, None).await {
-                                    Ok(page) => found.extend(page.messages),
-                                    Err(e) => tracing::debug!(%id, error = %e, "sken jmen"),
-                                }
-                            }
-                            found
-                        },
-                        Msg::PeersScanned,
-                    ));
                 }
+                // jména účastníků chatů bez názvu (nové chaty i za běhu)
+                tasks.push(self.resolve_names());
                 Task::batch(tasks)
             }
             Msg::Conversations(Err(e)) => {
                 self.refreshing = false;
                 self.fail(e)
+            }
+            Msg::NamesResolved(resolved, unresolved) => {
+                for (id, names) in resolved {
+                    self.peers.replace(&id, names);
+                }
+                self.scan_peers(unresolved)
             }
             Msg::PeersScanned(found) => {
                 if let Some(s) = self.session().cloned() {
@@ -5109,6 +5161,74 @@ async fn save_login(kind: AccountKind, tokens: auth::TokenSet) -> Result<Account
     config.upsert(AccountRecord::from_profile(&profile, None));
     config.save()?;
     Ok(profile.account_id)
+}
+
+/// Jména účastníků chatů z profilů. Vrátí (chat, jména) a chaty, u kterých to nevyšlo.
+async fn resolve_names(
+    backend: Arc<TeamsBackend>,
+    me: AccountId,
+    todo: Vec<(ConversationId, ConversationKind)>,
+) -> (Vec<(ConversationId, Vec<String>)>, Vec<ConversationId>) {
+    let mut members: Vec<(ConversationId, Vec<tymy_core::UserId>)> = vec![];
+    let mut unresolved = vec![];
+    let mut groups = 0;
+    for (id, kind) in todo {
+        match kind {
+            ConversationKind::OneOnOne => match one_on_one_peer(&id, me.as_str()) {
+                Some(peer) => members.push((id, vec![peer])),
+                None => unresolved.push(id),
+            },
+            _ if groups < GROUP_MEMBERS_LIMIT => {
+                groups += 1;
+                match backend.members(&id).await {
+                    Ok(m) => {
+                        let others: Vec<_> = m
+                            .into_iter()
+                            .filter(|u| !u.as_str().ends_with(me.as_str()))
+                            .collect();
+                        members.push((id, others));
+                    }
+                    Err(e) => {
+                        tracing::debug!(%id, error = %e, "členové skupinového chatu");
+                        unresolved.push(id);
+                    }
+                }
+            }
+            _ => unresolved.push(id),
+        }
+    }
+    let mut all: Vec<tymy_core::UserId> = members.iter().flat_map(|(_, m)| m.clone()).collect();
+    all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    all.dedup();
+    let names: HashMap<String, String> = match backend.profiles(&all).await {
+        Ok(people) => people
+            .into_iter()
+            .map(|p| (p.mri.as_str().to_owned(), p.display_name))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "profily účastníků chatů");
+            unresolved.extend(members.into_iter().map(|(id, _)| id));
+            return (vec![], unresolved);
+        }
+    };
+    let mut resolved = vec![];
+    for (id, m) in members {
+        let found: Vec<String> = m
+            .iter()
+            .filter_map(|u| names.get(u.as_str()).cloned())
+            .collect();
+        if found.is_empty() {
+            unresolved.push(id);
+        } else {
+            resolved.push((id, found));
+        }
+    }
+    tracing::info!(
+        resolved = resolved.len(),
+        unresolved = unresolved.len(),
+        "jména účastníků z profilů"
+    );
+    (resolved, unresolved)
 }
 
 /// Počet nepřečtených konverzací neaktivního účtu (spojení se vytvoří při prvním dotazu

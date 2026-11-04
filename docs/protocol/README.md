@@ -203,6 +203,11 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - Skupinový chat: stejné `POST /v1/threads` se všemi členy, `fixedRoster: "false"`,
   `uniquerosterthread: "false"` a volitelně `topic` v `properties` ❓ (neověřeno). Tymy ho
   zakládá až s první zprávou, do té doby je jen v okně (dočasné id `draft:group:<n>`).
+- Členové chatu: `GET /v1/threads/{id}?view=msnp24Equivalent` → `{id, members: [{id: "8:orgid:…",
+  role, …}], properties, …}` ✅ (2026-11-04, skupinový chat, 12 členů).
+- Jména pro seznam chatů bez názvu: 1:1 = druhé object id přímo z id chatu, skupina = členové
+  vlákna; obojí pak `fetchShortProfile` (viz 6.). Pro lidi z jiných organizací vrací
+  `fetchShortProfile` prázdné `value` ✅; pak záloha z odesílatelů v historii.
 
 ## Jak odchytit provoz (fáze 0, krok 1)
 
@@ -226,7 +231,7 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - [x] Ověřit long-poll: nefunguje (410 Gone)
 - [ ] Implementovat trouter (WebSocket) pro okamžité doručování
 - [x] Hlásit přečtení serveru (consumption horizon); neověřeno proti produkci
-- [ ] Jména účastníků 1:1 chatů bez nutnosti číst historii (profily z middle tier)
+- [x] Jména účastníků chatů bez nutnosti číst historii (profily z middle tier, 2026-11-04)
 - [x] Authorization code + PKCE pro organizace s blokovaným device code (2026-11-04)
 - [ ] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty
 - [x] Zobrazení vložených obrázků (AMS náhled + originál)

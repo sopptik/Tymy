@@ -277,6 +277,37 @@ pub fn one_on_one_id(me: &str, other: &str) -> ConversationId {
     ConversationId(format!("19:{a}_{b}@unq.gbl.spaces"))
 }
 
+/// Druhý účastník 1:1 chatu podle jeho id (`19:<oid1>_<oid2>@unq.gbl.spaces`), jako MRI.
+pub fn one_on_one_peer(id: &ConversationId, me: &str) -> Option<UserId> {
+    let pair = id
+        .as_str()
+        .strip_prefix("19:")?
+        .strip_suffix("@unq.gbl.spaces")?;
+    let (a, b) = pair.split_once('_')?;
+    let other = if a == me {
+        b
+    } else if b == me {
+        a
+    } else {
+        return None;
+    };
+    (!other.is_empty()).then(|| UserId(format!("8:orgid:{other}")))
+}
+
+#[cfg(test)]
+mod peer_tests {
+    use super::*;
+
+    #[test]
+    fn peer_from_one_on_one_id() {
+        let id = one_on_one_id("bbb", "aaa");
+        assert_eq!(one_on_one_peer(&id, "bbb").unwrap().as_str(), "8:orgid:aaa");
+        assert_eq!(one_on_one_peer(&id, "aaa").unwrap().as_str(), "8:orgid:bbb");
+        assert!(one_on_one_peer(&id, "ccc").is_none(), "nejsem účastník");
+        assert!(one_on_one_peer(&"19:x@thread.v2".into(), "aaa").is_none());
+    }
+}
+
 /// Událost doručená real-time kanálem.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
