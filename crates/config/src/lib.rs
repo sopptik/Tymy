@@ -1,6 +1,7 @@
 //! Neveřejná konfigurace: seznam účtů, nastavení, přepisy endpointů a logování.
 //! Tajemství jsou v Secret Service.
 
+pub mod autostart;
 pub mod logging;
 
 use std::path::{Path, PathBuf};

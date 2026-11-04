@@ -181,7 +181,10 @@ podmínek služby Microsoftu.
    `dpkg-shlibdeps`), `tymy` + `tymy-cli`, `.desktop` soubor, ikony (SVG + PNG 16–256),
    okno má WM_CLASS/app id `tymy` a vlastní ikonu. Závislosti: knihovny z `dpkg-shlibdeps` +
    ručně ty, které winit/wgpu načítají za běhu (X11, xkbcommon, Wayland, font); GPU ovladače
-   jen doporučené (bez nich iced kreslí softwarově). Autostart: samostatný bod (volba v okně).
+   jen doporučené (bez nich iced kreslí softwarově).
+   ✅ Autostart: volba „Spouštět po přihlášení“ v menu účtů zapíše
+   `~/.config/autostart/tymy.desktop` (pro jednoho uživatele, balíček nic do `/etc/xdg`
+   neinstaluje); po přihlášení se Tymy spustí s `--hidden` jen v liště (bez lišty okno ukáže).
 2. ✅ Test instalace na čistém Ubuntu 24.04 (Docker, 2026-11-04): instalace bez chybějících
    knihoven, okno pod Xvfb běží (přihlašovací obrazovka).
 3. Volitelně Flatpak později.

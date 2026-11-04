@@ -1,6 +1,7 @@
 //! Tymy – lehký Teams klient pro Linux.
 //!
-//! Parametry: `--log=debug|production` (viz `tymy_config::logging`).
+//! Parametry: `--log=debug|production` (viz `tymy_config::logging`), `--hidden` = spustit
+//! jen v liště bez okna (spouštění po přihlášení, viz `tymy_config::autostart`).
 
 mod app;
 mod clipboard;
@@ -9,7 +10,7 @@ mod state;
 mod style;
 mod tray;
 
-use tymy_config::logging;
+use tymy_config::{autostart, logging};
 
 fn main() -> iced::Result {
     let log_arg = std::env::args()
@@ -27,6 +28,7 @@ fn main() -> iced::Result {
     };
     // Guard musí žít do konce programu, jinak se nezapíšou poslední řádky logu.
     let _log = logging::init("tymy", mode, false);
+    let hidden = std::env::args().any(|a| a == autostart::HIDDEN_ARG);
 
     iced::application(app::App::boot, app::App::update, app::App::view)
         .title(app::App::title)
@@ -35,6 +37,7 @@ fn main() -> iced::Result {
         .window(iced::window::Settings {
             size: iced::Size::new(1100.0, 720.0),
             icon: tray::window_icon(64),
+            visible: !hidden,
             // WM_CLASS / app id = název .desktop souboru (ikona a seskupení v panelu)
             platform_specific: iced::window::settings::PlatformSpecific {
                 application_id: "tymy".into(),
