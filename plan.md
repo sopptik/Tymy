@@ -86,6 +86,7 @@ podmínek služby Microsoftu.
 | Hledání lidí v adresáři | ✅ |
 | Hledání lidí mimo organizaci | ❌ endpoint vrací 400, potřeba HAR |
 | Nový 1:1 chat z hledání | 🟡 prázdné vlákno ✅, založení první zprávou neověřeno |
+| Nový skupinový chat | 🟡 výběr lidí ✅ (snímek), založení první zprávou neověřeno |
 | Záložky Chaty/Týmy, kanály po týmech, odznaky nepřečtených | ✅ |
 | Ruční pořadí chatů (připnutí, ▲▼) | ✅ lokálně |
 | Víceřádkové psaní (Shift+Enter) | ✅ |
@@ -139,6 +140,9 @@ podmínek služby Microsoftu.
    klik otevře zprávu v kontextu a zvýrazní ji. Indexace historie na pozadí: po startu postupně
    stáhne historii všech konverzací (stránky po 200, 1,5 s pauza, max. rok / 5000 zpráv na
    konverzaci) a navazuje, kde skončila. „Načíst starší“ bere nejdřív z cache.
+9. 🟡 **Nový skupinový chat** (priorita uživatele 2): tlačítko ＋ vedle hledání v záložce Chaty,
+   výběr lidí z adresáře (aspoň dva), nepovinný název. Chat je nejdřív jen v okně a na serveru
+   vznikne první zprávou (`POST /v1/threads` s `topic`). Neověřeno proti produkci.
 
 ### Fáze 1b: potřebuje odchyt provozu (HAR z web klienta)
 1. **Trouter (WebSocket):** okamžité doručování zpráv, „píše…“, přítomnost. Nahradí 5s obnovu.

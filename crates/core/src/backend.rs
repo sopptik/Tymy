@@ -91,8 +91,13 @@ pub trait ChatBackend: Send + Sync {
     /// Stáhne médium vložené do zprávy (obrázek z [`crate::text::InlineImage`]).
     async fn fetch_media(&self, url: &str) -> Result<Vec<u8>>;
 
-    /// Založí chat s danými účastníky (kromě mě); vrátí jeho id.
-    async fn create_chat(&self, members: &[crate::UserId]) -> Result<ConversationId>;
+    /// Založí chat s danými účastníky (kromě mě); vrátí jeho id. S jedním účastníkem 1:1 chat,
+    /// s více skupinový (`topic` = jeho název).
+    async fn create_chat(
+        &self,
+        members: &[crate::UserId],
+        topic: Option<&str>,
+    ) -> Result<ConversationId>;
 
     /// Hledání lidí ve vlastní organizaci (adresář).
     async fn search_people(&self, query: &str) -> Result<Vec<Person>>;

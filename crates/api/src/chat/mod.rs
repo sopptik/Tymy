@@ -301,24 +301,30 @@ pub async fn set_consumption_horizon(
     check(resp).await.map(|_| ())
 }
 
-/// Založí vlákno chatu (`POST /v1/threads`). Pro dvě osoby žádá „unikátní“ 1:1 chat.
+/// Založí vlákno chatu (`POST /v1/threads`). Pro dvě osoby žádá „unikátní“ 1:1 chat,
+/// pro víc skupinový chat (s názvem `topic`, je-li zadaný).
 /// NEOVĚŘENO proti produkci: formát převzatý z protokolu Skype.
 pub async fn create_thread(
     http: &Http,
     session: &SkypeSession,
     me: &str,
     members: &[&str],
+    topic: Option<&str>,
 ) -> Result<ConversationId> {
     let mut list = vec![json!({"id": me, "role": "Admin"})];
     list.extend(members.iter().map(|m| json!({"id": m, "role": "Admin"})));
     let one_on_one = members.len() == 1;
+    let mut properties = json!({
+        "threadType": "chat",
+        "fixedRoster": one_on_one.to_string(),
+        "uniquerosterthread": one_on_one.to_string(),
+    });
+    if let Some(topic) = topic.filter(|t| !t.trim().is_empty()) {
+        properties["topic"] = json!(topic.trim());
+    }
     let body = json!({
         "members": list,
-        "properties": {
-            "threadType": "chat",
-            "fixedRoster": one_on_one.to_string(),
-            "uniquerosterthread": one_on_one.to_string(),
-        }
+        "properties": properties,
     });
     let url = api_url(session, &["v1", "threads"]);
     let resp = authed(http.client.post(url), session)
@@ -499,6 +505,39 @@ mod tests {
             .await
             .unwrap();
         delete_message(&http, &s, &conv, &id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn creates_group_chat_with_topic() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/threads"))
+            .and(header("Authentication", "skypetoken=st"))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                assert_eq!(body["members"].as_array().unwrap().len(), 3);
+                assert_eq!(body["members"][0]["id"], "8:orgid:me");
+                assert_eq!(body["properties"]["threadType"], "chat");
+                assert_eq!(body["properties"]["fixedRoster"], "false");
+                assert_eq!(body["properties"]["topic"], "Projekt");
+                ResponseTemplate::new(201).insert_header(
+                    "Location",
+                    "https://emea.ng.msg.teams.microsoft.com/v1/threads/19:new@thread.v2",
+                )
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let id = create_thread(
+            &Http::new().unwrap(),
+            &session(&server.uri()),
+            "8:orgid:me",
+            &["8:orgid:a", "8:orgid:b"],
+            Some(" Projekt "),
+        )
+        .await
+        .unwrap();
+        assert_eq!(id.as_str(), "19:new@thread.v2");
     }
 
     #[tokio::test]
