@@ -69,6 +69,35 @@ Současný web klient používá WebSocket **trouter** (`*.trouter.teams.microso
 Pokud long-poll nebude fungovat, je trouter další krok (stejně ho budeme potřebovat
 pro příchozí hovory ve fázi 2).
 
+## 5. Média ve zprávách (AMS)
+
+Obrázky vložené do zprávy nejsou přílohy (`properties.files`), ale `<img>` značky
+přímo v HTML obsahu zprávy:
+
+```html
+<img src="https://eu-api.asm.skype.com/v1/objects/0-weu-d5-<hex>/views/imgo"
+     itemtype="http://schema.skype.com/AMSImage" itemscope="png"
+     width="331.7" height="250" alt="obrázek" itemid="0-weu-d5-<hex>">
+```
+
+- Emoji mají `itemtype="http://schema.skype.com/Emoji"`, `src` na `statics.teams.cdn.office.net`
+  a znak v `alt`. Zobrazujeme je jako text (`alt`), nestahují se.
+- Stažení: `GET <src>` s hlavičkou `Authorization: skype_token <skypetoken>` ✅.
+  Pozor, formát se liší od chatsvc (`Authentication: skypetoken=…`).
+  Token posíláme jen na `https://*.asm.skype.com` (`crates/api/src/media.rs`).
+- Varianty objektu (`/v1/objects/{id}/views/{view}`), ověřeno 2026-11-04:
+
+  | View | Obsah |
+  |---|---|
+  | `imgo` | zmenšený JPEG náhled (např. 800×603); na něj odkazuje zpráva ✅ |
+  | `imgpsh_fullsize` | originál (např. PNG 1088×820) ✅ |
+  | `imgpsh_fullsize_anim` | originál, u GIFů s animací; používáme po kliknutí ✅ |
+  | `original` | `400 Bad Request` ❌ |
+
+- Metadata objektu: `GET /v1/objects/{id}` vrací JSON, např. `{"type": "pish/image",
+  "filename": "MicrosoftTeams-image.png", …}` ✅.
+- Ladění: `tymy-cli media <url> -o soubor`.
+
 ## Jak odchytit provoz (fáze 0, krok 1)
 
 1. V Chromiu/Firefoxu otevřete DevTools → Network, zapněte *Preserve log*, filtr `Fetch/XHR` + `WS`.
@@ -94,4 +123,5 @@ pro příchozí hovory ve fázi 2).
 - [ ] Jména účastníků 1:1 chatů bez nutnosti číst historii (profily z middle tier)
 - [ ] Authorization code + PKCE pro organizace s blokovaným device code
 - [ ] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty
-- [ ] Odesílání souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS
+- [x] Zobrazení vložených obrázků (AMS náhled + originál)
+- [ ] Odesílání obrázků a souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS
