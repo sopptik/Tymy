@@ -35,6 +35,14 @@ pub trait ChatBackend: Send + Sync {
     /// Odešle textovou zprávu. `text` je prostý text, implementace ho escapuje do HTML.
     async fn send_text(&self, conversation: &ConversationId, text: &str) -> Result<SentMessage>;
 
+    /// Odešle zprávu s textem (může být prázdný) a obrázky; obrázky nejdřív nahraje.
+    async fn send_with_images(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        images: &[crate::OutgoingImage],
+    ) -> Result<SentMessage>;
+
     /// Počká na další dávku real-time událostí (long-poll). Může vrátit prázdný seznam
     /// při vypršení intervalu; volající pak jednoduše zavolá znovu.
     async fn poll_events(&self) -> Result<Vec<Event>>;

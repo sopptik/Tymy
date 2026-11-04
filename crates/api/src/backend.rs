@@ -189,6 +189,35 @@ impl ChatBackend for TeamsBackend {
             .await
     }
 
+    async fn send_with_images(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        images: &[tymy_core::OutgoingImage],
+    ) -> Result<SentMessage> {
+        let mut html = if text.trim().is_empty() {
+            String::new()
+        } else {
+            text::plain_to_html(text)
+        };
+        let session = self.session().await?;
+        for img in images {
+            let id = self
+                .call(|s| async move {
+                    media::upload_image(&self.http, &s, conversation, &img.bytes, &img.filename)
+                        .await
+                })
+                .await?;
+            html.push_str(&media::image_html(&session, &id, img.width, img.height));
+        }
+        let name = self.profile.display_name.as_deref();
+        self.call(|s| {
+            let html = &html;
+            async move { chat::send_html(&self.http, &s, conversation, html, name).await }
+        })
+        .await
+    }
+
     async fn poll_events(&self) -> Result<Vec<Event>> {
         let session = self.session().await?;
         let mut reg = self.poll.lock().await;

@@ -109,6 +109,12 @@ přímo v HTML obsahu zprávy:
   | `imgpsh_fullsize_anim` | originál, u GIFů s animací; používáme po kliknutí ✅ |
   | `original` | `400 Bad Request` ❌ |
 
+- Nahrání obrázku (odeslání ze schránky) ❓ neověřeno, převzato z protokolu Skype:
+  1. `POST https://eu-api.asm.skype.com/v1/objects` s `Authorization: skype_token …`,
+     tělo `{"type": "pish/image", "permissions": {"<id chatu>": ["read"]}, "filename": "…"}` → `{"id": "0-weu-…"}`,
+  2. `PUT …/v1/objects/<id>/content/imgpsh` (`application/octet-stream`, data obrázku),
+  3. zpráva s `<img … itemtype="http://schema.skype.com/AMSImage" src="…/views/imgo" itemid="<id>">`.
+  Host podle regionu chat služby: `emea` → `eu-api` (ověřeno čtením), ostatní regiony hypotéza.
 - Metadata objektu: `GET /v1/objects/{id}` vrací JSON, např. `{"type": "pish/image",
   "filename": "MicrosoftTeams-image.png", …}` ✅.
 - Ladění: `tymy-cli media <url> -o soubor`.

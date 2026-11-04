@@ -72,6 +72,31 @@ pub struct EndpointsFile {
 pub struct Settings {
     /// Režim logování: `"debug"` (podrobně) nebo `"production"` (jen chyby).
     pub log: Option<logging::LogMode>,
+    /// Vzhled: `"system"`, `"light"` nebo `"dark"`.
+    #[serde(default)]
+    pub theme: ThemeMode,
+}
+
+/// Volba vzhledu aplikace.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Podle systému.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    /// Další volba v pořadí systém → světlý → tmavý → systém.
+    pub fn next(self) -> Self {
+        match self {
+            ThemeMode::System => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
+            ThemeMode::Dark => ThemeMode::System,
+        }
+    }
 }
 
 pub struct Config {
@@ -106,6 +131,17 @@ impl Config {
         let path = self.dir.join("accounts.toml");
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, toml::to_string_pretty(&self.accounts)?)?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("zápis {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Uloží `settings.toml` (atomicky přes dočasný soubor).
+    pub fn save_settings(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("vytvoření {}", self.dir.display()))?;
+        let path = self.dir.join("settings.toml");
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, toml::to_string_pretty(&self.settings)?)?;
         std::fs::rename(&tmp, &path).with_context(|| format!("zápis {}", path.display()))?;
         Ok(())
     }
@@ -199,6 +235,18 @@ mod tests {
         std::fs::write(dir.join("settings.toml"), "log = \"production\"\n").unwrap();
         let c = Config::load_from(&dir).unwrap();
         assert_eq!(c.settings.log, Some(logging::LogMode::Production));
+        assert_eq!(c.settings.theme, ThemeMode::System);
+        let mut c2 = Config::load_from(&dir).unwrap();
+        c2.settings.theme = ThemeMode::Dark;
+        c2.save_settings().unwrap();
+        let c3 = Config::load_from(&dir).unwrap();
+        assert_eq!(c3.settings.theme, ThemeMode::Dark);
+        assert_eq!(
+            c3.settings.log,
+            Some(logging::LogMode::Production),
+            "ostatní nastavení zůstane"
+        );
+        assert_eq!(ThemeMode::Dark.next(), ThemeMode::System);
         assert_eq!(c.accounts.accounts.len(), 2);
         assert_eq!(c.find(None).unwrap().id.as_str(), "b");
         assert_eq!(c.find(Some("2")).unwrap().id.as_str(), "a");
