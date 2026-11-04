@@ -1,6 +1,6 @@
 //! Hlavní okno: seznam chatů vlevo, vlákno zpráv vpravo (rozložení jako Skype).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,21 +15,24 @@ use tymy_api::auth::{self, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config, ThemeMode};
 use tymy_core::text::rich::{self, Block, QuoteKind};
-use tymy_core::text::{InlineImage, Part, REPLY_PREVIEW_CHARS, message_parts, truncate_chars};
+use tymy_core::text::{
+    InlineImage, Part, REPLY_PREVIEW_CHARS, edited_html, message_parts, truncate_chars,
+};
 use tymy_core::{
     AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind, Error,
     Message, MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile,
     ReplyRef, one_on_one_id,
 };
 
-use tymy_store::Store;
+use tymy_store::{HIT_END, HIT_START, SearchHit, Store};
 
 use iced::widget::text::Wrapping;
 
 use crate::clipboard::{self, Clip};
 use crate::notify;
 use crate::state::{
-    PeerNames, channel_name, group_teams, is_me, merge_messages, move_pin, order_chats,
+    PeerNames, channel_name, group_teams, is_me, merge_messages, move_pin, my_mri, order_chats,
+    toggle_reaction,
 };
 use crate::style::{self, BOLD, SEMIBOLD, accent, muted};
 use crate::tray::{self, TrayEvent, TrayHandle};
@@ -159,6 +162,26 @@ pub enum Msg {
     /// Odpovědět na zprávu (citace nad psacím polem).
     Reply(MessageId),
     CancelReply,
+    /// Otevřít/zavřít výběr reakcí u zprávy.
+    ToggleReactions(MessageId),
+    /// Přidat nebo odebrat moji reakci (klíč Teams).
+    React(MessageId, String),
+    Reacted(ConversationId, Result<(), Failure>),
+    /// Upravit vlastní zprávu (text do psacího pole).
+    StartEdit(MessageId),
+    /// Upravit poslední vlastní zprávu (↑ v prázdném poli).
+    EditLast,
+    CancelEdit,
+    Edited(ConversationId, Result<(), Failure>),
+    AskDelete(MessageId),
+    CancelDelete,
+    Delete(MessageId),
+    Deleted(ConversationId, Result<(), Failure>),
+    /// Otevřít zprávu nalezenou hledáním.
+    OpenHit(ConversationId, MessageId),
+    /// Další krok indexace historie na pozadí.
+    IndexNext,
+    Indexed(ConversationId, Result<MessagePage, Failure>),
     Send,
     /// Odesláno: (chat, text pro případ chyby, výsledek = skutečné id chatu).
     Sent(ConversationId, String, Result<ConversationId, Failure>),
@@ -253,6 +276,25 @@ impl Msg {
             Msg::StopSelect => debug!("update: StopSelect"),
             Msg::Reply(id) => debug!(%id, "update: Reply"),
             Msg::CancelReply => debug!("update: CancelReply"),
+            Msg::ToggleReactions(id) => debug!(%id, "update: ToggleReactions"),
+            Msg::React(id, key) => debug!(%id, %key, "update: React"),
+            Msg::Reacted(id, r) => debug!(%id, result = ok(r.is_ok()), "update: Reacted"),
+            Msg::StartEdit(id) => debug!(%id, "update: StartEdit"),
+            Msg::EditLast => debug!("update: EditLast"),
+            Msg::CancelEdit => debug!("update: CancelEdit"),
+            Msg::Edited(id, r) => debug!(%id, result = ok(r.is_ok()), "update: Edited"),
+            Msg::AskDelete(id) => debug!(%id, "update: AskDelete"),
+            Msg::CancelDelete => debug!("update: CancelDelete"),
+            Msg::Delete(id) => debug!(%id, "update: Delete"),
+            Msg::Deleted(id, r) => debug!(%id, result = ok(r.is_ok()), "update: Deleted"),
+            Msg::OpenHit(c, id) => debug!(conversation = %c, %id, "update: OpenHit"),
+            Msg::IndexNext => trace!("update: IndexNext"),
+            Msg::Indexed(id, r) => debug!(
+                %id,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(|p| p.messages.len()).unwrap_or(0),
+                "update: Indexed"
+            ),
             Msg::SelectAction(_) => trace!("update: SelectAction"),
             Msg::CopySelection(seq) => debug!(seq, "update: CopySelection"),
             Msg::HideToast(_) => trace!("update: HideToast"),
@@ -303,6 +345,15 @@ const MEDIA_CACHE_LIMIT: u64 = 500 * 1024 * 1024;
 
 /// Kolik zpráv konverzace načíst z cache při otevření.
 const CACHED_MESSAGES: usize = 300;
+/// Stránka starších zpráv načítaná z cache.
+const STORE_PAGE: usize = 100;
+/// Kolik výsledků hledání ve zprávách zobrazit.
+const MESSAGE_HITS: usize = 40;
+/// Indexace historie: odklad po startu, pauza mezi požadavky a meze na konverzaci.
+const INDEX_START_DELAY: Duration = Duration::from_secs(10);
+const INDEX_DELAY: Duration = Duration::from_millis(1500);
+const INDEX_HORIZON_DAYS: i64 = 365;
+const INDEX_MAX_MESSAGES: i64 = 5000;
 
 /// Pauza po označení textu, než se výběr zkopíruje (ať se nekopíruje při každém pohybu myši).
 const COPY_DELAY: Duration = Duration::from_millis(350);
@@ -393,6 +444,21 @@ pub struct App {
     /// Zpráva, na kterou se odpovídá, a odpověď právě odesílaná (vrátí se při chybě).
     replying: Option<ReplyRef>,
     in_flight_reply: Option<ReplyRef>,
+    /// Upravovaná vlastní zpráva.
+    editing: Option<Editing>,
+    /// Zpráva s otevřeným výběrem reakcí / čekající na potvrzení smazání.
+    reacting: Option<MessageId>,
+    confirm_delete: Option<MessageId>,
+    /// Zpráva otevřená z výsledků hledání (zvýrazněná).
+    highlight: Option<MessageId>,
+    /// Výsledky fulltextového hledání ve zprávách.
+    message_hits: Vec<SearchHit>,
+    /// Konverzace, které mají v cache starší zprávy, než je v paměti.
+    older_in_store: HashSet<ConversationId>,
+    /// Indexace historie na pozadí: fronta, celkem, hotovo.
+    index_queue: VecDeque<ConversationId>,
+    index_total: usize,
+    index_running: bool,
     /// Zpráva pod myší.
     hovered_message: Option<MessageId>,
     /// Zpráva v režimu výběru textu.
@@ -446,6 +512,15 @@ impl App {
             in_flight_images: vec![],
             replying: None,
             in_flight_reply: None,
+            editing: None,
+            reacting: None,
+            confirm_delete: None,
+            highlight: None,
+            message_hits: vec![],
+            older_in_store: HashSet::new(),
+            index_queue: VecDeque::new(),
+            index_total: 0,
+            index_running: false,
             hovered_message: None,
             selecting: None,
             selection_seq: 0,
@@ -828,9 +903,180 @@ impl App {
         if let Ok(Some(cursor)) = store.older_cursor(&account, id) {
             self.older.insert(id.clone(), cursor);
         }
+        if msgs.len() >= CACHED_MESSAGES {
+            self.older_in_store.insert(id.clone());
+        }
         let media = self.fetch_media_for(&msgs);
         self.messages.insert(id.clone(), msgs);
         media
+    }
+
+    /// Upraví zprávu v paměti i v cache; vrátí upravenou kopii (`None` = zpráva není načtená).
+    fn change_message(
+        &mut self,
+        conv: &ConversationId,
+        id: &MessageId,
+        f: impl FnOnce(&mut Message),
+    ) -> Option<Message> {
+        let m = self
+            .messages
+            .get_mut(conv)?
+            .iter_mut()
+            .find(|m| &m.id == id)?;
+        f(m);
+        let copy = m.clone();
+        if let Some((store, account)) = self.store()
+            && let Err(e) = store.save_messages(&account, std::slice::from_ref(&copy))
+        {
+            tracing::warn!(error = %e, "uložení zprávy do cache");
+        }
+        Some(copy)
+    }
+
+    /// Ukončí úpravu zprávy a vrátí do psacího pole původně rozepsaný text.
+    fn cancel_edit(&mut self) {
+        if let Some(ed) = self.editing.take() {
+            self.composer = text_editor::Content::with_text(&ed.draft);
+        }
+    }
+
+    /// Odešle úpravu vlastní zprávy (Enter v režimu úprav).
+    fn submit_edit(&mut self, ed: Editing) -> Task<Msg> {
+        let text = self.composer.text().trim().to_owned();
+        if text.is_empty() {
+            // prázdná úprava = nabídnout smazání
+            self.confirm_delete = Some(ed.id.clone());
+            return Task::none();
+        }
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        self.cancel_edit();
+        if rich::plain(&rich::parse(&ed.original)) == text {
+            return Task::none(); // beze změny
+        }
+        let html = edited_html(&ed.original, &text);
+        self.change_message(&ed.conversation, &ed.id, |m| {
+            m.content = html.clone();
+            m.edited_at = Some(Utc::now());
+        });
+        let (conv, id) = (ed.conversation, ed.id);
+        Task::perform(
+            {
+                let conv = conv.clone();
+                async move { backend.edit(&conv, &id, &html).await.map_err(Failure::from) }
+            },
+            move |r| Msg::Edited(conv.clone(), r),
+        )
+    }
+
+    /// Otevře zprávu z výsledků hledání: načte z cache okolí zprávy až po nejnovější,
+    /// odroluje nahoru a zprávu zvýrazní.
+    fn open_hit(&mut self, conv: ConversationId, id: MessageId) -> Task<Msg> {
+        let num = id.as_str().parse::<i64>().unwrap_or(0);
+        if self.selected.as_ref() != Some(&conv) {
+            self.replying = None;
+            self.cancel_edit();
+        }
+        self.selected = Some(conv.clone());
+        self.selecting = None;
+        self.reacting = None;
+        self.confirm_delete = None;
+        let mut tasks = vec![];
+        if let Some((store, account)) = self.store() {
+            let mut window = store
+                .load_messages_before(&account, &conv, num, 3)
+                .unwrap_or_default();
+            window.extend(
+                store
+                    .load_messages_since(&account, &conv, num, 2000)
+                    .unwrap_or_default(),
+            );
+            let first = window.first().map(id_ms).unwrap_or(num);
+            let entry = self.messages.entry(conv.clone()).or_default();
+            entry.retain(|m| id_ms(m) >= first);
+            merge_messages(entry, window.clone());
+            self.older_in_store.insert(conv.clone());
+            if !self.older.contains_key(&conv)
+                && let Ok(Some(cursor)) = store.older_cursor(&account, &conv)
+            {
+                self.older.insert(conv.clone(), cursor);
+            }
+            tasks.push(self.fetch_media_for(&window));
+        }
+        self.highlight = Some(id);
+        self.at_bottom = false;
+        self.new_below = false;
+        self.mark_read(&conv);
+        if !self.fresh.contains(&conv) {
+            tasks.push(self.fetch_messages(conv, None));
+        }
+        tasks.push(operation::snap_to(
+            MESSAGES,
+            scrollable::RelativeOffset::START,
+        ));
+        Task::batch(tasks)
+    }
+
+    /// Spustí indexaci historie všech konverzací na pozadí (jednou za běh).
+    fn start_indexing(&mut self) -> Task<Msg> {
+        if self.index_running || self.store().is_none() {
+            return Task::none();
+        }
+        self.index_queue = self
+            .conversations
+            .iter()
+            .filter(|c| !self.is_draft(&c.id))
+            .map(|c| c.id.clone())
+            .collect();
+        self.index_total = self.index_queue.len();
+        self.index_running = true;
+        tracing::info!(total = self.index_total, "indexace historie začne");
+        Task::perform(tokio::time::sleep(INDEX_START_DELAY), |_| Msg::IndexNext)
+    }
+
+    /// Další stránka historie první nedokončené konverzace ve frontě.
+    fn index_next(&mut self) -> Task<Msg> {
+        let (Some((store, account)), Some(backend)) =
+            (self.store(), self.session().map(|s| s.backend.clone()))
+        else {
+            self.index_running = false;
+            return Task::none();
+        };
+        let horizon = (Utc::now() - chrono::Duration::days(INDEX_HORIZON_DAYS)).timestamp_millis();
+        while let Some(conv) = self.index_queue.front().cloned() {
+            let st = match store.history_state(&account, &conv) {
+                Ok(st) => st,
+                Err(e) => {
+                    tracing::warn!(%conv, error = %e, "indexace: stav historie");
+                    self.index_queue.pop_front();
+                    continue;
+                }
+            };
+            let done = matches!(st.cursor, Some(None))
+                || st.count >= INDEX_MAX_MESSAGES
+                || st.oldest.is_some_and(|o| o < horizon);
+            if done {
+                self.index_queue.pop_front();
+                continue;
+            }
+            let cursor = st.cursor.flatten();
+            return Task::perform(
+                {
+                    let conv = conv.clone();
+                    async move {
+                        backend
+                            .history(&conv, cursor.as_deref())
+                            .await
+                            .map_err(Failure::from)
+                    }
+                },
+                move |r| Msg::Indexed(conv.clone(), r),
+            );
+        }
+        self.index_running = false;
+        tracing::info!(total = self.index_total, "indexace historie hotová");
+        Task::none()
     }
 
     fn store(&self) -> Option<(Store, AccountId)> {
@@ -1011,8 +1257,11 @@ impl App {
                 }
                 if !self.peer_scan_done {
                     self.peer_scan_done = true;
+                    tasks.push(self.start_indexing());
                     // ladění: `TYMY_OPEN_CHAT=<začátek id nebo část názvu>` otevře chat po startu
-                    if let Ok(want) = std::env::var("TYMY_OPEN_CHAT") {
+                    if let Ok(want) = std::env::var("TYMY_OPEN_CHAT")
+                        && !want.is_empty()
+                    {
                         let want = want.to_lowercase();
                         if let Some(c) = self.conversations.iter().find(|c| {
                             c.id.as_str().to_lowercase().starts_with(&want)
@@ -1020,6 +1269,10 @@ impl App {
                         }) {
                             tasks.push(Task::done(Msg::Select(c.id.clone())));
                         }
+                    }
+                    // ladění: `TYMY_SEARCH=<dotaz>` vyplní hledání
+                    if let Ok(q) = std::env::var("TYMY_SEARCH") {
+                        tasks.push(Task::done(Msg::Search(q)));
                     }
                     let ids: Vec<_> = self
                         .conversations
@@ -1064,7 +1317,11 @@ impl App {
             Msg::Select(id) => {
                 if self.selected.as_ref() != Some(&id) {
                     self.replying = None;
+                    self.cancel_edit();
                 }
+                self.highlight = None;
+                self.reacting = None;
+                self.confirm_delete = None;
                 self.selected = Some(id.clone());
                 self.selecting = None;
                 self.at_bottom = true;
@@ -1150,6 +1407,33 @@ impl App {
                 let Some(id) = self.selected.clone() else {
                     return Task::none();
                 };
+                if self.loading_older {
+                    return Task::none();
+                }
+                // nejdřív starší zprávy z cache (i z indexace na pozadí), pak ze serveru
+                let oldest = self
+                    .messages
+                    .get(&id)
+                    .and_then(|v| v.iter().map(id_ms).filter(|n| *n > 0).min());
+                if let (Some(oldest), Some((store, account))) = (oldest, self.store()) {
+                    match store.load_messages_before(&account, &id, oldest, STORE_PAGE) {
+                        Ok(page) if !page.is_empty() => {
+                            if page.len() < STORE_PAGE {
+                                self.older_in_store.remove(&id);
+                            }
+                            let media = self.fetch_media_for(&page);
+                            merge_messages(self.messages.entry(id).or_default(), page);
+                            return media;
+                        }
+                        Ok(_) => {
+                            self.older_in_store.remove(&id);
+                            if let Ok(Some(cursor)) = store.older_cursor(&account, &id) {
+                                self.older.insert(id.clone(), cursor);
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "starší zprávy z cache"),
+                    }
+                }
                 match self.older.get(&id).cloned().flatten() {
                     Some(cursor) if !self.loading_older => {
                         self.loading_older = true;
@@ -1163,9 +1447,14 @@ impl App {
                 self.search = s;
                 self.search_seq += 1;
                 self.people_note = None;
-                if self.tab != Tab::Chats || self.search.trim().chars().count() < MIN_PEOPLE_QUERY {
+                if self.tab != Tab::Chats {
                     self.people.clear();
                     self.searching_people = false;
+                }
+                if self.search.trim().chars().count() < MIN_PEOPLE_QUERY {
+                    self.people.clear();
+                    self.searching_people = false;
+                    self.message_hits.clear();
                     return Task::none();
                 }
                 let seq = self.search_seq;
@@ -1181,6 +1470,19 @@ impl App {
                     return Task::none();
                 }
                 let query = self.search.trim().to_owned();
+                // zprávy: fulltext v cache (rychlý, přímo zde)
+                self.message_hits = match self.store() {
+                    Some((store, account)) => store
+                        .search(&account, &query, None, MESSAGE_HITS)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "hledání ve zprávách");
+                            vec![]
+                        }),
+                    None => vec![],
+                };
+                if self.tab != Tab::Chats {
+                    return Task::none();
+                }
                 self.searching_people = true;
                 self.people.clear();
                 let mut tasks = vec![Task::perform(
@@ -1346,6 +1648,163 @@ impl App {
                 self.replying = None;
                 Task::none()
             }
+            Msg::ToggleReactions(id) => {
+                self.reacting = if self.reacting.as_ref() == Some(&id) {
+                    None
+                } else {
+                    Some(id)
+                };
+                Task::none()
+            }
+            Msg::React(id, key) => {
+                self.reacting = None;
+                let (Some(conv), Some(session)) = (self.selected.clone(), self.session().cloned())
+                else {
+                    return Task::none();
+                };
+                let me = my_mri(&session.profile);
+                let account = session.profile.account_id.as_str().to_owned();
+                let mut on = true;
+                let changed = self.change_message(&conv, &id, |m| {
+                    on = toggle_reaction(m, &key, &me, &account);
+                });
+                if changed.is_none() {
+                    return Task::none();
+                }
+                let backend = session.backend.clone();
+                Task::perform(
+                    {
+                        let conv = conv.clone();
+                        async move {
+                            backend
+                                .react(&conv, &id, &key, on)
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::Reacted(conv.clone(), r),
+                )
+            }
+            Msg::Reacted(_, Ok(())) | Msg::Edited(_, Ok(())) | Msg::Deleted(_, Ok(())) => {
+                Task::none()
+            }
+            Msg::Reacted(conv, Err(e)) | Msg::Edited(conv, Err(e)) | Msg::Deleted(conv, Err(e)) => {
+                // místní změna neprošla: vrátit stav ze serveru
+                let refresh = self.fetch_messages(conv, None);
+                Task::batch([refresh, self.fail(e)])
+            }
+            Msg::StartEdit(id) => {
+                let Some(conv) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let Some(m) = self.find_message(&id) else {
+                    return Task::none();
+                };
+                let text = rich::plain(&rich::parse(&m.content));
+                let original = m.content.clone();
+                let draft = match &self.editing {
+                    Some(ed) => ed.draft.clone(),
+                    None => self.composer.text().trim_end_matches('\n').to_owned(),
+                };
+                self.editing = Some(Editing {
+                    conversation: conv,
+                    id,
+                    original,
+                    draft,
+                });
+                self.replying = None;
+                self.selecting = None;
+                self.confirm_delete = None;
+                self.composer = text_editor::Content::with_text(&text);
+                self.composer
+                    .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                operation::focus(COMPOSER)
+            }
+            Msg::EditLast => {
+                let Some(profile) = self.session().map(|s| s.profile.clone()) else {
+                    return Task::none();
+                };
+                let last = self
+                    .selected
+                    .as_ref()
+                    .and_then(|c| self.messages.get(c))
+                    .and_then(|v| {
+                        v.iter()
+                            .rev()
+                            .find(|m| !m.deleted && m.is_user_content() && is_me(&profile, m))
+                    })
+                    .map(|m| m.id.clone());
+                match last {
+                    Some(id) => self.update(Msg::StartEdit(id)),
+                    None => Task::none(),
+                }
+            }
+            Msg::CancelEdit => {
+                self.cancel_edit();
+                Task::none()
+            }
+            Msg::AskDelete(id) => {
+                self.confirm_delete = Some(id);
+                self.reacting = None;
+                Task::none()
+            }
+            Msg::CancelDelete => {
+                self.confirm_delete = None;
+                Task::none()
+            }
+            Msg::Delete(id) => {
+                self.confirm_delete = None;
+                let (Some(conv), Some(backend)) = (
+                    self.selected.clone(),
+                    self.session().map(|s| s.backend.clone()),
+                ) else {
+                    return Task::none();
+                };
+                if self.editing.as_ref().is_some_and(|e| e.id == id) {
+                    self.cancel_edit();
+                }
+                if self
+                    .change_message(&conv, &id, |m| m.deleted = true)
+                    .is_none()
+                {
+                    return Task::none();
+                }
+                Task::perform(
+                    {
+                        let conv = conv.clone();
+                        async move { backend.delete(&conv, &id).await.map_err(Failure::from) }
+                    },
+                    move |r| Msg::Deleted(conv.clone(), r),
+                )
+            }
+            Msg::OpenHit(conv, id) => self.open_hit(conv, id),
+            Msg::IndexNext => self.index_next(),
+            Msg::Indexed(conv, Ok(page)) => {
+                if let Some((store, account)) = self.store() {
+                    if let Err(e) = store.save_messages(&account, &page.messages) {
+                        tracing::warn!(error = %e, "indexace: uložení zpráv");
+                    }
+                    if let Err(e) = store.set_older_cursor(&account, &conv, page.older.as_deref()) {
+                        tracing::warn!(error = %e, "indexace: uložení kurzoru");
+                    }
+                }
+                if let Some(s) = self.session().cloned() {
+                    self.peers.learn(&s.profile, page.messages.iter().rev());
+                }
+                if self.messages.contains_key(&conv) {
+                    self.older_in_store.insert(conv);
+                }
+                Task::perform(tokio::time::sleep(INDEX_DELAY), |_| Msg::IndexNext)
+            }
+            Msg::Indexed(conv, Err(e)) => {
+                tracing::warn!(%conv, error = %e.text, "indexace konverzace selhala, přeskakuji");
+                self.index_queue.retain(|c| c != &conv);
+                if e.reauth {
+                    self.index_running = false;
+                    return self.fail(e);
+                }
+                Task::perform(tokio::time::sleep(INDEX_DELAY), |_| Msg::IndexNext)
+            }
             Msg::SelectAction(action) => {
                 let Some(sel) = &mut self.selecting else {
                     return Task::none();
@@ -1436,6 +1895,10 @@ impl App {
                 Task::none()
             }
             Msg::Send => {
+                if let Some(ed) = self.editing.clone() {
+                    return self.submit_edit(ed);
+                }
+                self.highlight = None;
                 let text = self.composer.text().trim().to_owned();
                 let (Some(id), Some(backend)) = (
                     self.selected.clone(),
@@ -1834,7 +2297,83 @@ impl App {
         if items.is_empty() {
             items.push(note("Žádné chaty"));
         }
+        items.extend(self.hit_items(query));
         items
+    }
+
+    /// Sekce „Zprávy“ ve výsledcích hledání (fulltext v cache) a stav indexace.
+    fn hit_items<'a>(&'a self, query: &str) -> Vec<Element<'a, Msg>> {
+        if query.chars().count() < MIN_PEOPLE_QUERY {
+            return vec![];
+        }
+        let c = style::colors(&self.theme());
+        let mut items = vec![section_label("ZPRÁVY")];
+        if self.message_hits.is_empty() {
+            items.push(note("Žádné zprávy"));
+        }
+        items.extend(self.message_hits.iter().map(|h| self.hit_row(h, &c)));
+        if self.index_running {
+            let done = self.index_total.saturating_sub(self.index_queue.len());
+            items.push(note(&format!(
+                "Procházím starší historii ({done} z {} konverzací)…",
+                self.index_total
+            )));
+        }
+        items
+    }
+
+    fn hit_row<'a>(&'a self, h: &'a SearchHit, c: &style::Colors) -> Element<'a, Msg> {
+        let m = &h.message;
+        let title = self
+            .conversations
+            .iter()
+            .find(|c| c.id == m.conversation_id)
+            .map(|c| match c.kind {
+                ConversationKind::Channel => format!("# {}", channel_name(c)),
+                _ => self.peers.title(c),
+            })
+            .unwrap_or_else(|| "Konverzace".into());
+        let mut spans: Vec<iced::widget::text::Span<'a, ()>> = vec![
+            span(format!("{}: ", m.sender_name.as_deref().unwrap_or("?")))
+                .font(SEMIBOLD)
+                .color(c.muted),
+        ];
+        for (i, part) in h
+            .snippet
+            .replace('\n', " ")
+            .split([HIT_START, HIT_END])
+            .enumerate()
+        {
+            // liché úseky jsou mezi značkami = nalezená slova
+            let sp = span(part.to_owned());
+            spans.push(if i % 2 == 1 {
+                sp.font(BOLD).color(c.primary)
+            } else {
+                sp.color(c.muted)
+            });
+        }
+        button(
+            column![
+                row![
+                    text(truncate(&title, 30))
+                        .size(13)
+                        .font(SEMIBOLD)
+                        .wrapping(Wrapping::None),
+                    space::horizontal(),
+                    text(short_time(m.arrived_at.or(m.composed_at)))
+                        .size(11)
+                        .style(muted),
+                ]
+                .align_y(iced::Alignment::Center),
+                rich_text(spans).size(12).line_height(1.3),
+            ]
+            .spacing(2),
+        )
+        .width(Length::Fill)
+        .padding([7, 8])
+        .style(|t: &Theme, status| style::list_item(t, status, false))
+        .on_press(Msg::OpenHit(m.conversation_id.clone(), m.id.clone()))
+        .into()
     }
 
     /// Záložka Týmy: týmy podle názvu, pod nimi kanály.
@@ -1887,6 +2426,7 @@ impl App {
                 "Nic nenalezeno"
             }));
         }
+        items.extend(self.hit_items(query));
         items
     }
 
@@ -2070,8 +2610,14 @@ impl App {
         .style(style::header);
 
         let mut list = Column::new().spacing(3).padding([16, 24]);
-        match self.older.get(&conv.id) {
-            Some(Some(_)) => {
+        // Some(true) = jsou starší zprávy (na serveru nebo aspoň v cache), None = načítá se
+        let older = if self.older_in_store.contains(&conv.id) {
+            Some(true)
+        } else {
+            self.older.get(&conv.id).map(Option::is_some)
+        };
+        match older {
+            Some(true) => {
                 list = list.push(
                     container(
                         button(
@@ -2093,7 +2639,7 @@ impl App {
             None => {
                 list = list.push(container(text("Načítám…").style(muted)).center_x(Length::Fill))
             }
-            Some(None) => {}
+            Some(false) => {}
         }
         if self.older.get(&conv.id) == Some(&None)
             && self
@@ -2157,6 +2703,9 @@ impl App {
                 MessageUi {
                     hovered: self.hovered_message.as_ref() == Some(&m.id),
                     selecting: self.selecting.as_ref().filter(|s| s.id == m.id),
+                    reacting: self.reacting.as_ref() == Some(&m.id),
+                    confirm_delete: self.confirm_delete.as_ref() == Some(&m.id),
+                    highlighted: self.highlight.as_ref() == Some(&m.id),
                     colors,
                 },
             ));
@@ -2212,54 +2761,26 @@ impl App {
             })
             .into()
         };
-        let reply: Element<'a, Msg> = match &self.replying {
-            None => space().into(),
-            Some(r) => container(
-                container(
-                    container(
-                        row![
-                            column![
-                                text(format!("Odpověď pro {}", r.author_name))
-                                    .size(12)
-                                    .font(SEMIBOLD),
-                                text(truncate_chars(&r.preview, 120))
-                                    .size(12)
-                                    .style(muted)
-                                    .wrapping(Wrapping::None),
-                            ]
-                            .spacing(1)
-                            .width(Length::Fill),
-                            icon_button("✕", Some(Msg::CancelReply), "Zrušit odpověď (Esc)"),
-                        ]
-                        .spacing(10)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .padding(iced::Padding {
-                        top: 4.0,
-                        right: 4.0,
-                        bottom: 4.0,
-                        left: 10.0,
-                    })
-                    .clip(true)
-                    .style(style::reply_preview),
-                )
-                .padding(iced::Padding {
-                    left: 3.0,
-                    ..iced::Padding::ZERO
-                })
-                .style(style::reply_frame),
+        let banner: Element<'a, Msg> = if self.editing.is_some() {
+            composer_banner(
+                "Úprava zprávy".into(),
+                "Enter uloží, Esc zruší. Formátování se nahradí prostým textem.".into(),
+                Msg::CancelEdit,
+                "Zrušit úpravu (Esc)",
             )
-            .padding(iced::Padding {
-                top: 6.0,
-                right: 4.0,
-                bottom: 2.0,
-                left: 0.0,
-            })
-            .into(),
+        } else if let Some(r) = &self.replying {
+            composer_banner(
+                format!("Odpověď pro {}", r.author_name),
+                truncate_chars(&r.preview, 120),
+                Msg::CancelReply,
+                "Zrušit odpověď (Esc)",
+            )
+        } else {
+            space().into()
         };
         let composer = container(
             container(column![
-                reply,
+                banner,
                 attachments,
                 row![
                     text_editor(&self.composer)
@@ -2270,8 +2791,19 @@ impl App {
                             let remove_last =
                                 self.composer.text().trim_end_matches('\n').is_empty()
                                     && !self.pending_images.is_empty();
-                            let replying = self.replying.is_some();
-                            move |kp| composer_keys(kp, remove_last, replying)
+                            let keys = ComposerKeys {
+                                remove_last,
+                                cancel: if self.editing.is_some() {
+                                    Some(Msg::CancelEdit)
+                                } else if self.replying.is_some() {
+                                    Some(Msg::CancelReply)
+                                } else {
+                                    None
+                                },
+                                edit_last: self.editing.is_none()
+                                    && self.composer.text().trim().is_empty(),
+                            };
+                            move |kp| composer_keys(kp, &keys)
                         })
                         .height(Length::Shrink)
                         .min_height(38)
@@ -2358,19 +2890,78 @@ impl App {
     }
 }
 
+/// Stav psacího pole pro klávesové zkratky.
+struct ComposerKeys {
+    /// Pole je prázdné a jsou vložené obrázky → Backspace odebere poslední.
+    remove_last: bool,
+    /// Co zruší Esc (úprava, odpověď).
+    cancel: Option<Msg>,
+    /// Prázdné pole → šipka nahoru upraví poslední vlastní zprávu.
+    edit_last: bool,
+}
+
+/// Lišta nad psacím polem (odpověď, úprava) s tlačítkem zrušení.
+fn composer_banner<'a>(
+    title: String,
+    detail: String,
+    cancel: Msg,
+    tip: &'a str,
+) -> Element<'a, Msg> {
+    container(
+        container(
+            container(
+                row![
+                    column![
+                        text(title).size(12).font(SEMIBOLD),
+                        text(detail).size(12).style(muted).wrapping(Wrapping::None),
+                    ]
+                    .spacing(1)
+                    .width(Length::Fill),
+                    icon_button("✕", Some(cancel), tip),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(iced::Padding {
+                top: 4.0,
+                right: 4.0,
+                bottom: 4.0,
+                left: 10.0,
+            })
+            .clip(true)
+            .style(style::reply_preview),
+        )
+        .padding(iced::Padding {
+            left: 3.0,
+            ..iced::Padding::ZERO
+        })
+        .style(style::reply_frame),
+    )
+    .padding(iced::Padding {
+        top: 6.0,
+        right: 4.0,
+        bottom: 2.0,
+        left: 0.0,
+    })
+    .into()
+}
+
 /// Enter odešle, Shift+Enter vloží nový řádek; ostatní klávesy beze změny.
 /// `remove_last`: pole je prázdné a jsou vložené obrázky → Backspace odebere poslední.
-/// `replying`: Esc zruší rozepsanou odpověď.
 fn composer_keys(
     kp: text_editor::KeyPress,
-    remove_last: bool,
-    replying: bool,
+    keys: &ComposerKeys,
 ) -> Option<text_editor::Binding<Msg>> {
     use iced::keyboard::{Key, key::Named};
-    if replying && kp.key == Key::Named(Named::Escape) {
-        return Some(text_editor::Binding::Custom(Msg::CancelReply));
+    if let Some(cancel) = &keys.cancel
+        && kp.key == Key::Named(Named::Escape)
+    {
+        return Some(text_editor::Binding::Custom(cancel.clone()));
     }
-    if remove_last && kp.key == Key::Named(Named::Backspace) {
+    if keys.edit_last && kp.key == Key::Named(Named::ArrowUp) && kp.modifiers.is_empty() {
+        return Some(text_editor::Binding::Custom(Msg::EditLast));
+    }
+    if keys.remove_last && kp.key == Key::Named(Named::Backspace) {
         return Some(text_editor::Binding::Custom(Msg::RemoveLastPending));
     }
     if kp.key == Key::Named(Named::Enter) && !kp.modifiers.shift() {
@@ -2449,10 +3040,24 @@ fn note<'a>(t: &str) -> Element<'a, Msg> {
 }
 
 /// Malé průhledné tlačítko s ikonou a popiskem při najetí myší.
+/// Šířka ikonového tlačítka (kvůli rezervě místa vedle bubliny).
+const ICON_BUTTON: f32 = 26.0;
+
+/// Reakce nabízené ve výběru (klíče Teams).
+const REACTIONS: [(&str, &str); 6] = [
+    ("like", "👍"),
+    ("heart", "❤️"),
+    ("laugh", "😆"),
+    ("surprised", "😮"),
+    ("sad", "😢"),
+    ("angry", "😠"),
+];
+
 fn icon_button<'a>(label: &'a str, msg: Option<Msg>, tip: &'a str) -> Element<'a, Msg> {
     iced::widget::tooltip(
-        button(text(label).size(12).center())
-            .padding([3, 6])
+        button(text(label).size(12).center().width(Length::Fill))
+            .width(ICON_BUTTON)
+            .padding([3, 0])
             .style(style::ghost)
             .on_press_maybe(msg),
         container(text(tip).size(11))
@@ -2549,16 +3154,38 @@ fn person_item(p: &Person) -> Element<'_, Msg> {
     .into()
 }
 
+/// Id zprávy jako čas v ms (0 = neznámé).
+fn id_ms(m: &Message) -> i64 {
+    m.id.as_str().parse().unwrap_or(0)
+}
+
 fn displayable(m: &Message) -> bool {
     m.deleted
         || m.is_user_content()
         || matches!(&m.kind, MessageKind::Event(t) if t.starts_with("Event/Call"))
 }
 
+/// Rozpracovaná úprava vlastní zprávy.
+#[derive(Debug, Clone)]
+struct Editing {
+    conversation: ConversationId,
+    id: MessageId,
+    /// Původní HTML (zachová se citace odpovědi a obrázky).
+    original: String,
+    /// Text, který byl v psacím poli před úpravou (vrátí se po ní).
+    draft: String,
+}
+
 /// Stav zprávy v UI (najetí myší, režim výběru).
 struct MessageUi<'a> {
     hovered: bool,
     selecting: Option<&'a Selecting>,
+    /// Otevřený výběr reakcí.
+    reacting: bool,
+    /// Čeká se na potvrzení smazání.
+    confirm_delete: bool,
+    /// Zpráva nalezená hledáním.
+    highlighted: bool,
     /// Barvy aktuálního tématu (úseky formátovaného textu potřebují konkrétní barvy).
     colors: style::Colors,
 }
@@ -2653,7 +3280,23 @@ fn message_view<'a>(
     .into();
     // tlačítka vedle bubliny: při najetí myší, v režimu výběru stále
     let can_copy = !m.deleted && m.is_user_content();
-    let actions: Element<'a, Msg> = if selecting {
+    let editable = mine && can_copy;
+    let reserved = if editable { 6.0 } else { 4.0 } * ICON_BUTTON;
+    let actions: Element<'a, Msg> = if ui.confirm_delete {
+        row![
+            button(text("Smazat").size(12).font(SEMIBOLD))
+                .padding([3, 10])
+                .style(style::danger_button)
+                .on_press(Msg::Delete(m.id.clone())),
+            button(text("Zrušit").size(12))
+                .padding([3, 10])
+                .style(style::ghost)
+                .on_press(Msg::CancelDelete),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .into()
+    } else if selecting {
         row![
             icon_button(
                 "⧉",
@@ -2663,23 +3306,38 @@ fn message_view<'a>(
             icon_button("✓", Some(Msg::StopSelect), "Hotovo"),
         ]
         .into()
-    } else if ui.hovered && can_copy {
-        row![
+    } else if (ui.hovered || ui.reacting) && can_copy {
+        let mut buttons = vec![
+            icon_button("☺", Some(Msg::ToggleReactions(m.id.clone())), "Reagovat"),
             icon_button("↩", Some(Msg::Reply(m.id.clone())), "Odpovědět"),
             icon_button(
                 "⧉",
                 Some(Msg::CopyMessage(m.id.clone())),
-                "Kopírovat zprávu"
+                "Kopírovat zprávu",
             ),
             icon_button(
                 "⌶",
                 Some(Msg::StartSelect(m.id.clone())),
-                "Označit text (nebo dvojklik na zprávu)"
+                "Označit text (nebo dvojklik na zprávu)",
             ),
-        ]
-        .into()
+        ];
+        if editable {
+            buttons.insert(
+                0,
+                icon_button(
+                    "✎",
+                    Some(Msg::StartEdit(m.id.clone())),
+                    "Upravit (↑ v prázdném poli)",
+                ),
+            );
+            buttons.insert(
+                1,
+                icon_button("🗑", Some(Msg::AskDelete(m.id.clone())), "Smazat"),
+            );
+        }
+        iced::widget::Row::with_children(buttons).into()
     } else {
-        space().width(84).into()
+        space().width(reserved).into()
     };
     let bubble: Element<'a, Msg> = if mine {
         row![actions, bubble]
@@ -2720,6 +3378,26 @@ fn message_view<'a>(
     } else {
         Element::from(row![bubble, space::horizontal()])
     });
+    if ui.reacting && can_copy {
+        let picker = row(REACTIONS.iter().map(|(key, emoji)| {
+            let by_me = m
+                .reactions
+                .iter()
+                .any(|r| r.key == *key && r.users.iter().any(|u| u.as_str().ends_with(me)));
+            button(text(*emoji).size(18).line_height(1.1))
+                .padding([2, 6])
+                .style(move |t: &Theme, st| style::reaction_button(t, st, by_me))
+                .on_press(Msg::React(m.id.clone(), (*key).to_owned()))
+                .into()
+        }))
+        .spacing(2);
+        let picker = container(picker).padding(3).style(style::reaction_picker);
+        col = col.push(if mine {
+            Element::from(row![space::horizontal(), picker])
+        } else {
+            Element::from(row![space().width(4), picker])
+        });
+    }
     if !m.deleted && !m.reactions.is_empty() {
         let chips = row(m.reactions.iter().map(|r| {
             let by_me = r.users.iter().any(|u| u.as_str().ends_with(me));
@@ -2728,10 +3406,15 @@ fn message_view<'a>(
             } else {
                 r.emoji()
             };
-            container(text(label).size(15).line_height(1.1))
+            let chip = button(text(label).size(15).line_height(1.1))
                 .padding([1, 8])
-                .style(move |t: &Theme| style::reaction(t, by_me))
-                .into()
+                .style(move |t: &Theme, st| style::reaction_button(t, st, by_me));
+            if can_copy {
+                chip.on_press(Msg::React(m.id.clone(), r.key.clone()))
+                    .into()
+            } else {
+                chip.into()
+            }
         }))
         .spacing(4);
         col = col.push(if mine {
@@ -2753,12 +3436,26 @@ fn message_view<'a>(
         row![side, col, space().width(40)].spacing(10).into()
     };
     let top = if header { 10.0 } else { 0.0 };
-    mouse_area(container(line).padding(iced::Padding {
-        top,
-        right: 0.0,
-        bottom: 0.0,
-        left: 0.0,
-    }))
+    let highlighted = ui.highlighted;
+    mouse_area(
+        container(
+            container(line)
+                .padding(if highlighted { 4 } else { 0 })
+                .style(move |t: &Theme| {
+                    if highlighted {
+                        style::highlight(t)
+                    } else {
+                        container::Style::default()
+                    }
+                }),
+        )
+        .padding(iced::Padding {
+            top,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        }),
+    )
     .on_enter(Msg::HoverMessage(m.id.clone()))
     .on_exit(Msg::UnhoverMessage(m.id.clone()))
     .into()
@@ -2868,11 +3565,12 @@ fn block_view<'a>(
                 }))
                 .into()
             }));
-            table.into()
+            // pevná šířka: s `Fill` by se tabulka dělila o místo s odsazením bubliny
+            container(table).width(BUBBLE_TEXT_MAX).into()
         }
         Block::Image(img) => image_view(img, media.get(&img.url)),
         Block::Rule => container(space())
-            .width(Length::Fill)
+            .width(BUBBLE_TEXT_MAX)
             .height(1)
             .style(move |t: &Theme| style::rule(t, mine))
             .into(),

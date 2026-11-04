@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
 use crate::{
-    AccountKind, Conversation, ConversationId, Event, Message, Outgoing, Person, Profile, Result,
-    SentMessage,
+    AccountKind, Conversation, ConversationId, Event, Message, MessageId, Outgoing, Person,
+    Profile, Result, SentMessage,
 };
 
 /// Jedna stránka historie zpráv (od nejnovější po nejstarší).
@@ -33,6 +33,16 @@ pub trait ChatBackend: Send + Sync {
         cursor: Option<&str>,
     ) -> Result<MessagePage>;
 
+    /// Stránka historie pro indexaci na pozadí: jako [`ChatBackend::messages`],
+    /// ale ve větších stránkách (méně požadavků).
+    async fn history(
+        &self,
+        conversation: &ConversationId,
+        cursor: Option<&str>,
+    ) -> Result<MessagePage> {
+        self.messages(conversation, cursor).await
+    }
+
     /// Odešle zprávu: text (může být prázdný), obrázky (nejdřív se nahrají) a případnou odpověď.
     async fn send(&self, conversation: &ConversationId, message: &Outgoing) -> Result<SentMessage>;
 
@@ -44,6 +54,26 @@ pub trait ChatBackend: Send + Sync {
         };
         self.send(conversation, &message).await
     }
+
+    /// Přidá (`on`) nebo odebere moji reakci (`key` jako v [`crate::Reaction::key`]).
+    async fn react(
+        &self,
+        conversation: &ConversationId,
+        message: &MessageId,
+        key: &str,
+        on: bool,
+    ) -> Result<()>;
+
+    /// Přepíše obsah vlastní zprávy; `html` je hotový obsah (viz [`crate::text`]).
+    async fn edit(
+        &self,
+        conversation: &ConversationId,
+        message: &MessageId,
+        html: &str,
+    ) -> Result<()>;
+
+    /// Smaže vlastní zprávu.
+    async fn delete(&self, conversation: &ConversationId, message: &MessageId) -> Result<()>;
 
     /// Počká na další dávku real-time událostí (long-poll). Může vrátit prázdný seznam
     /// při vypršení intervalu; volající pak jednoduše zavolá znovu.

@@ -56,6 +56,14 @@ Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `mess
 `originalarrivaltime`, `properties` (`edittime`, `deletetime`, `files` jako JSON řetězec,
 `emotions` = reakce).
 
+| Operace | Požadavek | Stav |
+|---|---|---|
+| Historie po 200 | `pageSize=200` funguje (víc server odmítne); i v `backwardLink` | ✅ |
+| Reakce přidat | `PUT …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like","value":<ms>}}` | ❓ neověřeno |
+| Reakce odebrat | `DELETE …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like"}}` | ❓ neověřeno |
+| Úprava | `PUT …/messages/{id}`, tělo `{id, type:"Message", conversationid, content, messagetype, contenttype, imdisplayname}` | ❓ neověřeno |
+| Smazání | `DELETE …/messages/{id}?behavior=softDelete` | ❓ neověřeno |
+
 ### Obsah zpráv (HTML) ✅
 
 Ověřeno na ~1200 reálných zprávách (struktura značek, bez obsahu):
