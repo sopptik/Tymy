@@ -15,6 +15,8 @@ use tymy_core::{
 pub(crate) struct ConversationsResponse {
     #[serde(default)]
     pub conversations: Vec<WireConversation>,
+    #[serde(rename = "_metadata", default)]
+    pub metadata: Metadata,
 }
 
 #[derive(Debug, Default, Deserialize)]

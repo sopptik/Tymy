@@ -139,7 +139,14 @@ impl ChatBackend for TeamsBackend {
     }
 
     async fn conversations(&self) -> Result<Vec<Conversation>> {
-        self.call(|s| async move { chat::list_conversations(&self.http, &s).await })
+        self.call(|s| async move {
+            chat::list_conversations(&self.http, &s, chat::MAX_CONVERSATION_PAGES).await
+        })
+        .await
+    }
+
+    async fn recent_conversations(&self) -> Result<Vec<Conversation>> {
+        self.call(|s| async move { chat::list_conversations(&self.http, &s, 1).await })
             .await
     }
 

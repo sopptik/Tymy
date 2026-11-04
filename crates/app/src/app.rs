@@ -40,8 +40,10 @@ use crate::tray::{self, TrayEvent, TrayHandle};
 const COMPOSER: Id = Id::new("composer");
 const GROUP_QUERY: Id = Id::new("group-query");
 const MESSAGES: Id = Id::new("messages");
-/// Dokud nemáme trouter (WebSocket), obnovujeme seznam chatů periodicky.
+/// Dokud nemáme trouter (WebSocket), obnovujeme seznam chatů periodicky (jen nejnovější
+/// stránku); celý seznam (všechny stránky) při startu a jednou za `FULL_REFRESH`.
 const REFRESH: Duration = Duration::from_secs(5);
+const FULL_REFRESH: Duration = Duration::from_secs(5 * 60);
 /// Kolik chatů bez známého jména projít v historii (záloha, když profily nevyjdou).
 const PEER_SCAN_LIMIT: usize = 25;
 /// U kolika skupinových chatů bez názvu najednou zjišťovat členy.
@@ -181,7 +183,8 @@ pub enum Msg {
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
     Tick,
-    Conversations(Result<Vec<Conversation>, Failure>),
+    /// Seznam konverzací; `bool` = celý (jinak jen nejnovější stránka ke sloučení).
+    Conversations(Result<Vec<Conversation>, Failure>, bool),
     PeersScanned(Vec<Message>),
     /// Jména účastníků z profilů: (chat, jména) a chaty, u kterých to nevyšlo.
     NamesResolved(Vec<(ConversationId, Vec<String>)>, Vec<ConversationId>),
@@ -342,9 +345,10 @@ impl Msg {
                 inner.log()
             }
             Msg::OpenUrl(_) => debug!("update: OpenUrl"),
-            Msg::Conversations(r) => debug!(
+            Msg::Conversations(r, full) => debug!(
                 result = ok(r.is_ok()),
                 count = r.as_ref().map(Vec::len).unwrap_or(0),
+                full,
                 "update: Conversations"
             ),
             Msg::PeersScanned(m) => debug!(messages = m.len(), "update: PeersScanned"),
@@ -597,6 +601,8 @@ pub struct App {
     /// Přišla nová zpráva, zatímco uživatel četl starší (zobrazí overlay).
     new_below: bool,
     peer_scan_done: bool,
+    /// Kdy jsme naposledy načítali celý seznam konverzací.
+    last_full_refresh: Option<std::time::Instant>,
     /// Chaty, u kterých jsme už zkoušeli zjistit jména účastníků.
     names_tried: HashSet<ConversationId>,
     /// Konverzace, jejichž nejnovější stránku jsme v tomto běhu už stáhli ze sítě.
@@ -718,6 +724,7 @@ impl App {
             at_bottom: true,
             new_below: false,
             peer_scan_done: false,
+            last_full_refresh: None,
             names_tried: HashSet::new(),
             fresh: Default::default(),
             error: None,
@@ -983,9 +990,22 @@ impl App {
             return Task::none();
         };
         self.refreshing = true;
+        let full = self
+            .last_full_refresh
+            .is_none_or(|t| t.elapsed() >= FULL_REFRESH);
+        if full {
+            self.last_full_refresh = Some(std::time::Instant::now());
+        }
         Task::perform(
-            async move { backend.conversations().await.map_err(Failure::from) },
-            Msg::Conversations,
+            async move {
+                if full {
+                    backend.conversations().await
+                } else {
+                    backend.recent_conversations().await
+                }
+                .map_err(Failure::from)
+            },
+            move |r| Msg::Conversations(r, full),
         )
     }
 
@@ -1956,10 +1976,23 @@ impl App {
                     self.fetch_conversations()
                 }
             }
-            Msg::Conversations(Ok(list)) => {
+            Msg::Conversations(Ok(list), full) => {
                 self.refreshing = false;
                 let Some(session) = self.session().cloned() else {
                     return Task::none();
+                };
+                // nejnovější stránka: starší konverzace zůstanou z posledního celého seznamu
+                let list = if full {
+                    list
+                } else {
+                    let fresh: HashSet<ConversationId> =
+                        list.iter().map(|c| c.id.clone()).collect();
+                    let older = self
+                        .conversations
+                        .iter()
+                        .filter(|c| !fresh.contains(&c.id) && !self.is_draft(&c.id))
+                        .cloned();
+                    list.into_iter().chain(older).collect::<Vec<_>>()
                 };
                 if let Some(store) = &session.store
                     && let Err(e) = store.save_conversations(&session.profile.account_id, &list)
@@ -2030,7 +2063,11 @@ impl App {
                 }
                 Task::batch(tasks)
             }
-            Msg::Conversations(Err(e)) => {
+            Msg::Conversations(Err(e), full) => {
+                if full {
+                    // celý seznam zkusit znovu při další obnově
+                    self.last_full_refresh = None;
+                }
                 self.refreshing = false;
                 self.fail(e)
             }
@@ -5327,7 +5364,8 @@ async fn other_unread(
             ))
         }
     };
-    let convs = backend.conversations().await?;
+    // nepřečtené a nové zprávy jsou v nejnověji aktivních chatech
+    let convs = backend.recent_conversations().await?;
     Ok((OtherBackend(backend), convs))
 }
 

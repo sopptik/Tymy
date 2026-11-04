@@ -33,25 +33,48 @@ pub(crate) fn authed(rb: RequestBuilder, session: &SkypeSession) -> RequestBuild
     rb.header("Authentication", format!("skypetoken={}", session.token))
 }
 
-pub async fn list_conversations(http: &Http, session: &SkypeSession) -> Result<Vec<Conversation>> {
-    let url = api_url(session, &["v1", "users", "ME", "conversations"]);
-    let resp = authed(http.client.get(url), session)
-        .query(&[
-            ("view", "msnp24Equivalent"),
-            ("pageSize", "200"),
-            ("targetType", "Passport|Skype|Lync|Thread|Agent|ShortCircuit|PSTN|Flxt|NotificationStream|ModernBots|secureThreads|InviteFree"),
-        ])
-        .send_logged()
-        .await
-        .map_err(net_err)?;
-    let r: wire::ConversationsResponse = json(check(resp).await?).await?;
-    let mut convs: Vec<_> = r
-        .conversations
-        .into_iter()
-        // opuštěné týmy: oficiální klient je nezobrazuje, server k nim odpírá přístup
-        .filter(|c| !c.left_team())
-        .map(|c| c.into_domain())
-        .collect();
+/// Nejvýš kolik stránek seznamu konverzací (po 200) načíst při úplném načtení.
+pub const MAX_CONVERSATION_PAGES: usize = 10;
+
+/// Seznam konverzací od nejnovější aktivity; `max_pages` stránek po 200 přes
+/// `_metadata.backwardLink` (ověřeno 2026-11-04). `max_pages = 1` = jen nejnovější.
+pub async fn list_conversations(
+    http: &Http,
+    session: &SkypeSession,
+    max_pages: usize,
+) -> Result<Vec<Conversation>> {
+    let first = api_url(session, &["v1", "users", "ME", "conversations"]);
+    let mut rb = http.client.get(first).query(&[
+        ("view", "msnp24Equivalent"),
+        ("pageSize", "200"),
+        ("targetType", "Passport|Skype|Lync|Thread|Agent|ShortCircuit|PSTN|Flxt|NotificationStream|ModernBots|secureThreads|InviteFree"),
+    ]);
+    let mut convs: Vec<Conversation> = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for page in 1..=max_pages.max(1) {
+        let resp = authed(rb, session).send_logged().await.map_err(net_err)?;
+        let r: wire::ConversationsResponse = json(check(resp).await?).await?;
+        let empty = r.conversations.is_empty();
+        convs.extend(
+            r.conversations
+                .into_iter()
+                // opuštěné týmy: oficiální klient je nezobrazuje, server k nim odpírá přístup
+                .filter(|c| !c.left_team())
+                .map(|c| c.into_domain())
+                .filter(|c| seen.insert(c.id.clone())),
+        );
+        let Some(next) = r.metadata.backward_link.filter(|_| !empty) else {
+            break;
+        };
+        if page == max_pages {
+            tracing::warn!(
+                pages = page,
+                "seznam konverzací je delší, zbytek vynechávám"
+            );
+            break;
+        }
+        rb = http.client.get(same_origin(session, &next)?);
+    }
     convs.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
     Ok(convs)
 }
@@ -594,6 +617,45 @@ mod tests {
         .unwrap();
         let ids: Vec<_> = m.iter().map(|u| u.as_str()).collect();
         assert_eq!(ids, ["8:orgid:a", "8:orgid:b"], "boti se vynechají");
+    }
+
+    #[tokio::test]
+    async fn follows_conversation_pages() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/users/8:orgid:me/conversations?view=msnp24Equivalent&syncState=abc&pageSize=200",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/v1/users/ME/conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "conversations": [{"id": "19:a@thread.v2", "threadProperties": {"threadType": "chat"}}],
+                "_metadata": {"backwardLink": next}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/8:orgid:me/conversations"))
+            .and(query_param("syncState", "abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "conversations": [
+                    {"id": "19:a@thread.v2", "threadProperties": {"threadType": "chat"}},
+                    {"id": "19:b@thread.v2", "threadProperties": {"threadType": "chat"}}
+                ],
+                "_metadata": {"backwardLink": null}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (http, s) = (Http::new().unwrap(), session(&server.uri()));
+        let all = list_conversations(&http, &s, MAX_CONVERSATION_PAGES)
+            .await
+            .unwrap();
+        let ids: Vec<_> = all.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "duplicita mezi stránkami se vynechá: {ids:?}");
+        let recent = list_conversations(&http, &s, 1).await.unwrap();
+        assert_eq!(recent.len(), 1, "jen první stránka");
     }
 
     #[tokio::test]

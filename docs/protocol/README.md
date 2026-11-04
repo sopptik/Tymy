@@ -77,6 +77,7 @@ Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `mess
 | Operace | Požadavek | Stav |
 |---|---|---|
 | Historie po 200 | `pageSize=200` funguje (víc server odmítne); i v `backwardLink` | ✅ |
+| Seznam konverzací po stránkách | `_metadata: {backwardLink, forwardLink, syncState, totalCount}`; `backwardLink` míří na `/v1/users/8:orgid:<oid>/conversations?…&syncState=…` a vede na starší konverzace, poslední stránka ho nemá (ověřeno po 10: 4 stránky = všech 39) | ✅ |
 | Reakce přidat | `PUT …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like","value":<ms>}}` | ❓ neověřeno |
 | Reakce odebrat | `DELETE …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like"}}` | ❓ neověřeno |
 | Úprava | `PUT …/messages/{id}`, tělo `{id, type:"Message", conversationid, content, messagetype, contenttype, imdisplayname}` | ❓ neověřeno |
@@ -233,6 +234,6 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - [x] Hlásit přečtení serveru (consumption horizon); neověřeno proti produkci
 - [x] Jména účastníků chatů bez nutnosti číst historii (profily z middle tier, 2026-11-04)
 - [x] Authorization code + PKCE pro organizace s blokovaným device code (2026-11-04)
-- [ ] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty
+- [x] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty (2026-11-04)
 - [x] Zobrazení vložených obrázků (AMS náhled + originál)
 - [ ] Odesílání obrázků a souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS

@@ -23,8 +23,13 @@ pub trait ChatBackend: Send + Sync {
 
     async fn profile(&self) -> Result<Profile>;
 
-    /// Seznam konverzací seřazený od poslední aktivity.
+    /// Seznam konverzací seřazený od poslední aktivity (celý).
     async fn conversations(&self) -> Result<Vec<Conversation>>;
+
+    /// Jen nejnověji aktivní konverzace (pro častou obnovu); výchozí = celý seznam.
+    async fn recent_conversations(&self) -> Result<Vec<Conversation>> {
+        self.conversations().await
+    }
 
     /// Stránka historie. `cursor = None` načte nejnovější zprávy.
     async fn messages(
