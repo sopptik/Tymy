@@ -230,6 +230,23 @@ impl ChatBackend for TeamsBackend {
         .await
     }
 
+    async fn mark_read(
+        &self,
+        conversation: &ConversationId,
+        message: &tymy_core::MessageId,
+        client_id: Option<&str>,
+    ) -> Result<()> {
+        let horizon =
+            chat::consumption_horizon(message, client_id, chrono::Utc::now().timestamp_millis());
+        self.call(|s| {
+            let horizon = horizon.clone();
+            async move {
+                chat::set_consumption_horizon(&self.http, &s, conversation, &horizon).await
+            }
+        })
+        .await
+    }
+
     async fn react(
         &self,
         conversation: &ConversationId,

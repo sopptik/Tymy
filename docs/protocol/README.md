@@ -81,6 +81,10 @@ Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `mess
 | Reakce odebrat | `DELETE …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like"}}` | ❓ neověřeno |
 | Úprava | `PUT …/messages/{id}`, tělo `{id, type:"Message", conversationid, content, messagetype, contenttype, imdisplayname}` | ❓ neověřeno |
 | Smazání | `DELETE …/messages/{id}?behavior=softDelete` | ❓ neověřeno |
+| Přečteno | `PUT …/conversations/{id}/properties?name=consumptionhorizon`, tělo `{"consumptionhorizon":"<id zprávy>;<čas ms>;<clientmessageid>"}` (formát jako v seznamu konverzací) | ❓ neověřeno |
+
+Přečtení Tymy hlásí jen pro otevřený chat, když má okno fokus a není skryté; jednou pro
+každou novou zprávu (i po chybě až s další zprávou).
 
 ### Obsah zpráv (HTML) ✅
 
@@ -218,9 +222,9 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - [ ] Zjistit skutečné hodnoty pro osobní účty (autorita, client id, scope, authz, chat host)
 - [x] Ověřit long-poll: nefunguje (410 Gone)
 - [ ] Implementovat trouter (WebSocket) pro okamžité doručování
-- [ ] Hlásit přečtení serveru (consumption horizon)
+- [x] Hlásit přečtení serveru (consumption horizon); neověřeno proti produkci
 - [ ] Jména účastníků 1:1 chatů bez nutnosti číst historii (profily z middle tier)
-- [ ] Authorization code + PKCE pro organizace s blokovaným device code
+- [x] Authorization code + PKCE pro organizace s blokovaným device code (2026-11-04)
 - [ ] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty
 - [x] Zobrazení vložených obrázků (AMS náhled + originál)
 - [ ] Odesílání obrázků a souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS
