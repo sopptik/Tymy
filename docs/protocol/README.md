@@ -56,6 +56,24 @@ Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `mess
 `originalarrivaltime`, `properties` (`edittime`, `deletetime`, `files` jako JSON řetězec,
 `emotions` = reakce).
 
+### Obsah zpráv (HTML) ✅
+
+Ověřeno na ~1200 reálných zprávách (struktura značek, bez obsahu):
+
+| Prvek | HTML |
+|---|---|
+| Odstavec, prázdný řádek | `<p>…</p>`, `<p>&nbsp;</p>`; mezi bloky bývá `\r\n` (nevýznamné) |
+| Formátování | `<strong>`/`<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<h1>`–`<h3>`, `<ul>/<ol>/<li>`, `<hr>`, `<table>` |
+| Odkaz | `<a href=… rel="noreferrer noopener" target="_blank" title=…>`; soubory `itemtype="filesHyperlink"` nebo `…/HyperLink/Files` |
+| Zmínka | `<span itemtype="http://schema.skype.com/Mention" itemscope itemid="0">Jméno</span>`; `itemid` = index do `properties.mentions` (`mri`, `mentionType` person/channel, `displayName`) |
+| Emoji | `<span class="animated-emoticon-20-smile" type="(smile)"><img itemtype="http://schema.skype.com/Emoji" alt="🙂" …></span>` |
+| Blok kódu | `<p itemtype="http://schema.skype.com/CodeBlockEditor">` (popisek, nezobrazovat) a `<pre class="language-php …"><code>` s `<span class="hljs-…">` a `<br>` |
+| Odpověď | `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="{id zprávy}"><strong itemprop="mri" itemid="{MRI autora}">Jméno</strong><span itemprop="time" itemid="{id}"></span><p itemprop="preview">zkrácený text</p></blockquote>` a za ním vlastní text; případně `<span itemprop="emojis">` |
+| Přeposlání | `<blockquote itemtype="http://schema.skype.com/Forward">…</blockquote>` |
+
+Odeslání odpovědi: tentýž `blockquote` před `<p>` s textem (náhled max. 150 znaků).
+**Neověřeno** proti produkci, zda server nevyžaduje ještě něco v `properties`.
+
 ## 4. Real-time
 
 Implementováno, ale **nefunguje** (❌, ověřeno 2026-11-04): long-poll zděděný ze Skype protokolu.

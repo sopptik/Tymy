@@ -7,17 +7,19 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use iced::widget::{
-    Column, Id, button, column, container, image, mouse_area, operation, row, scrollable, space,
-    stack, text, text_editor, text_input,
+    Column, Id, button, column, container, image, mouse_area, operation, rich_text, row,
+    scrollable, space, span, stack, text, text_editor, text_input,
 };
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme};
 use tymy_api::auth::{self, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
 use tymy_config::{AccountRecord, Config, ThemeMode};
-use tymy_core::text::{InlineImage, Part, message_parts};
+use tymy_core::text::rich::{self, Block, QuoteKind};
+use tymy_core::text::{InlineImage, Part, REPLY_PREVIEW_CHARS, message_parts, truncate_chars};
 use tymy_core::{
     AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind, Error,
-    Message, MessageId, MessageKind, MessagePage, OutgoingImage, Person, Profile, one_on_one_id,
+    Message, MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile,
+    ReplyRef, one_on_one_id,
 };
 
 use tymy_store::Store;
@@ -154,6 +156,9 @@ pub enum Msg {
     MovePin(ConversationId, isize),
     /// Úprava textu v psacím poli.
     Compose(text_editor::Action),
+    /// Odpovědět na zprávu (citace nad psacím polem).
+    Reply(MessageId),
+    CancelReply,
     Send,
     /// Odesláno: (chat, text pro případ chyby, výsledek = skutečné id chatu).
     Sent(ConversationId, String, Result<ConversationId, Failure>),
@@ -246,6 +251,8 @@ impl Msg {
             Msg::CopyMessage(id) => debug!(%id, "update: CopyMessage"),
             Msg::StartSelect(id) => debug!(%id, "update: StartSelect"),
             Msg::StopSelect => debug!("update: StopSelect"),
+            Msg::Reply(id) => debug!(%id, "update: Reply"),
+            Msg::CancelReply => debug!("update: CancelReply"),
             Msg::SelectAction(_) => trace!("update: SelectAction"),
             Msg::CopySelection(seq) => debug!(seq, "update: CopySelection"),
             Msg::HideToast(_) => trace!("update: HideToast"),
@@ -383,6 +390,9 @@ pub struct App {
     pending_images: Vec<PendingImage>,
     /// Obrázky právě odesílané (vrátí se při chybě).
     in_flight_images: Vec<PendingImage>,
+    /// Zpráva, na kterou se odpovídá, a odpověď právě odesílaná (vrátí se při chybě).
+    replying: Option<ReplyRef>,
+    in_flight_reply: Option<ReplyRef>,
     /// Zpráva pod myší.
     hovered_message: Option<MessageId>,
     /// Zpráva v režimu výběru textu.
@@ -434,6 +444,8 @@ impl App {
             tab: Tab::Chats,
             pending_images: vec![],
             in_flight_images: vec![],
+            replying: None,
+            in_flight_reply: None,
             hovered_message: None,
             selecting: None,
             selection_seq: 0,
@@ -999,6 +1011,16 @@ impl App {
                 }
                 if !self.peer_scan_done {
                     self.peer_scan_done = true;
+                    // ladění: `TYMY_OPEN_CHAT=<začátek id nebo část názvu>` otevře chat po startu
+                    if let Ok(want) = std::env::var("TYMY_OPEN_CHAT") {
+                        let want = want.to_lowercase();
+                        if let Some(c) = self.conversations.iter().find(|c| {
+                            c.id.as_str().to_lowercase().starts_with(&want)
+                                || self.peers.title(c).to_lowercase().contains(&want)
+                        }) {
+                            tasks.push(Task::done(Msg::Select(c.id.clone())));
+                        }
+                    }
                     let ids: Vec<_> = self
                         .conversations
                         .iter()
@@ -1040,6 +1062,9 @@ impl App {
             }
 
             Msg::Select(id) => {
+                if self.selected.as_ref() != Some(&id) {
+                    self.replying = None;
+                }
                 self.selected = Some(id.clone());
                 self.selecting = None;
                 self.at_bottom = true;
@@ -1296,6 +1321,31 @@ impl App {
                 self.selecting = None;
                 Task::none()
             }
+            Msg::Reply(id) => {
+                let Some(m) = self.find_message(&id) else {
+                    return Task::none();
+                };
+                let mut preview = message_plain(m);
+                if preview.is_empty()
+                    && message_parts(&m.content)
+                        .iter()
+                        .any(|p| matches!(p, Part::Image(_)))
+                {
+                    preview = "🖼 Obrázek".into();
+                }
+                self.replying = Some(ReplyRef {
+                    message_id: m.id.clone(),
+                    author: m.sender.clone(),
+                    author_name: m.sender_name.clone().unwrap_or_else(|| "?".into()),
+                    preview: truncate_chars(&preview.replace('\n', " "), REPLY_PREVIEW_CHARS),
+                });
+                self.selecting = None;
+                operation::focus(COMPOSER)
+            }
+            Msg::CancelReply => {
+                self.replying = None;
+                Task::none()
+            }
             Msg::SelectAction(action) => {
                 let Some(sel) = &mut self.selecting else {
                     return Task::none();
@@ -1399,37 +1449,36 @@ impl App {
                 self.sending = true;
                 self.composer = text_editor::Content::new();
                 self.in_flight_images = std::mem::take(&mut self.pending_images);
-                let images: Arc<Vec<OutgoingImage>> = Arc::new(
-                    self.in_flight_images
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| {
-                            let (width, height) = clipboard::display_size(p.width, p.height);
-                            OutgoingImage {
-                                bytes: p.png.as_ref().clone(),
-                                width,
-                                height,
-                                filename: format!("obrazek-{}.png", i + 1),
-                            }
-                        })
-                        .collect(),
-                );
+                self.in_flight_reply = self.replying.take();
+                let reply_to = self.in_flight_reply.clone();
+                let images: Vec<OutgoingImage> = self
+                    .in_flight_images
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let (width, height) = clipboard::display_size(p.width, p.height);
+                        OutgoingImage {
+                            bytes: p.png.as_ref().clone(),
+                            width,
+                            height,
+                            filename: format!("obrazek-{}.png", i + 1),
+                        }
+                    })
+                    .collect();
+                let outgoing = Arc::new(Outgoing {
+                    text: text.clone(),
+                    images,
+                    reply_to,
+                });
                 // U nového chatu: když vlákno neexistuje, založit ho a poslat znovu.
                 let draft_peer = self.draft_people.get(&id).map(|p| p.mri.clone());
                 Task::perform(
                     {
-                        let (id, text) = (id.clone(), text.clone());
+                        let id = id.clone();
                         async move {
                             let send = |to: ConversationId| {
-                                let (backend, text, images) =
-                                    (backend.clone(), text.clone(), images.clone());
-                                async move {
-                                    if images.is_empty() {
-                                        backend.send_text(&to, &text).await
-                                    } else {
-                                        backend.send_with_images(&to, &text, &images).await
-                                    }
-                                }
+                                let (backend, outgoing) = (backend.clone(), outgoing.clone());
+                                async move { backend.send(&to, &outgoing).await }
                             };
                             match send(id.clone()).await {
                                 Ok(_) => Ok(id),
@@ -1451,6 +1500,7 @@ impl App {
             Msg::Sent(requested, _, Ok(id)) => {
                 self.sending = false;
                 self.in_flight_images.clear();
+                self.in_flight_reply = None;
                 if id != requested {
                     // nový chat dostal od serveru jiné id než odhadnuté
                     if let Some(person) = self.draft_people.remove(&requested) {
@@ -1474,6 +1524,9 @@ impl App {
                 let mut back = std::mem::take(&mut self.in_flight_images);
                 back.append(&mut self.pending_images);
                 self.pending_images = back;
+                if self.replying.is_none() {
+                    self.replying = self.in_flight_reply.take();
+                }
                 // vrátit text, ať se neztratí
                 if self.composer.text().trim().is_empty() {
                     self.composer = text_editor::Content::with_text(&text);
@@ -2068,6 +2121,7 @@ impl App {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let mut prev: Option<&Message> = None;
+        let colors = style::colors(&self.theme());
         for m in msgs.iter().filter(|m| displayable(m)) {
             let day = m.arrived_at.map(|t| t.with_timezone(&Local).date_naive());
             let prev_day = prev
@@ -2103,6 +2157,7 @@ impl App {
                 MessageUi {
                     hovered: self.hovered_message.as_ref() == Some(&m.id),
                     selecting: self.selecting.as_ref().filter(|s| s.id == m.id),
+                    colors,
                 },
             ));
             prev = Some(m);
@@ -2157,8 +2212,54 @@ impl App {
             })
             .into()
         };
+        let reply: Element<'a, Msg> = match &self.replying {
+            None => space().into(),
+            Some(r) => container(
+                container(
+                    container(
+                        row![
+                            column![
+                                text(format!("Odpověď pro {}", r.author_name))
+                                    .size(12)
+                                    .font(SEMIBOLD),
+                                text(truncate_chars(&r.preview, 120))
+                                    .size(12)
+                                    .style(muted)
+                                    .wrapping(Wrapping::None),
+                            ]
+                            .spacing(1)
+                            .width(Length::Fill),
+                            icon_button("✕", Some(Msg::CancelReply), "Zrušit odpověď (Esc)"),
+                        ]
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding(iced::Padding {
+                        top: 4.0,
+                        right: 4.0,
+                        bottom: 4.0,
+                        left: 10.0,
+                    })
+                    .clip(true)
+                    .style(style::reply_preview),
+                )
+                .padding(iced::Padding {
+                    left: 3.0,
+                    ..iced::Padding::ZERO
+                })
+                .style(style::reply_frame),
+            )
+            .padding(iced::Padding {
+                top: 6.0,
+                right: 4.0,
+                bottom: 2.0,
+                left: 0.0,
+            })
+            .into(),
+        };
         let composer = container(
             container(column![
+                reply,
                 attachments,
                 row![
                     text_editor(&self.composer)
@@ -2169,7 +2270,8 @@ impl App {
                             let remove_last =
                                 self.composer.text().trim_end_matches('\n').is_empty()
                                     && !self.pending_images.is_empty();
-                            move |kp| composer_keys(kp, remove_last)
+                            let replying = self.replying.is_some();
+                            move |kp| composer_keys(kp, remove_last, replying)
                         })
                         .height(Length::Shrink)
                         .min_height(38)
@@ -2258,11 +2360,16 @@ impl App {
 
 /// Enter odešle, Shift+Enter vloží nový řádek; ostatní klávesy beze změny.
 /// `remove_last`: pole je prázdné a jsou vložené obrázky → Backspace odebere poslední.
+/// `replying`: Esc zruší rozepsanou odpověď.
 fn composer_keys(
     kp: text_editor::KeyPress,
     remove_last: bool,
+    replying: bool,
 ) -> Option<text_editor::Binding<Msg>> {
     use iced::keyboard::{Key, key::Named};
+    if replying && kp.key == Key::Named(Named::Escape) {
+        return Some(text_editor::Binding::Custom(Msg::CancelReply));
+    }
     if remove_last && kp.key == Key::Named(Named::Backspace) {
         return Some(text_editor::Binding::Custom(Msg::RemoveLastPending));
     }
@@ -2452,17 +2559,14 @@ fn displayable(m: &Message) -> bool {
 struct MessageUi<'a> {
     hovered: bool,
     selecting: Option<&'a Selecting>,
+    /// Barvy aktuálního tématu (úseky formátovaného textu potřebují konkrétní barvy).
+    colors: style::Colors,
 }
 
 /// Prostý text zprávy pro kopírování (bez obrázků; přílohy jako názvy).
 fn message_plain(m: &Message) -> String {
-    let mut parts: Vec<String> = message_parts(&m.content)
-        .into_iter()
-        .filter_map(|p| match p {
-            Part::Text(t) => Some(t),
-            Part::Image(_) => None,
-        })
-        .collect();
+    let mut parts: Vec<String> = vec![rich::plain(&rich::parse(&m.content))];
+    parts.retain(|p| !p.is_empty());
     parts.extend(m.attachments.iter().map(|a| a.name.clone()));
     parts.join("\n\n")
 }
@@ -2515,12 +2619,13 @@ fn message_view<'a>(
                 .style(move |t: &Theme, _| style::selectable_text(t, mine)),
         );
     } else {
-        for part in message_parts(&m.content) {
-            body = body.push(match part {
-                Part::Text(t) => Element::from(text(t).size(14).line_height(1.35)),
-                Part::Image(img) => image_view(&img, media.get(&img.url)),
-            });
-        }
+        body = body.extend(blocks_view(
+            &rich::parse(&m.content),
+            mine,
+            false,
+            media,
+            &ui.colors,
+        ));
         for a in &m.attachments {
             let label = text(format!("📎 {}", a.name)).size(13).font(SEMIBOLD);
             body = body.push(match &a.url {
@@ -2560,6 +2665,7 @@ fn message_view<'a>(
         .into()
     } else if ui.hovered && can_copy {
         row![
+            icon_button("↩", Some(Msg::Reply(m.id.clone())), "Odpovědět"),
             icon_button(
                 "⧉",
                 Some(Msg::CopyMessage(m.id.clone())),
@@ -2573,7 +2679,7 @@ fn message_view<'a>(
         ]
         .into()
     } else {
-        space().width(56).into()
+        space().width(84).into()
     };
     let bubble: Element<'a, Msg> = if mine {
         row![actions, bubble]
@@ -2658,6 +2764,172 @@ fn message_view<'a>(
     .into()
 }
 
+/// Vykreslí bloky obsahu zprávy (odstavce, seznamy, citace, kód, tabulky, obrázky).
+/// `quoted`: obsah citace (menší písmo).
+fn blocks_view<'a>(
+    blocks: &[Block],
+    mine: bool,
+    quoted: bool,
+    media: &'a HashMap<String, Media>,
+    c: &style::Colors,
+) -> Vec<Element<'a, Msg>> {
+    blocks
+        .iter()
+        .map(|b| block_view(b, mine, quoted, media, c))
+        .collect()
+}
+
+fn block_view<'a>(
+    block: &Block,
+    mine: bool,
+    quoted: bool,
+    media: &'a HashMap<String, Media>,
+    c: &style::Colors,
+) -> Element<'a, Msg> {
+    let size = if quoted { 13.0 } else { 14.0 };
+    match block {
+        Block::Paragraph(spans) => paragraph(spans, size, false, mine, c),
+        Block::Heading(spans) => paragraph(spans, size + 2.0, true, mine, c),
+        Block::ListItem {
+            depth,
+            marker,
+            spans,
+        } => row![
+            space().width(*depth as f32 * 14.0 - 14.0),
+            text(marker.clone())
+                .size(size)
+                .line_height(1.35)
+                .width(if marker.ends_with('.') { 22 } else { 14 }),
+            paragraph(spans, size, false, mine, c),
+        ]
+        .into(),
+        Block::Code {
+            language,
+            text: code,
+        } => {
+            let mut col = Column::new().spacing(4);
+            if let Some(lang) = language {
+                col = col.push(
+                    text(lang.clone())
+                        .size(10)
+                        .color(style::bubble_tint(c, mine, 0.6)),
+                );
+            }
+            col = col.push(
+                text(code.clone())
+                    .font(Font::MONOSPACE)
+                    .size(13)
+                    .line_height(1.3),
+            );
+            container(col)
+                .padding([8, 10])
+                .style(move |t: &Theme| style::code_block(t, mine))
+                .into()
+        }
+        Block::Quote(q) => {
+            let mut col = Column::new().spacing(3);
+            let label_color = style::bubble_tint(c, mine, 0.7);
+            match &q.kind {
+                QuoteKind::Reply { author, .. } => {
+                    col = col.push(
+                        text(author.clone().unwrap_or_else(|| "Odpověď".into()))
+                            .size(12)
+                            .font(SEMIBOLD),
+                    );
+                }
+                QuoteKind::Forward => {
+                    col = col.push(text("↪ Přeposláno").size(11).color(label_color));
+                }
+                QuoteKind::Plain => {}
+            }
+            let inner = blocks_view(&q.blocks, mine, true, media, c);
+            col = col.extend(inner);
+            container(
+                container(col)
+                    .padding([5, 10])
+                    .style(move |t: &Theme| style::quote(t, mine)),
+            )
+            .padding(iced::Padding {
+                left: 3.0,
+                ..iced::Padding::ZERO
+            })
+            .style(move |t: &Theme| style::quote_frame(t, mine))
+            .into()
+        }
+        Block::Table(rows) => {
+            let table = Column::with_children(rows.iter().map(|r| {
+                iced::widget::Row::with_children(r.iter().map(|cell| {
+                    let header = cell.header;
+                    container(paragraph(&cell.spans, 13.0, header, mine, c))
+                        .padding([4, 8])
+                        .width(Length::Fill)
+                        .style(move |t: &Theme| style::table_cell(t, mine, header))
+                        .into()
+                }))
+                .into()
+            }));
+            table.into()
+        }
+        Block::Image(img) => image_view(img, media.get(&img.url)),
+        Block::Rule => container(space())
+            .width(Length::Fill)
+            .height(1)
+            .style(move |t: &Theme| style::rule(t, mine))
+            .into(),
+        Block::Blank => space().height(2).into(),
+    }
+}
+
+/// Odstavec formátovaného textu; klik na odkaz ho otevře v prohlížeči.
+fn paragraph<'a>(
+    spans: &[rich::Span],
+    size: f32,
+    bold: bool,
+    mine: bool,
+    c: &style::Colors,
+) -> Element<'a, Msg> {
+    let link_color = style::bubble_link(c, mine);
+    let code_bg = style::bubble_tint(c, mine, 0.12);
+    let spans: Vec<iced::widget::text::Span<'a, String>> = spans
+        .iter()
+        .map(|s| {
+            let st = s.style;
+            let mut font = if st.code {
+                Font::MONOSPACE
+            } else {
+                Font::DEFAULT
+            };
+            if st.bold || bold {
+                font.weight = iced::font::Weight::Bold;
+            } else if st.mention {
+                font.weight = iced::font::Weight::Semibold;
+            }
+            if st.italic {
+                font.style = iced::font::Style::Italic;
+            }
+            let mut sp = span(s.text.clone())
+                .font(font)
+                .underline(st.underline || s.link.is_some())
+                .strikethrough(st.strike);
+            if st.code {
+                sp = sp.background(code_bg).padding([0, 3]);
+            }
+            if st.mention {
+                sp = sp.color(link_color);
+            }
+            if let Some(href) = &s.link {
+                sp = sp.color(link_color).link(href.clone());
+            }
+            sp
+        })
+        .collect();
+    rich_text(spans)
+        .on_link_click(Msg::OpenUrl)
+        .size(size)
+        .line_height(1.35)
+        .into()
+}
+
 /// Obrázek v bublině; velikost podle rozměrů z HTML, zmenšená na [`IMAGE_MAX_WIDTH`].
 fn image_view<'a>(img: &InlineImage, state: Option<&Media>) -> Element<'a, Msg> {
     let (w, h) = match (img.width, img.height) {
@@ -2702,13 +2974,16 @@ fn day_label(d: chrono::NaiveDate) -> String {
 }
 
 /// Text pro náhled v seznamu chatů; obrázky jako „🖼 Obrázek“.
+/// Citace odpovědi (náhled cizí zprávy) se vynechá.
 fn preview_text(html: &str) -> String {
-    let parts: Vec<String> = message_parts(html)
-        .into_iter()
-        .map(|p| match p {
-            Part::Text(t) => t.replace('\n', " "),
-            Part::Image(_) => "🖼 Obrázek".into(),
+    let parts: Vec<String> = rich::parse(html)
+        .iter()
+        .filter_map(|b| match b {
+            Block::Image(_) => Some("🖼 Obrázek".into()),
+            Block::Quote(q) if matches!(q.kind, QuoteKind::Reply { .. }) => None,
+            b => Some(rich::plain(std::slice::from_ref(b)).replace('\n', " ")),
         })
+        .filter(|t| !t.is_empty())
         .collect();
     parts.join(" ")
 }
@@ -2826,9 +3101,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Otevře odkaz v prohlížeči; jen web a e-mail (žádné `file:` ani vlastní schémata).
 fn open_url(url: &str) {
-    if !url.starts_with("https://") {
-        tracing::warn!(%url, "odmítám otevřít jiný než https odkaz");
+    if !rich::safe_link(url) {
+        tracing::warn!(%url, "odmítám otevřít odkaz s nepovoleným schématem");
         return;
     }
     if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
@@ -2917,7 +3193,7 @@ mod tests {
             }],
             reactions: vec![],
         };
-        assert_eq!(message_plain(&m), "Ahoj světe\n\ndruhý\n\nsoubor.pdf");
+        assert_eq!(message_plain(&m), "Ahoj světe\ndruhý\n\nsoubor.pdf");
         assert_eq!(estimate_text_width("ok"), 80.0);
         assert_eq!(estimate_text_width(&"x".repeat(500)), BUBBLE_TEXT_MAX);
     }

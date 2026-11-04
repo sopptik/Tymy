@@ -154,16 +154,6 @@ impl ChatBackend for TeamsBackend {
         .await
     }
 
-    async fn send_text(&self, conversation: &ConversationId, text: &str) -> Result<SentMessage> {
-        let html = text::plain_to_html(text);
-        let name = self.profile.display_name.as_deref();
-        self.call(|s| {
-            let html = &html;
-            async move { chat::send_html(&self.http, &s, conversation, html, name).await }
-        })
-        .await
-    }
-
     async fn fetch_media(&self, url: &str) -> Result<Vec<u8>> {
         self.call(|s| async move { media::fetch(&self.http, &s, url).await })
             .await
@@ -189,26 +179,30 @@ impl ChatBackend for TeamsBackend {
             .await
     }
 
-    async fn send_with_images(
+    async fn send(
         &self,
         conversation: &ConversationId,
-        text: &str,
-        images: &[tymy_core::OutgoingImage],
+        message: &tymy_core::Outgoing,
     ) -> Result<SentMessage> {
-        let mut html = if text.trim().is_empty() {
-            String::new()
-        } else {
-            text::plain_to_html(text)
-        };
-        let session = self.session().await?;
-        for img in images {
-            let id = self
-                .call(|s| async move {
-                    media::upload_image(&self.http, &s, conversation, &img.bytes, &img.filename)
-                        .await
-                })
-                .await?;
-            html.push_str(&media::image_html(&session, &id, img.width, img.height));
+        let mut html = message
+            .reply_to
+            .as_ref()
+            .map(text::reply_html)
+            .unwrap_or_default();
+        if !message.text.trim().is_empty() {
+            html.push_str(&text::plain_to_html(&message.text));
+        }
+        if !message.images.is_empty() {
+            let session = self.session().await?;
+            for img in &message.images {
+                let id = self
+                    .call(|s| async move {
+                        media::upload_image(&self.http, &s, conversation, &img.bytes, &img.filename)
+                            .await
+                    })
+                    .await?;
+                html.push_str(&media::image_html(&session, &id, img.width, img.height));
+            }
         }
         let name = self.profile.display_name.as_deref();
         self.call(|s| {

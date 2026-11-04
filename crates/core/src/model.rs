@@ -302,6 +302,25 @@ pub struct SentMessage {
     pub arrived_at: Option<DateTime<Utc>>,
 }
 
+/// Zpráva k odeslání: text, vložené obrázky a případná odpověď na jinou zprávu.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outgoing {
+    /// Prostý text; implementace ho escapuje do HTML.
+    pub text: String,
+    pub images: Vec<OutgoingImage>,
+    pub reply_to: Option<ReplyRef>,
+}
+
+/// Na co zpráva odpovídá (v Teams se posílá jako citace s náhledem).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyRef {
+    pub message_id: MessageId,
+    pub author: Option<UserId>,
+    pub author_name: String,
+    /// Zkrácený prostý text původní zprávy.
+    pub preview: String,
+}
+
 /// Obrázek k odeslání (PNG/JPEG data a rozměry pro zobrazení).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutgoingImage {
