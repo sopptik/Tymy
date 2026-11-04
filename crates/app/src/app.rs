@@ -38,6 +38,7 @@ use crate::style::{self, BOLD, SEMIBOLD, accent, muted};
 use crate::tray::{self, TrayEvent, TrayHandle};
 
 const COMPOSER: Id = Id::new("composer");
+const GROUP_QUERY: Id = Id::new("group-query");
 const MESSAGES: Id = Id::new("messages");
 /// Dokud nemáme trouter (WebSocket), obnovujeme seznam chatů periodicky.
 const REFRESH: Duration = Duration::from_secs(5);
@@ -91,6 +92,25 @@ impl fmt::Debug for Session {
             .field("account", &self.profile.account_id)
             .finish()
     }
+}
+
+/// Rozpracovaný nový skupinový chat (výběr lidí a název).
+#[derive(Default)]
+pub struct GroupBuilder {
+    topic: String,
+    query: String,
+    seq: u64,
+    searching: bool,
+    results: Vec<Person>,
+    members: Vec<Person>,
+}
+
+/// Skupinový chat připravený v okně; na serveru vznikne první zprávou.
+#[derive(Clone)]
+struct DraftGroup {
+    members: Vec<tymy_core::UserId>,
+    names: Vec<String>,
+    topic: Option<String>,
 }
 
 /// Spojení neaktivního účtu (kvůli počtu nepřečtených).
@@ -166,6 +186,16 @@ pub enum Msg {
     People(u64, Result<Vec<Person>, Failure>),
     External(u64, Result<Vec<Person>, Failure>),
     OpenPerson(Person),
+    /// Nový skupinový chat: otevřít výběr lidí, název, hledání, přidání/odebrání, založení.
+    NewGroup,
+    GroupTopic(String),
+    GroupQuery(String),
+    GroupSearchFire(u64),
+    GroupPeople(u64, Result<Vec<Person>, Failure>),
+    GroupAdd(Person),
+    GroupRemove(tymy_core::UserId),
+    GroupCancel,
+    GroupCreate,
     SetTab(Tab),
     /// Ctrl+V v psacím poli: přečíst schránku (obrázek nebo text).
     Paste,
@@ -340,6 +370,19 @@ impl Msg {
                 "update: External"
             ),
             Msg::OpenPerson(p) => debug!(mri = %p.mri, external = p.external, "update: OpenPerson"),
+            Msg::NewGroup => debug!("update: NewGroup"),
+            Msg::GroupTopic(_) | Msg::GroupQuery(_) => trace!("update: GroupInput"),
+            Msg::GroupSearchFire(seq) => debug!(seq, "update: GroupSearchFire"),
+            Msg::GroupPeople(seq, r) => debug!(
+                seq,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: GroupPeople"
+            ),
+            Msg::GroupAdd(p) => debug!(mri = %p.mri, "update: GroupAdd"),
+            Msg::GroupRemove(mri) => debug!(%mri, "update: GroupRemove"),
+            Msg::GroupCancel => debug!("update: GroupCancel"),
+            Msg::GroupCreate => debug!("update: GroupCreate"),
             Msg::SetTab(tab) => debug!(?tab, "update: SetTab"),
             Msg::ToggleTheme => debug!("update: ToggleTheme"),
             Msg::HoverMessage(_) | Msg::UnhoverMessage(_) => trace!("update: HoverMessage"),
@@ -542,6 +585,11 @@ pub struct App {
     draft_chats: Vec<Conversation>,
     /// S kým je rozpracovaný nový chat (pro založení vlákna při první zprávě).
     draft_people: HashMap<ConversationId, Person>,
+    /// Rozpracované skupinové chaty (vzniknou první zprávou) a pořadí pro jejich dočasná id.
+    draft_groups: HashMap<ConversationId, DraftGroup>,
+    draft_seq: u64,
+    /// Otevřený výběr lidí pro nový skupinový chat.
+    group_builder: Option<GroupBuilder>,
     /// Obrázky ze zpráv podle URL.
     media: HashMap<String, Media>,
     tab: Tab,
@@ -676,6 +724,9 @@ impl App {
             people_note: None,
             draft_chats: vec![],
             draft_people: HashMap::new(),
+            draft_groups: HashMap::new(),
+            draft_seq: 0,
+            group_builder: None,
             originals: HashMap::new(),
         }
     }
@@ -875,7 +926,7 @@ impl App {
         let Some(s) = self.session() else {
             return Task::none();
         };
-        if self.forbidden.contains(&id) {
+        if self.forbidden.contains(&id) || self.draft_groups.contains_key(&id) {
             return Task::none();
         }
         let backend = s.backend.clone();
@@ -979,6 +1030,49 @@ impl App {
         self.people.clear();
         self.people_note = None;
         self.search_seq += 1;
+        self.update(Msg::Select(id))
+    }
+
+    /// Z výběru lidí udělá rozpracovaný skupinový chat a otevře ho; vlákno na serveru
+    /// vznikne až s první zprávou (viz `Msg::Send`).
+    fn create_group_draft(&mut self) -> Task<Msg> {
+        let Some(g) = self.group_builder.take() else {
+            return Task::none();
+        };
+        if g.members.len() < 2 {
+            self.group_builder = Some(g);
+            return Task::none();
+        }
+        self.draft_seq += 1;
+        let id = ConversationId(format!("draft:group:{}", self.draft_seq));
+        let topic = Some(g.topic.trim().to_owned()).filter(|t| !t.is_empty());
+        let names: Vec<String> = g.members.iter().map(|p| p.display_name.clone()).collect();
+        for n in names.iter().rev() {
+            self.peers.set(&id, n);
+        }
+        self.draft_groups.insert(
+            id.clone(),
+            DraftGroup {
+                members: g.members.iter().map(|p| p.mri.clone()).collect(),
+                names,
+                topic: topic.clone(),
+            },
+        );
+        self.draft_chats.push(Conversation {
+            id: id.clone(),
+            kind: ConversationKind::Group,
+            topic,
+            last_message: None,
+            last_activity: None,
+            read_up_to: None,
+            team: None,
+        });
+        self.merge_draft_chats();
+        // prázdná historie, nic nenačítat ze serveru
+        self.fresh.insert(id.clone());
+        self.older.insert(id.clone(), None);
+        self.messages.entry(id.clone()).or_default();
+        self.tab = Tab::Chats;
         self.update(Msg::Select(id))
     }
 
@@ -1849,6 +1943,7 @@ impl App {
             }
 
             Msg::Select(id) => {
+                self.group_builder = None;
                 if self.selected.as_ref() != Some(&id) {
                     self.replying = None;
                     self.cancel_edit();
@@ -2062,6 +2157,97 @@ impl App {
                 Task::none()
             }
             Msg::OpenPerson(person) => self.open_person(person),
+            Msg::NewGroup => {
+                self.group_builder = Some(GroupBuilder::default());
+                operation::focus(GROUP_QUERY)
+            }
+            Msg::GroupTopic(t) => {
+                if let Some(g) = &mut self.group_builder {
+                    g.topic = t;
+                }
+                Task::none()
+            }
+            Msg::GroupQuery(q) => {
+                let Some(g) = &mut self.group_builder else {
+                    return Task::none();
+                };
+                g.query = q;
+                g.seq += 1;
+                if g.query.trim().chars().count() < MIN_PEOPLE_QUERY {
+                    g.results.clear();
+                    g.searching = false;
+                    return Task::none();
+                }
+                let seq = g.seq;
+                Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
+                    Msg::GroupSearchFire(seq)
+                })
+            }
+            Msg::GroupSearchFire(seq) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(g), Some(backend)) = (&mut self.group_builder, backend) else {
+                    return Task::none();
+                };
+                if seq != g.seq {
+                    return Task::none();
+                }
+                g.searching = true;
+                let query = g.query.trim().to_owned();
+                Task::perform(
+                    async move { backend.search_people(&query).await.map_err(Failure::from) },
+                    move |r| Msg::GroupPeople(seq, r),
+                )
+            }
+            Msg::GroupPeople(seq, r) => {
+                let me = self.session().map(|s| s.profile.account_id.clone());
+                let Some(g) = &mut self.group_builder else {
+                    return Task::none();
+                };
+                if seq != g.seq {
+                    return Task::none();
+                }
+                g.searching = false;
+                match r {
+                    Ok(found) => {
+                        g.results = found
+                            .into_iter()
+                            .filter(|p| {
+                                !me.as_ref()
+                                    .is_some_and(|m| p.mri.as_str().ends_with(m.as_str()))
+                            })
+                            .collect();
+                        Task::none()
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::GroupAdd(person) => {
+                if person.object_id().is_none() {
+                    return self.show_toast(
+                        "Tuto osobu zatím do chatu přidat neumím (účet mimo Microsoft 365)",
+                    );
+                }
+                if let Some(g) = &mut self.group_builder {
+                    if !g.members.iter().any(|m| m.mri == person.mri) {
+                        g.members.push(person);
+                    }
+                    g.query.clear();
+                    g.results.clear();
+                    g.seq += 1;
+                }
+                operation::focus(GROUP_QUERY)
+            }
+            Msg::GroupRemove(mri) => {
+                if let Some(g) = &mut self.group_builder {
+                    g.members.retain(|m| m.mri != mri);
+                }
+                Task::none()
+            }
+            Msg::GroupCancel => {
+                self.group_builder = None;
+                Task::none()
+            }
+            Msg::GroupCreate => self.create_group_draft(),
             Msg::WindowFocus(f) => {
                 self.focused = f;
                 // návrat do okna: otevřený chat je teď opravdu přečtený
@@ -2486,27 +2672,38 @@ impl App {
                 });
                 // U nového chatu: když vlákno neexistuje, založit ho a poslat znovu.
                 let draft_peer = self.draft_people.get(&id).map(|p| p.mri.clone());
+                let draft_group = self.draft_groups.get(&id).cloned();
                 Task::perform(
                     {
                         let id = id.clone();
-                        async move {
+                        let deliver = async move {
                             let send = |to: ConversationId| {
                                 let (backend, outgoing) = (backend.clone(), outgoing.clone());
                                 async move { backend.send(&to, &outgoing).await }
                             };
+                            if let Some(g) = draft_group {
+                                tracing::info!(
+                                    members = g.members.len(),
+                                    "zakládám skupinový chat"
+                                );
+                                let created =
+                                    backend.create_chat(&g.members, g.topic.as_deref()).await?;
+                                send(created.clone()).await?;
+                                return Ok(created);
+                            }
                             match send(id.clone()).await {
                                 Ok(_) => Ok(id),
                                 Err(Error::Http { status: 404, .. }) if draft_peer.is_some() => {
                                     let peer = draft_peer.expect("ověřeno výše");
                                     tracing::info!(%id, "vlákno neexistuje, zakládám chat");
-                                    let created = backend.create_chat(&[peer]).await?;
+                                    let created = backend.create_chat(&[peer], None).await?;
                                     send(created.clone()).await?;
                                     Ok(created)
                                 }
                                 Err(e) => Err(e),
                             }
-                            .map_err(Failure::from)
-                        }
+                        };
+                        async move { deliver.await.map_err(Failure::from) }
                     },
                     move |r| Msg::Sent(id.clone(), text.clone(), r),
                 )
@@ -2520,8 +2717,21 @@ impl App {
                     if let Some(person) = self.draft_people.remove(&requested) {
                         self.peers.set(&id, &person.display_name);
                     }
+                    if let Some(g) = self.draft_groups.remove(&requested) {
+                        for n in g.names.iter().rev() {
+                            self.peers.set(&id, n);
+                        }
+                    }
+                    // chat zůstane vidět pod skutečným id, dokud ho nevrátí seznam ze serveru
+                    if let Some(mut draft) =
+                        self.draft_chats.iter().find(|d| d.id == requested).cloned()
+                    {
+                        draft.id = id.clone();
+                        self.draft_chats.push(draft);
+                    }
                     self.draft_chats.retain(|d| d.id != requested);
                     self.conversations.retain(|c| c.id != requested);
+                    self.merge_draft_chats();
                     self.selected = Some(id.clone());
                 }
                 // vlastní zprávu vždy ukázat
@@ -3006,13 +3216,30 @@ impl App {
             }),
             self.account_menu_view(session),
             container(tabs).padding([0, 12]),
-            container(
-                text_input(placeholder, &self.search)
+            container({
+                let search = text_input(placeholder, &self.search)
                     .on_input(Msg::Search)
                     .padding([8, 12])
                     .size(13)
-                    .style(style::search_input)
-            )
+                    .style(style::search_input);
+                let new_group = (self.tab == Tab::Chats).then(|| {
+                    iced::widget::tooltip(
+                        button(text("＋").size(18).center().width(Length::Fill))
+                            .width(34)
+                            .padding([2, 0])
+                            .style(style::ghost)
+                            .on_press(Msg::NewGroup),
+                        container(text("Nový skupinový chat").size(11))
+                            .padding([3, 8])
+                            .style(style::tooltip),
+                        iced::widget::tooltip::Position::Bottom,
+                    )
+                });
+                row![search]
+                    .push(new_group)
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center)
+            })
             .padding([10, 12]),
             scrollable(
                 Column::with_children(items)
@@ -3346,7 +3573,123 @@ impl App {
         .into()
     }
 
+    /// Výběr lidí a názvu pro nový skupinový chat (místo vlákna).
+    fn group_builder_view<'a>(&'a self, g: &'a GroupBuilder) -> Element<'a, Msg> {
+        let header = container(
+            column![
+                text("Nový skupinový chat").size(16).font(BOLD),
+                text("Chat vznikne první odeslanou zprávou.")
+                    .size(12)
+                    .style(muted),
+            ]
+            .spacing(1),
+        )
+        .padding([12, 20])
+        .width(Length::Fill)
+        .style(style::header);
+
+        let chips = iced::widget::Row::with_children(g.members.iter().map(|p| {
+            button(
+                row![
+                    avatar(&p.display_name, 20.0),
+                    text(truncate(&p.display_name, 24)).size(12),
+                    text("✕").size(11).style(muted),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([3, 8])
+            .style(style::secondary)
+            .on_press(Msg::GroupRemove(p.mri.clone()))
+            .into()
+        }))
+        .spacing(6)
+        .wrap();
+
+        let mut results = Column::new().spacing(2);
+        if g.searching {
+            results = results.push(note("Hledám…"));
+        } else if g.query.trim().chars().count() >= MIN_PEOPLE_QUERY && g.results.is_empty() {
+            results = results.push(note("Nikdo nenalezen"));
+        }
+        for p in g
+            .results
+            .iter()
+            .filter(|p| !g.members.iter().any(|m| m.mri == p.mri))
+        {
+            let subtitle = p.subtitle();
+            results = results.push(
+                button(
+                    row![
+                        avatar(&p.display_name, 30.0),
+                        column![
+                            text(truncate(&p.display_name, 32)).size(13).font(SEMIBOLD),
+                            text(truncate(&subtitle, 48)).size(11).style(muted),
+                        ]
+                        .spacing(1),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([6, 8])
+                .style(|t: &Theme, st| style::list_item(t, st, false))
+                .on_press(Msg::GroupAdd(p.clone())),
+            );
+        }
+
+        let ready = g.members.len() >= 2;
+        let body = column![
+            text("Název (nepovinný)").size(12).style(muted),
+            text_input("Např. Projekt Tymy", &g.topic)
+                .on_input(Msg::GroupTopic)
+                .padding([8, 12])
+                .size(13)
+                .style(style::search_input),
+            space().height(6),
+            text(format!("Lidé ({})", g.members.len()))
+                .size(12)
+                .style(muted),
+            chips,
+            text_input("Přidat člověka: jméno nebo e-mail…", &g.query)
+                .id(GROUP_QUERY)
+                .on_input(Msg::GroupQuery)
+                .padding([8, 12])
+                .size(13)
+                .style(style::search_input),
+            scrollable(results)
+                .direction(style::scrollbar())
+                .style(style::thin_scrollbar)
+                .height(Length::Fill),
+            text(if ready {
+                ""
+            } else {
+                "Vyberte aspoň dva lidi. Chat s jedním člověkem otevřete hledáním vlevo."
+            })
+            .size(12)
+            .style(muted),
+            row![
+                button(text("Zrušit").size(13))
+                    .padding([7, 14])
+                    .style(style::ghost)
+                    .on_press(Msg::GroupCancel),
+                button(text("Pokračovat").size(13).font(SEMIBOLD))
+                    .padding([7, 16])
+                    .style(style::primary)
+                    .on_press_maybe(ready.then_some(Msg::GroupCreate)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8)
+        .max_width(560)
+        .padding([16, 24]);
+        column![header, body].into()
+    }
+
     fn chat_pane<'a>(&'a self, session: &'a Session) -> Element<'a, Msg> {
+        if let Some(g) = &self.group_builder {
+            return self.group_builder_view(g);
+        }
         let Some(conv) = self
             .selected
             .as_ref()

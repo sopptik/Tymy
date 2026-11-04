@@ -159,12 +159,16 @@ impl ChatBackend for TeamsBackend {
             .await
     }
 
-    async fn create_chat(&self, members: &[tymy_core::UserId]) -> Result<ConversationId> {
+    async fn create_chat(
+        &self,
+        members: &[tymy_core::UserId],
+        topic: Option<&str>,
+    ) -> Result<ConversationId> {
         let me = format!("8:orgid:{}", self.profile.account_id);
         let members: Vec<&str> = members.iter().map(|m| m.as_str()).collect();
         self.call(|s| {
             let (me, members) = (&me, &members);
-            async move { chat::create_thread(&self.http, &s, me, members).await }
+            async move { chat::create_thread(&self.http, &s, me, members, topic).await }
         })
         .await
     }

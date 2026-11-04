@@ -200,6 +200,9 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - Založení: zkusíme odeslat zprávu na odvozené id; při 404 `POST /v1/threads`
   `{members: [{id, role: "Admin"}…], properties: {threadType: "chat", fixedRoster: "true", uniquerosterthread: "true"}}`,
   id z hlavičky `Location` ❓ (neověřeno).
+- Skupinový chat: stejné `POST /v1/threads` se všemi členy, `fixedRoster: "false"`,
+  `uniquerosterthread: "false"` a volitelně `topic` v `properties` ❓ (neověřeno). Tymy ho
+  zakládá až s první zprávou, do té doby je jen v okně (dočasné id `draft:group:<n>`).
 
 ## Jak odchytit provoz (fáze 0, krok 1)
 
