@@ -79,7 +79,7 @@ const DARK: Colors = Colors {
     danger: color!(0xF06060),
     danger_soft: color!(0x3A1F22),
     shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-    mine: color!(0x1A4750),
+    mine: color!(0x14373E),
     on_mine: color!(0xE8F3F5),
     mine_link: color!(0x8EDBEA),
 };
