@@ -42,6 +42,8 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   automaticky do schránky.
 - **Obrázky ze schránky (2026-11-04):** vkládat obrázky ze schránky; vložený obrázek musí
   jít odebrat.
+- **Hlavička web klienta (2026-11-05):** „zkus to poslat s hlavičkou webových teams a uvidíme
+  jestli je to tím“ → media služba přijme obrázek jen s `x-ms-client-version` web klienta.
 - **Souhrnný test (2026-11-05):** „bod 1 se zatím zdá že funguje vše jak má“ (reakce, úpravy,
   mazání, odpovědi, obrázky, nové chaty, hlášení přečtení, citace, účty, autostart, `.deb`).
 
@@ -95,7 +97,7 @@ podmínek služby Microsoftu.
 | Desktopové notifikace, ikona v liště, zavření = skrytí | ✅ |
 | Vzhled světlý/tmavý/podle systému, nový design | ✅ |
 | Kopírování zprávy, výběr textu s automatickým kopírováním | ✅ |
-| Vkládání obrázků ze schránky | ❌ zobrazení a vložení ✅, nahrání do AMS končí `400` (neznámý `User-Agent`, 2026-11-05); potřeba HAR |
+| Vkládání obrázků ze schránky | 🟡 nahrání ✅ (s `x-ms-client-version` web klienta), odeslání z okna čeká na test |
 | Formátované zprávy (odkazy, kód, seznamy, tabulky, citace, zmínky) | ✅ ověřeno na reálných zprávách |
 | Odpověď na zprávu | ✅ ověřeno uživatelem 2026-11-05 |
 | Reakce, úprava a mazání vlastních zpráv | ✅ ověřeno uživatelem 2026-11-05 |
@@ -218,7 +220,7 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 1. ✅ **Souhrnný test uživatelem** (2026-11-05: „zatím se zdá, že funguje vše, jak má“):
    reakce, úpravy a mazání, odpovědi, nový 1:1 a skupinový chat, hlášení přečtení,
    skok z citace, odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení,
-   instalace `.deb`. **Výjimka:** obrázek ze schránky nejde odeslat (AMS `400`, viz bod 14).
+   instalace `.deb`. **Výjimka:** obrázek ze schránky (opraveno podle HAR, čeká na test, bod 14).
 2. **Společný odchyt provozu (HAR)** z web klienta (Chrome; postup a scénáře
    v `docs/protocol/README.md`, očištění `tools/har-redact.py`), v tomto pořadí důležitosti:
    trouter (WebSocket rámce), odeslání obrázku a souboru, hledání lidí mimo organizaci,
@@ -235,12 +237,11 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 12. ✅ **Design:** vlastní paleta, avatary, přepínač vzhledu (`settings.toml` → `theme`).
 13. ✅ **Kopírování:** ⧉ celá zpráva, ⌶/dvojklik režim výběru, automatické kopírování výběru
     (schránka i primární výběr X11).
-14. ❌ **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace ✅; odeslání: media služba odmítá
-    zápis s `400 "The platform id could not be created from the … User-Agent header"` pro
-    `tymy/…` i pro hlavičku Chrome. HAR (2026-11-05): web klient nahrává přes
-    `eu-prod.asyncgw.teams.microsoft.com` se `sharingMode: Inline` a `amsreferences` ve zprávě
-    (Tymy už to dělají), navíc posílá `x-ms-client-version: 1415/…`. Ani brána nepomohla;
-    zbývá hlavička verze klienta = vydávat se za web klienta Teams → **rozhodne uživatel**.
+14. 🟡 **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace ✅; odeslání: podle HAR
+    (2026-11-05) přes `eu-prod.asyncgw.teams.microsoft.com`, `sharingMode: Inline`,
+    `amsreferences` ve zprávě a hlavička `x-ms-client-version: 1415/…` (verze web klienta;
+    uživatel souhlasil 2026-11-05). Nahrání ✅ ověřeno (`tymy-cli upload`), odeslání zprávy
+    s obrázkem z okna čeká na test uživatelem.
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).

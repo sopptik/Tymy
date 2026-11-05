@@ -207,15 +207,9 @@ async fn main() -> Result<()> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "obrazek.png".into());
-            let session = backend.session().await?;
-            let id = tymy_api::media::upload_image(
-                backend.http(),
-                &session,
-                &conversation.as_str().into(),
-                &bytes,
-                &name,
-            )
-            .await?;
+            let id = backend
+                .upload_image(&conversation.as_str().into(), &bytes, &name)
+                .await?;
             println!("Nahráno: {id}");
             Ok(())
         }

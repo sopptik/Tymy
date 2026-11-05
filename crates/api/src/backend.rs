@@ -123,6 +123,28 @@ impl TeamsBackend {
             .await
     }
 
+    /// Nahraje obrázek do media služby s právem čtení pro chat; vrátí id objektu.
+    /// Zprávu neodesílá.
+    pub async fn upload_image(
+        &self,
+        conversation: &ConversationId,
+        bytes: &[u8],
+        filename: &str,
+    ) -> Result<String> {
+        self.call(|s| async move {
+            media::upload_image(
+                &self.http,
+                &s,
+                conversation,
+                bytes,
+                filename,
+                &self.endpoints.media_client_version,
+            )
+            .await
+        })
+        .await
+    }
+
     pub fn http(&self) -> &Http {
         &self.http
     }
@@ -230,10 +252,7 @@ impl ChatBackend for TeamsBackend {
             let session = self.session().await?;
             for img in &message.images {
                 let id = self
-                    .call(|s| async move {
-                        media::upload_image(&self.http, &s, conversation, &img.bytes, &img.filename)
-                            .await
-                    })
+                    .upload_image(conversation, &img.bytes, &img.filename)
                     .await?;
                 html.push_str(&media::image_html(&session, &id, img.width, img.height));
                 ams.push(id);
