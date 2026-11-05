@@ -94,6 +94,14 @@ enum Command {
         #[arg(short, long)]
         output: std::path::PathBuf,
     },
+    /// Ladění: nahraje obrázek do media služby (AMS) s právem čtení pro chat. Zprávu
+    /// NEODESÍLÁ; vypíše id objektu.
+    Upload {
+        /// Id chatu, který má mít k obrázku přístup.
+        conversation: String,
+        /// Soubor s obrázkem.
+        file: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -189,6 +197,26 @@ async fn main() -> Result<()> {
             std::fs::write(&output, &bytes)
                 .with_context(|| format!("zápis {}", output.display()))?;
             println!("Uloženo {} B do {}", bytes.len(), output.display());
+            Ok(())
+        }
+        Command::Upload { conversation, file } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let bytes =
+                std::fs::read(&file).with_context(|| format!("čtení {}", file.display()))?;
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "obrazek.png".into());
+            let session = backend.session().await?;
+            let id = tymy_api::media::upload_image(
+                backend.http(),
+                &session,
+                &conversation.as_str().into(),
+                &bytes,
+                &name,
+            )
+            .await?;
+            println!("Nahráno: {id}");
             Ok(())
         }
         Command::Watch => {

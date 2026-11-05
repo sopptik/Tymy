@@ -10,6 +10,17 @@ use crate::http::{Http, SendLogged, check, json as read_json, net_err};
 /// Horní mez velikosti staženého média.
 const MAX_BYTES: u64 = 25 * 1024 * 1024;
 
+/// Media služba odvozuje z `User-Agent` platformu klienta a zápis s neznámým odmítne:
+/// `400 "The platform id could not be created from the … 'User-Agent' header"` (ověřeno
+/// 2026-11-05 pro `tymy/…` i pro hlavičku prohlížeče Chrome). Co posílá web klient, ukáže
+/// HAR; do té doby lze hodnotu pro ladění zadat v `TYMY_AMS_USER_AGENT`.
+fn ams_user_agent(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match std::env::var("TYMY_AMS_USER_AGENT") {
+        Ok(ua) if !ua.is_empty() => rb.header(reqwest::header::USER_AGENT, ua),
+        _ => rb,
+    }
+}
+
 /// Skypetoken posíláme jen na hosty media služby.
 pub(crate) fn validate_url(url: &str) -> Result<Url> {
     let u = Url::parse(url).map_err(|e| Error::Protocol(format!("URL média {url}: {e}")))?;
@@ -28,9 +39,7 @@ pub(crate) fn validate_url(url: &str) -> Result<Url> {
 
 pub async fn fetch(http: &Http, session: &SkypeSession, url: &str) -> Result<Vec<u8>> {
     let url = validate_url(url)?;
-    let resp = http
-        .client
-        .get(url)
+    let resp = ams_user_agent(http.client.get(url))
         .header(
             reqwest::header::AUTHORIZATION,
             format!("skype_token {}", session.token),
@@ -67,7 +76,7 @@ pub(crate) fn ams_base(session: &SkypeSession) -> Url {
 
 /// Nahraje obrázek do media služby a vrátí id objektu (`0-weu-d1-…`).
 ///
-/// Postup (NEOVĚŘENO pro zápis, převzato z protokolu Skype):
+/// Postup (převzato z protokolu Skype):
 /// 1. `POST /v1/objects` `{type: "pish/image", permissions: {<chat>: ["read"]}, filename}` → `{id}`
 /// 2. `PUT /v1/objects/<id>/content/imgpsh` s daty obrázku
 pub async fn upload_image(
@@ -88,9 +97,7 @@ pub async fn upload_image(
         "permissions": { conversation.as_str(): ["read"] },
         "filename": filename,
     });
-    let resp = http
-        .client
-        .post(url)
+    let resp = ams_user_agent(http.client.post(url))
         .header(reqwest::header::AUTHORIZATION, &auth)
         .json(&body)
         .send_logged()
@@ -107,9 +114,7 @@ pub async fn upload_image(
     url.path_segments_mut()
         .expect("https URL")
         .extend(["v1", "objects", &id, "content", "imgpsh"]);
-    let resp = http
-        .client
-        .put(url)
+    let resp = ams_user_agent(http.client.put(url))
         .header(reqwest::header::AUTHORIZATION, &auth)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(bytes.to_vec())

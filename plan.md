@@ -95,7 +95,7 @@ podmínek služby Microsoftu.
 | Desktopové notifikace, ikona v liště, zavření = skrytí | ✅ |
 | Vzhled světlý/tmavý/podle systému, nový design | ✅ |
 | Kopírování zprávy, výběr textu s automatickým kopírováním | ✅ |
-| Vkládání obrázků ze schránky | ✅ ověřeno uživatelem 2026-11-05 |
+| Vkládání obrázků ze schránky | ❌ zobrazení a vložení ✅, nahrání do AMS končí `400` (neznámý `User-Agent`, 2026-11-05); potřeba HAR |
 | Formátované zprávy (odkazy, kód, seznamy, tabulky, citace, zmínky) | ✅ ověřeno na reálných zprávách |
 | Odpověď na zprávu | ✅ ověřeno uživatelem 2026-11-05 |
 | Reakce, úprava a mazání vlastních zpráv | ✅ ověřeno uživatelem 2026-11-05 |
@@ -216,12 +216,12 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 (hlášení přečtení, jména účastníků, přihlášení v prohlížeči, stránkování seznamu).
 2026-11-05 navíc: líné načítání starších chatů, vynechání smazaných týmů (`isdeleted`).
 1. ✅ **Souhrnný test uživatelem** (2026-11-05: „zatím se zdá, že funguje vše, jak má“):
-   reakce, úpravy a mazání, odpovědi, obrázky, nový 1:1 a skupinový chat, hlášení přečtení,
+   reakce, úpravy a mazání, odpovědi, nový 1:1 a skupinový chat, hlášení přečtení,
    skok z citace, odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení,
-   instalace `.deb`.
+   instalace `.deb`. **Výjimka:** obrázek ze schránky nejde odeslat (AMS `400`, viz bod 14).
 2. **Společný odchyt provozu (HAR)** z web klienta (Chrome; postup a scénáře
    v `docs/protocol/README.md`, očištění `tools/har-redact.py`), v tomto pořadí důležitosti:
-   trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
+   trouter (WebSocket rámce), odeslání obrázku a souboru, hledání lidí mimo organizaci,
    případně osobní účet (teams.live.com) a kalendář.
 3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů),
    pak **soubory**.
@@ -235,7 +235,9 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 12. ✅ **Design:** vlastní paleta, avatary, přepínač vzhledu (`settings.toml` → `theme`).
 13. ✅ **Kopírování:** ⧉ celá zpráva, ⌶/dvojklik režim výběru, automatické kopírování výběru
     (schránka i primární výběr X11).
-14. ✅ **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace; odeslání přes AMS (ověřeno uživatelem 2026-11-05).
+14. ❌ **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace ✅; odeslání: media služba odmítá
+    zápis s `400 "The platform id could not be created from the … User-Agent header"` pro
+    `tymy/…` i pro hlavičku Chrome. Co posílá web klient, zjistí HAR (scénář „obrázek“).
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).
