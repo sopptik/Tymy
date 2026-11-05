@@ -210,8 +210,9 @@ podmínek služby Microsoftu.
 4. Volitelně přijetí/odmítnutí pozvánky.
 
 ## 5. Moje doporučení k pořadí
-Stav 2026-11-04: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu
+Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu
 (hlášení přečtení, jména účastníků, přihlášení v prohlížeči, stránkování seznamu).
+2026-11-05 navíc: líné načítání starších chatů, vynechání smazaných týmů (`isdeleted`).
 1. **Souhrnný test uživatelem** (domluveno): reakce, úpravy a mazání, odpovědi, obrázky,
    nový 1:1 a skupinový chat, hlášení přečtení (shoduje se s mobilem/webem?), skok z citace,
    odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení, instalace `.deb`.
