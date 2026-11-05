@@ -214,19 +214,45 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
   vlákna; obojí pak `fetchShortProfile` (viz 6.). Pro lidi z jiných organizací vrací
   `fetchShortProfile` prázdné `value` ✅; pak záloha z odesílatelů v historii.
 
-## Jak odchytit provoz (fáze 0, krok 1)
+## Jak odchytit provoz (HAR)
 
-1. V Chromiu/Firefoxu otevřete DevTools → Network, zapněte *Preserve log*, filtr `Fetch/XHR` + `WS`.
-2. Přihlaste se na `teams.microsoft.com` (resp. `teams.live.com` pro osobní účet).
-3. Proveďte: otevření chatu, odeslání zprávy, odeslání souboru, přijetí zprávy z jiného účtu.
-4. Uložte jako HAR **do adresáře mimo repozitář** (`*.har` je v `.gitignore`, obsahuje tokeny!).
-5. Zajímá nás:
-   - požadavek na `login.microsoftonline.com/.../token` (client_id, scope, redirect_uri),
-   - `authsvc` / `authz` požadavek a jeho odpověď,
-   - hostitel a hlavičky požadavků na `*/v1/users/ME/conversations*`,
-   - WebSocket rámce trouteru.
-6. Ladicí výstup Tymy: `tymy-cli -vv chats` vypíše těla odpovědí se zredigovanými tokeny.
-   Anonymizované vzorky pak nahraďte za syntetické fixtury v `crates/api/tests/fixtures/`.
+Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce
+WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a cookies, proto
+**nikdy do repozitáře** (`*.har` je v `.gitignore`) a analyzuje se jen očištěná kopie.
+
+1. Otevřít `https://teams.microsoft.com/v2/` a přihlásit se (osobní účet: `teams.live.com`).
+2. F12 → **Network**: zapnout *Preserve log* a *Disable cache*, filtr nechat **All**
+   (WS i Fetch/XHR). Ikonou ⊘ smazat dosavadní záznam.
+3. Obnovit stránku (F5), aby se zachytilo připojení trouteru od začátku. Pak provést
+   scénáře, mezi nimi pár sekund pauza:
+   - **trouter:** nechat Teams 1–2 min v klidu; z jiného zařízení (mobil, Tymy s druhým
+     účtem) poslat do chatu zprávu, začít psát („píše…“), přidat reakci; změnit vlastní stav
+     (dostupný → nerušit → dostupný);
+   - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
+   - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
+     organizace a otevřít s ním chat (nic neposílat);
+   - volitelně **kalendář:** otevřít Kalendář, přepnout týden, otevřít detail schůzky.
+4. Network → ⤓ → *Export HAR (with sensitive data)* → uložit **mimo repozitář**, např.
+   `~/teams.har`. (Volbu je třeba povolit: DevTools ⚙ → Preferences → Network → *Allow to
+   generate HAR with sensitive data*.) Očištěný HAR by vynechal hlavičky `Authorization`
+   a cookies; my potřebujeme vědět, který token se kam posílá: skript z tokenu ponechá jen
+   `aud`, `scp` a `appid`, zbytek včetně podpisu zahodí.
+5. Očistit: `python3 -I tools/har-redact.py ~/teams.har` → `~/teams.redacted.har` + přehled
+   volání a rámců trouteru. Skript odstraní tokeny (hlavičky, URL, těla, rámce WebSocketu),
+   cookies, e-maily, texty zpráv a jména (`--keep-text` je ponechá) a binární obsah.
+   Původní `~/teams.har` pak smazat.
+6. Analyzuje se `~/teams.redacted.har`; zjištění se zapíšou sem, fixtury do
+   `crates/api/tests/fixtures/` jen syntetické.
+
+Zajímá nás hlavně:
+- trouter: `GET …/v4/a` (nebo `/v3/a`) s parametry, odpověď (`socketio`, `surl`, `ccid`),
+  registrace `POST https://teams.microsoft.com/registrar/prod/V2/registrations`, URL WebSocketu
+  a sled rámců (handshake, autentizace, `ping`, příchozí `3:::{…}` a odpovědi na ně);
+- soubor: nahrání do OneDrive/SharePointu (hostitel, token pro koho), sdílení a tělo odeslané
+  zprávy s `properties.files`;
+- hledání mimo organizaci: hlavičky a token požadavku na `externalsearchv3` / `userdiscovery`.
+
+Ladicí výstup Tymy: `tymy-cli -vv chats` vypíše těla odpovědí se zredigovanými tokeny.
 
 ## Otevřené body
 
