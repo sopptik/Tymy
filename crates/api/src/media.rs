@@ -10,17 +10,6 @@ use crate::http::{Http, SendLogged, check, json as read_json, net_err};
 /// Horní mez velikosti staženého média.
 const MAX_BYTES: u64 = 25 * 1024 * 1024;
 
-/// Media služba odvozuje z `User-Agent` platformu klienta a zápis s neznámým odmítne:
-/// `400 "The platform id could not be created from the … 'User-Agent' header"` (ověřeno
-/// 2026-11-05 pro `tymy/…` i pro hlavičku prohlížeče Chrome). Co posílá web klient, ukáže
-/// HAR; do té doby lze hodnotu pro ladění zadat v `TYMY_AMS_USER_AGENT`.
-fn ams_user_agent(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    match std::env::var("TYMY_AMS_USER_AGENT") {
-        Ok(ua) if !ua.is_empty() => rb.header(reqwest::header::USER_AGENT, ua),
-        _ => rb,
-    }
-}
-
 /// Skypetoken posíláme jen na hosty media služby.
 pub(crate) fn validate_url(url: &str) -> Result<Url> {
     let u = Url::parse(url).map_err(|e| Error::Protocol(format!("URL média {url}: {e}")))?;
@@ -41,7 +30,9 @@ pub(crate) fn validate_url(url: &str) -> Result<Url> {
 
 pub async fn fetch(http: &Http, session: &SkypeSession, url: &str) -> Result<Vec<u8>> {
     let url = validate_url(url)?;
-    let resp = ams_user_agent(http.client.get(url))
+    let resp = http
+        .client
+        .get(url)
         .header(
             reqwest::header::AUTHORIZATION,
             format!("skype_token {}", session.token),
@@ -102,12 +93,17 @@ pub(crate) fn upload_base(session: &SkypeSession) -> Url {
 /// 1. `POST /v1/objects/` `{type: "pish/image", permissions: {<chat>: ["read"]},
 ///    sharingMode: "Inline", filename}` s `x-ams-post-sharing-mode: Inline` → `201 {id}`
 /// 2. `PUT /v1/objects/<id>/content/imgpsh` s daty obrázku → `201`
+///
+/// Služba bere platformu klienta z `x-ms-client-version` (chybí-li, chyba `400` mluví
+/// o `User-Agent`); posíláme verzi web klienta ([`crate::Endpoints::media_client_version`]).
+/// Ověřeno 2026-11-05: s `1415/…` a vlastním `User-Agent` → `201`.
 pub async fn upload_image(
     http: &Http,
     session: &SkypeSession,
     conversation: &ConversationId,
     bytes: &[u8],
     filename: &str,
+    client_version: &str,
 ) -> Result<String> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(Error::Other("obrázek je příliš velký (max. 25 MB)".into()));
@@ -121,9 +117,12 @@ pub async fn upload_image(
         "sharingMode": "Inline",
         "filename": filename,
     });
-    let resp = ams_user_agent(http.client.post(url))
+    let resp = http
+        .client
+        .post(url)
         .header(reqwest::header::AUTHORIZATION, &auth)
         .header("x-ams-post-sharing-mode", "Inline")
+        .header("x-ms-client-version", client_version)
         .json(&body)
         .send_logged()
         .await
@@ -139,8 +138,11 @@ pub async fn upload_image(
     url.path_segments_mut()
         .expect("https URL")
         .extend(["v1", "objects", &id, "content", "imgpsh"]);
-    let resp = ams_user_agent(http.client.put(url))
+    let resp = http
+        .client
+        .put(url)
         .header(reqwest::header::AUTHORIZATION, &auth)
+        .header("x-ms-client-version", client_version)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(bytes.to_vec())
         .send_logged()
@@ -215,6 +217,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/objects/"))
             .and(header("x-ams-post-sharing-mode", "Inline"))
+            .and(header("x-ms-client-version", "1415/1"))
             .and(header("Authorization", "skype_token st"))
             .and(body_string_contains("\"19:c@thread.v2\":[\"read\"]"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "0-weu-d1-new"})))
@@ -235,6 +238,7 @@ mod tests {
             &"19:c@thread.v2".into(),
             b"PNG",
             "a.png",
+            "1415/1",
         )
         .await
         .unwrap();

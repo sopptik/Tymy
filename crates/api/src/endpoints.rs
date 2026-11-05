@@ -23,7 +23,13 @@ pub struct Endpoints {
     /// Návratová adresa přihlášení v prohlížeči (authorization code + PKCE).
     /// `http://localhost…` = kód převezme místní server, jinak adresu vloží uživatel.
     pub redirect_uri: String,
+    /// Hlavička `x-ms-client-version` pro zápis do media služby (obrázky). Bez ní služba
+    /// odmítne nahrání (`400` „platform id … User-Agent“); `1415` = web klient Teams.
+    pub media_client_version: String,
 }
+
+/// Verze web klienta Teams z HAR (2026-11-05); s ní media služba přijme nahrání obrázku.
+const WEB_CLIENT_VERSION: &str = "1415/26101515216";
 
 /// Teams desktop klient (first-party, public client, podporuje device code flow).
 /// Ověřeno: používají ho veřejné nástroje (AADInternals, roadtx) pro device code přihlášení.
@@ -44,6 +50,7 @@ impl Endpoints {
                 authz_url: "https://authsvc.teams.microsoft.com/v1.0/authz".into(),
                 chat_service: "https://emea.ng.msg.teams.microsoft.com".into(),
                 redirect_uri: LOOPBACK_REDIRECT.into(),
+                media_client_version: WEB_CLIENT_VERSION.into(),
             },
             // NEOVĚŘENO: hodnoty pro osobní účty jsou hypotéza, kterou je nutné potvrdit
             // odchytem provozu teams.live.com (fáze 0, krok 1).
@@ -54,6 +61,7 @@ impl Endpoints {
                 authz_url: "https://teams.live.com/api/auth/v1.0/authz/consumer".into(),
                 chat_service: "https://msgapi.teams.live.com".into(),
                 redirect_uri: LOOPBACK_REDIRECT.into(),
+                media_client_version: WEB_CLIENT_VERSION.into(),
             },
         }
     }
@@ -72,7 +80,8 @@ impl Endpoints {
             skype_scope,
             authz_url,
             chat_service,
-            redirect_uri
+            redirect_uri,
+            media_client_version
         );
         e
     }
@@ -117,6 +126,7 @@ pub struct EndpointOverrides {
     pub authz_url: Option<String>,
     pub chat_service: Option<String>,
     pub redirect_uri: Option<String>,
+    pub media_client_version: Option<String>,
 }
 
 #[cfg(test)]

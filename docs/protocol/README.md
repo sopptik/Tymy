@@ -169,12 +169,12 @@ přímo v HTML obsahu zprávy:
      itemtype="http://schema.skype.com/AMSImage" itemscope="png" width height id itemid …>`
      (adresa na starém hostu) a v těle `"amsreferences": ["{id}"]`, v `properties` `blurHash`;
   4. web klient pak čte náhled z `…asyncgw…/v1/{oid uživatele}/objects/{id}/views/imgo?v=1`.
-  Tymy (`skype_token`, bez `x-ms-client-version`): ❌ `400 {"title":"The 'User-Agent' header is
-  missing or invalid.", "detail":"The platform id could not be created from the '…' value of
-  'User-Agent' header."}` na obou hostech, s `User-Agent` Tymy i Chrome. Hypotéza: platforma
-  se bere z `x-ms-client-version` (`1415` = web klient Teams); zkouška čeká na rozhodnutí
-  uživatele (šlo by o vydávání se za oficiálního klienta). Ladění:
-  `TYMY_AMS_USER_AGENT=… tymy-cli upload <chat> <soubor>` (nahraje, zprávu neodešle).
+  Bez `x-ms-client-version` ❌ `400 {"title":"The 'User-Agent' header is missing or invalid.",
+  "detail":"The platform id could not be created from the '…' value of 'User-Agent' header."}`
+  na obou hostech, s `User-Agent` Tymy i Chrome (chyba mluví o User-Agent zavádějícím způsobem).
+  S `x-ms-client-version: 1415/26101515216` (verze web klienta, souhlas uživatele 2026-11-05)
+  a vlastním `User-Agent` ✅ `201`. Verze je v `endpoints.toml` → `media_client_version`.
+  Ladění: `tymy-cli upload <chat> <soubor>` (nahraje, zprávu neodešle).
 - „Píše…“ (odchozí): web klient posílá `POST …/messages` s `{"content": "", "contenttype":
   "Application/Message", "messagetype": "Control/Typing"}` → `201` ✅ (HAR 2026-11-05).
 - Hlavičky web klienta k chat službě: `clientinfo: os=linux; …; clientName=skypeteams;
