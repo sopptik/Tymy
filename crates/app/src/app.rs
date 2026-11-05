@@ -183,6 +183,8 @@ pub enum Msg {
     /// Výsledek úlohy spuštěné v daném „období“ (při přepnutí účtu se staré zahodí).
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
+    /// Nová šířka okna (šířka bublin se odvíjí od místa ve vlákně).
+    WindowResized(f32),
     Tick,
     /// Seznam konverzací; `bool` = všechny dosud načtené stránky (jinak jen nejnovější
     /// stránka ke sloučení).
@@ -470,6 +472,7 @@ impl Msg {
             Msg::HideToast(_) => trace!("update: HideToast"),
             Msg::SystemTheme(mode) => debug!(?mode, "update: SystemTheme"),
             Msg::WindowFocus(f) => debug!(focused = f, "update: WindowFocus"),
+            Msg::WindowResized(w) => trace!(width = w, "update: WindowResized"),
             Msg::NotificationClicked(id) => debug!(%id, "update: NotificationClicked"),
             Msg::Noop => trace!("update: Noop"),
             Msg::TrayReady(_) => debug!("update: TrayReady"),
@@ -531,6 +534,8 @@ const TOAST_DURATION: Duration = Duration::from_millis(1800);
 
 /// Šířka levého panelu.
 const SIDEBAR_WIDTH: f32 = 320.0;
+/// Výchozí šířka okna (než přijde první událost o velikosti).
+pub const WINDOW_WIDTH: f32 = 1100.0;
 
 /// Maximální šířka obrázku v bublině.
 const IMAGE_MAX_WIDTH: f32 = 360.0;
@@ -689,6 +694,8 @@ pub struct App {
     system_dark: bool,
     /// Má okno fokus (pro rozhodnutí o notifikacích)?
     focused: bool,
+    /// Šířka okna (px); podle ní se počítá šířka bublin.
+    window_width: f32,
     /// Notifikace až po prvním obnovení ze sítě.
     notify_ready: bool,
     tray: Option<TrayHandle>,
@@ -780,6 +787,7 @@ impl App {
             theme_mode: Config::load().map(|c| c.settings.theme).unwrap_or_default(),
             system_dark: false,
             focused: true,
+            window_width: WINDOW_WIDTH,
             notify_ready: false,
             tray: None,
             tray_unread: 0,
@@ -807,6 +815,7 @@ impl App {
         fresh.theme_mode = self.theme_mode;
         fresh.system_dark = self.system_dark;
         fresh.focused = self.focused;
+        fresh.window_width = self.window_width;
         fresh.hidden = self.hidden;
         fresh.tray = self.tray.take();
         fresh.tray_unread = self.tray_unread;
@@ -941,6 +950,12 @@ impl App {
         let focus = iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::WindowFocus(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::WindowFocus(false)),
+            iced::Event::Window(iced::window::Event::Resized(size)) => {
+                Some(Msg::WindowResized(size.width))
+            }
+            iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
+                Some(Msg::WindowResized(size.width))
+            }
             _ => None,
         });
         let always = [
@@ -960,6 +975,14 @@ impl App {
             ])),
             _ => Subscription::batch(always),
         }
+    }
+
+    /// Nejširší bublina zprávy podle místa ve vlákně: okno bez postranního panelu, odsazení
+    /// vlákna (2 × 24 px), posuvníku, avataru a tlačítek u zprávy.
+    fn bubble_max(&self) -> f32 {
+        let pane = self.window_width - SIDEBAR_WIDTH - 48.0 - 12.0;
+        let room = pane - MESSAGE_AVATAR - 6.0 * ICON_BUTTON - 8.0;
+        room.clamp(BUBBLE_MIN, BUBBLE_MAX)
     }
 
     fn session(&self) -> Option<&Session> {
@@ -2568,6 +2591,10 @@ impl App {
                 Task::none()
             }
             Msg::GroupCreate => self.create_group_draft(),
+            Msg::WindowResized(w) => {
+                self.window_width = w;
+                Task::none()
+            }
             Msg::WindowFocus(f) => {
                 self.focused = f;
                 // návrat do okna: otevřený chat je teď opravdu přečtený
@@ -2667,7 +2694,7 @@ impl App {
                 if text.is_empty() {
                     return Task::none();
                 }
-                let width = estimate_text_width(&text);
+                let width = estimate_text_width(&text, self.bubble_max() - BUBBLE_PADDING);
                 self.selecting = Some(Selecting {
                     id,
                     content: text_editor::Content::with_text(&text),
@@ -4184,6 +4211,7 @@ impl App {
             .unwrap_or_default();
         let mut prev: Option<&Message> = None;
         let colors = style::colors(&self.theme());
+        let bubble_max = self.bubble_max();
         for m in msgs.iter().filter(|m| displayable(m)) {
             let day = m.arrived_at.map(|t| t.with_timezone(&Local).date_naive());
             let prev_day = prev
@@ -4223,6 +4251,7 @@ impl App {
                     confirm_delete: self.confirm_delete.as_ref() == Some(&m.id),
                     highlighted: self.highlight.as_ref() == Some(&m.id),
                     colors,
+                    bubble_max,
                 },
             ));
             prev = Some(m);
@@ -4763,6 +4792,8 @@ struct MessageUi<'a> {
     highlighted: bool,
     /// Barvy aktuálního tématu (úseky formátovaného textu potřebují konkrétní barvy).
     colors: style::Colors,
+    /// Nejširší bublina (podle šířky okna).
+    bubble_max: f32,
 }
 
 /// Prostý text zprávy pro kopírování (bez obrázků; přílohy jako názvy).
@@ -4774,13 +4805,17 @@ fn message_plain(m: &Message) -> String {
 }
 
 /// Odhad šířky textu (px) pro editor v režimu výběru; raději o něco širší.
-fn estimate_text_width(text: &str) -> f32 {
+fn estimate_text_width(text: &str, max: f32) -> f32 {
     let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
-    (longest * 8.2 + 8.0).clamp(80.0, BUBBLE_TEXT_MAX)
+    (longest * 8.2 + 8.0).clamp(80.0, max)
 }
 
-/// Maximální šířka textu v bublině (bublina má 560 px včetně odsazení).
-const BUBBLE_TEXT_MAX: f32 = 534.0;
+/// Nejširší bublina: širší řádky textu se už špatně čtou.
+const BUBBLE_MAX: f32 = 1100.0;
+/// Nejužší bublina (i v úzkém okně).
+const BUBBLE_MIN: f32 = 320.0;
+/// Vodorovné odsazení textu v bublině (13 px z každé strany).
+const BUBBLE_PADDING: f32 = 26.0;
 
 /// Šířka místa pro avatar u zpráv ostatních.
 const MESSAGE_AVATAR: f32 = 30.0;
@@ -4827,6 +4862,7 @@ fn message_view<'a>(
             false,
             media,
             &ui.colors,
+            ui.bubble_max - BUBBLE_PADDING,
         ));
         for a in &m.attachments {
             let label = text(format!("📎 {}", a.name)).size(13).font(SEMIBOLD);
@@ -4848,7 +4884,7 @@ fn message_view<'a>(
     let bubble: Element<'a, Msg> = mouse_area(
         container(body)
             .padding([8, 13])
-            .max_width(560)
+            .max_width(ui.bubble_max)
             .style(move |t: &Theme| style::bubble(t, mine, header)),
     )
     .on_double_click(Msg::StartSelect(m.id.clone()))
@@ -5044,10 +5080,11 @@ fn blocks_view<'a>(
     quoted: bool,
     media: &'a HashMap<String, Media>,
     c: &style::Colors,
+    width: f32,
 ) -> Vec<Element<'a, Msg>> {
     blocks
         .iter()
-        .map(|b| block_view(b, mine, quoted, media, c))
+        .map(|b| block_view(b, mine, quoted, media, c, width))
         .collect()
 }
 
@@ -5057,6 +5094,8 @@ fn block_view<'a>(
     quoted: bool,
     media: &'a HashMap<String, Media>,
     c: &style::Colors,
+    // nejvyšší šířka obsahu (px)
+    width: f32,
 ) -> Element<'a, Msg> {
     let size = if quoted { 13.0 } else { 14.0 };
     match block {
@@ -5114,7 +5153,7 @@ fn block_view<'a>(
                 }
                 QuoteKind::Plain => {}
             }
-            let inner = blocks_view(&q.blocks, mine, true, media, c);
+            let inner = blocks_view(&q.blocks, mine, true, media, c, width - 23.0);
             col = col.extend(inner);
             let quote = container(
                 container(col)
@@ -5139,28 +5178,62 @@ fn block_view<'a>(
             }
         }
         Block::Table(rows) => {
+            // Pevné šířky sloupců podle obsahu (s `Fill` by tabulka zabrala celou bublinu
+            // a sloupce by se dělily rovným dílem bez ohledu na obsah).
+            let cols = table_columns(rows, width);
             let table = Column::with_children(rows.iter().map(|r| {
-                iced::widget::Row::with_children(r.iter().map(|cell| {
+                iced::widget::Row::with_children(r.iter().zip(&cols).map(|(cell, w)| {
                     let header = cell.header;
                     container(paragraph(&cell.spans, 13.0, header, mine, c))
                         .padding([4, 8])
-                        .width(Length::Fill)
+                        .width(*w)
                         .style(move |t: &Theme| style::table_cell(t, mine, header))
                         .into()
                 }))
                 .into()
             }));
-            // pevná šířka: s `Fill` by se tabulka dělila o místo s odsazením bubliny
-            container(table).width(BUBBLE_TEXT_MAX).into()
+            table.into()
         }
         Block::Image(img) => image_view(img, media.get(&img.url)),
         Block::Rule => container(space())
-            .width(BUBBLE_TEXT_MAX)
+            .width(width.min(BUBBLE_MIN))
             .height(1)
             .style(move |t: &Theme| style::rule(t, mine))
             .into(),
         Block::Blank => space().height(2).into(),
     }
+}
+
+/// Šířky sloupců tabulky (px): podle nejdelšího textu ve sloupci, dohromady nejvýš `max`.
+/// Když se nevejdou, zúží se jen široké sloupce (úzké, např. čísla, zůstanou celé).
+fn table_columns(rows: &[Vec<rich::Cell>], max: f32) -> Vec<f32> {
+    // odhad šířky znaku písma 13 px (tučné záhlaví o něco širší) + odsazení buňky 2 × 8 px
+    const CHAR: f32 = 7.4;
+    const PAD: f32 = 18.0;
+    let n = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut cols = vec![40.0_f32; n];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            let chars: usize = cell.spans.iter().map(|s| s.text.chars().count()).sum();
+            let factor = if cell.header { 1.08 } else { 1.0 };
+            cols[i] = cols[i].max(chars as f32 * CHAR * factor + PAD);
+        }
+    }
+    let total: f32 = cols.iter().sum();
+    if total > max && n > 0 {
+        // Rovný podíl na sloupec; sloupce užší než podíl si nechají svou šířku a zbytek
+        // se rozdělí mezi široké podle jejich poměru.
+        let fair = max / n as f32;
+        let narrow: f32 = cols.iter().filter(|w| **w <= fair).sum();
+        let wide: f32 = cols.iter().filter(|w| **w > fair).sum();
+        let room = (max - narrow).max(0.0);
+        for w in &mut cols {
+            if *w > fair {
+                *w = (*w / wide * room).max(40.0);
+            }
+        }
+    }
+    cols
 }
 
 /// Odstavec formátovaného textu; klik na odkaz ho otevře v prohlížeči.
@@ -5659,6 +5732,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn table_columns_fit_content_and_bubble() {
+        let cell = |t: &str| rich::Cell {
+            header: false,
+            spans: vec![rich::Span {
+                text: t.into(),
+                style: Default::default(),
+                link: None,
+            }],
+        };
+        let rows = vec![
+            vec![cell("1"), cell("Krátký"), cell(&"dlouhý text ".repeat(20))],
+            vec![cell("22"), cell("Delší buňka"), cell("x")],
+        ];
+        // dost místa: každý sloupec podle svého nejdelšího textu
+        let wide = table_columns(&rows, 5000.0);
+        assert_eq!(wide[0], 40.0, "úzký sloupec má minimum");
+        assert!(wide[2] > 1000.0);
+        // málo místa: úzké sloupce zůstanou, zúží se jen ten široký
+        let tight = table_columns(&rows, 600.0);
+        assert_eq!(tight[0], wide[0]);
+        assert_eq!(tight[1], wide[1]);
+        assert!((tight.iter().sum::<f32>() - 600.0).abs() < 0.5, "{tight:?}");
+    }
+
+    #[test]
     fn plain_text_for_copy_and_width() {
         let m = Message {
             id: "1".into(),
@@ -5681,8 +5779,8 @@ mod tests {
             reactions: vec![],
         };
         assert_eq!(message_plain(&m), "Ahoj světe\ndruhý\n\nsoubor.pdf");
-        assert_eq!(estimate_text_width("ok"), 80.0);
-        assert_eq!(estimate_text_width(&"x".repeat(500)), BUBBLE_TEXT_MAX);
+        assert_eq!(estimate_text_width("ok", 500.0), 80.0);
+        assert_eq!(estimate_text_width(&"x".repeat(500), 500.0), 500.0);
     }
 
     #[test]

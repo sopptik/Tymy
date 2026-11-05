@@ -42,6 +42,10 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   automaticky do schránky.
 - **Obrázky ze schránky (2026-11-04):** vkládat obrázky ze schránky; vložený obrázek musí
   jít odebrat.
+- **Šířka bublin (2026-11-05):** „musí být ty bubliny tak cik-cak … tabulka je zarovnaná do
+  řádků uvnitř buněk, přitom by se vše vešlo na jednu řádku, kdyby nebyly bubliny tak úzké“
+  (celá obrazovka, Full HD). Řešení: šířka bubliny podle místa ve vlákně (320–1100 px místo
+  pevných 560), sloupce tabulek podle obsahu.
 - **Hlavička web klienta (2026-11-05):** „zkus to poslat s hlavičkou webových teams a uvidíme
   jestli je to tím“ → media služba přijme obrázek jen s `x-ms-client-version` web klienta.
 - **Souhrnný test (2026-11-05):** „bod 1 se zatím zdá že funguje vše jak má“ (reakce, úpravy,
