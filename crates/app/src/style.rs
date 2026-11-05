@@ -38,6 +38,10 @@ pub struct Colors {
     pub danger: Color,
     pub danger_soft: Color,
     pub shadow: Color,
+    /// Vlastní bubliny: pozadí, text a odkazy (v tmavém vzhledu tlumené, ne syté `primary`).
+    pub mine: Color,
+    pub on_mine: Color,
+    pub mine_link: Color,
 }
 
 const LIGHT: Colors = Colors {
@@ -55,6 +59,9 @@ const LIGHT: Colors = Colors {
     danger: color!(0xD93636),
     danger_soft: color!(0xFDE7E7),
     shadow: Color::from_rgba(0.06, 0.09, 0.13, 0.10),
+    mine: color!(0x13879D),
+    on_mine: color!(0xFFFFFF),
+    mine_link: color!(0xFFFFFF),
 };
 
 const DARK: Colors = Colors {
@@ -72,6 +79,9 @@ const DARK: Colors = Colors {
     danger: color!(0xF06060),
     danger_soft: color!(0x3A1F22),
     shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+    mine: color!(0x1A4750),
+    on_mine: color!(0xE8F3F5),
+    mine_link: color!(0x8EDBEA),
 };
 
 pub fn colors(t: &Theme) -> Colors {
@@ -248,7 +258,7 @@ pub fn bubble(t: &Theme, mine: bool, first: bool) -> container::Style {
         }
     };
     let (bg, fg, border) = if mine {
-        (c.primary, c.on_primary, Color::TRANSPARENT)
+        (c.mine, c.on_mine, Color::TRANSPARENT)
     } else {
         (c.surface, c.text, c.border)
     };
@@ -276,7 +286,7 @@ pub fn bubble(t: &Theme, mine: bool, first: bool) -> container::Style {
 
 /// Barva textu v bublině (na vlastní bublině bílá, jinak běžná).
 pub fn bubble_text(c: &Colors, mine: bool) -> Color {
-    if mine { c.on_primary } else { c.text }
+    if mine { c.on_mine } else { c.text }
 }
 
 /// Jemný podklad uvnitř bubliny (kód, citace, tabulky) odvozený z barvy textu.
@@ -289,7 +299,7 @@ pub fn bubble_tint(c: &Colors, mine: bool, alpha: f32) -> Color {
 
 /// Barva odkazů a zmínek v bublině.
 pub fn bubble_link(c: &Colors, mine: bool) -> Color {
-    if mine { c.on_primary } else { c.primary }
+    if mine { c.mine_link } else { c.primary }
 }
 
 /// Blok kódu.
@@ -314,13 +324,13 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 
 /// Pozadí bubliny (pro neprůhledné podklady uvnitř).
 fn bubble_background(c: &Colors, mine: bool) -> Color {
-    if mine { c.primary } else { c.surface }
+    if mine { c.mine } else { c.surface }
 }
 
 /// Barva proužku u citace.
 fn quote_bar_color(c: &Colors, mine: bool) -> Color {
     if mine {
-        mix(c.primary, c.on_primary, 0.7)
+        mix(c.mine, c.mine_link, 0.7)
     } else {
         c.primary
     }
@@ -667,7 +677,7 @@ pub fn ghost(t: &Theme, status: button::Status) -> button::Style {
 /// Odkaz v textu (soubor, URL).
 pub fn link(t: &Theme, status: button::Status, mine: bool) -> button::Style {
     let c = colors(t);
-    let base = if mine { c.on_primary } else { c.primary };
+    let base = bubble_link(&c, mine);
     button::Style {
         background: None,
         text_color: if matches!(status, button::Status::Hovered) {
@@ -727,7 +737,7 @@ pub fn selectable_text(t: &Theme, mine: bool) -> text_editor::Style {
         background: Background::Color(Color::TRANSPARENT),
         border: Border::default(),
         placeholder: c.muted,
-        value: if mine { c.on_primary } else { c.text },
+        value: bubble_text(&c, mine),
         selection: if mine {
             Color {
                 a: 0.35,

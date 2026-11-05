@@ -4833,7 +4833,7 @@ fn message_view<'a>(
         color: Some(if mine {
             Color {
                 a: 0.75,
-                ..style::colors(t).on_primary
+                ..style::colors(t).on_mine
             }
         } else {
             style::colors(t).muted
