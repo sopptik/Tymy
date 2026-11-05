@@ -8,6 +8,6 @@ mod error;
 mod model;
 pub mod text;
 
-pub use backend::{ChatBackend, MessagePage};
+pub use backend::{ChatBackend, ConversationPage, MessagePage};
 pub use error::{Error, Result};
 pub use model::*;

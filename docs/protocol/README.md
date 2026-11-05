@@ -235,5 +235,6 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - [x] Jména účastníků chatů bez nutnosti číst historii (profily z middle tier, 2026-11-04)
 - [x] Authorization code + PKCE pro organizace s blokovaným device code (2026-11-04)
 - [x] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty (2026-11-04)
+- [x] Líné načítání starších stránek seznamu (kurzor `backwardLink` z předchozí části) (2026-11-05)
 - [x] Zobrazení vložených obrázků (AMS náhled + originál)
 - [ ] Odesílání obrázků a souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS

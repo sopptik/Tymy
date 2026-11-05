@@ -19,9 +19,9 @@ use tymy_core::text::{
     InlineImage, Part, REPLY_PREVIEW_CHARS, edited_html, message_parts, truncate_chars,
 };
 use tymy_core::{
-    AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind, Error,
-    Message, MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile,
-    ReplyRef, one_on_one_id, one_on_one_peer,
+    AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind,
+    ConversationPage, Error, Message, MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage,
+    Person, Profile, ReplyRef, one_on_one_id, one_on_one_peer,
 };
 
 use tymy_store::{HIT_END, HIT_START, SearchHit, Store};
@@ -41,7 +41,8 @@ const COMPOSER: Id = Id::new("composer");
 const GROUP_QUERY: Id = Id::new("group-query");
 const MESSAGES: Id = Id::new("messages");
 /// Dokud nemáme trouter (WebSocket), obnovujeme seznam chatů periodicky (jen nejnovější
-/// stránku); celý seznam (všechny stránky) při startu a jednou za `FULL_REFRESH`.
+/// stránku ke sloučení). Jednou za `FULL_REFRESH` znovu načteme všechny už načtené stránky
+/// (zmizí opuštěné chaty); starší stránky se dočítají líně (posun na konec, Týmy, hledání).
 const REFRESH: Duration = Duration::from_secs(5);
 const FULL_REFRESH: Duration = Duration::from_secs(5 * 60);
 /// Kolik chatů bez známého jména projít v historii (záloha, když profily nevyjdou).
@@ -183,8 +184,15 @@ pub enum Msg {
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
     Tick,
-    /// Seznam konverzací; `bool` = celý (jinak jen nejnovější stránka ke sloučení).
-    Conversations(Result<Vec<Conversation>, Failure>, bool),
+    /// Seznam konverzací; `bool` = všechny dosud načtené stránky (jinak jen nejnovější
+    /// stránka ke sloučení).
+    Conversations(Result<ConversationPage, Failure>, bool),
+    /// Dočíst starší stránku seznamu konverzací (líné načítání).
+    LoadOlderChats,
+    /// Starší stránky seznamu konverzací; `usize` = kolik stránek jsme žádali.
+    OlderChats(Result<ConversationPage, Failure>, usize),
+    /// Posun seznamu chatů (na konci se dočtou starší).
+    ChatListScrolled(scrollable::Viewport),
     PeersScanned(Vec<Message>),
     /// Jména účastníků z profilů: (chat, jména) a chaty, u kterých to nevyšlo.
     NamesResolved(Vec<(ConversationId, Vec<String>)>, Vec<ConversationId>),
@@ -302,7 +310,7 @@ impl Msg {
         let ok = |r: bool| if r { "ok" } else { "chyba" };
         match self {
             // časté a nezajímavé
-            Msg::Scrolled(_) | Msg::Compose(_) | Msg::Search(_) => {
+            Msg::Scrolled(_) | Msg::ChatListScrolled(_) | Msg::Compose(_) | Msg::Search(_) => {
                 trace!(event = ?std::mem::discriminant(self), "update")
             }
             Msg::Tick => trace!("update: Tick"),
@@ -345,9 +353,17 @@ impl Msg {
                 inner.log()
             }
             Msg::OpenUrl(_) => debug!("update: OpenUrl"),
+            Msg::LoadOlderChats => debug!("update: LoadOlderChats"),
+            Msg::OlderChats(r, pages) => debug!(
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(|p| p.conversations.len()).unwrap_or(0),
+                more = r.as_ref().map(|p| p.older.is_some()).unwrap_or(false),
+                pages,
+                "update: OlderChats"
+            ),
             Msg::Conversations(r, full) => debug!(
                 result = ok(r.is_ok()),
-                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                count = r.as_ref().map(|p| p.conversations.len()).unwrap_or(0),
                 full,
                 "update: Conversations"
             ),
@@ -603,6 +619,14 @@ pub struct App {
     peer_scan_done: bool,
     /// Kdy jsme naposledy načítali celý seznam konverzací.
     last_full_refresh: Option<std::time::Instant>,
+    /// Kurzor na další (starší) stránku seznamu konverzací; `None` = máme celý.
+    chats_older: Option<String>,
+    /// Kolik stránek seznamu konverzací máme načteno (tolik obnoví úplná obnova).
+    chat_pages: usize,
+    /// Právě se dočítají starší stránky seznamu.
+    loading_chats: bool,
+    /// Potřebujeme celý seznam (záložka Týmy, hledání): dočíst všechny stránky.
+    want_all_chats: bool,
     /// Chaty, u kterých jsme už zkoušeli zjistit jména účastníků.
     names_tried: HashSet<ConversationId>,
     /// Konverzace, jejichž nejnovější stránku jsme v tomto běhu už stáhli ze sítě.
@@ -725,6 +749,10 @@ impl App {
             new_below: false,
             peer_scan_done: false,
             last_full_refresh: None,
+            chats_older: None,
+            chat_pages: 1,
+            loading_chats: false,
+            want_all_chats: false,
             names_tried: HashSet::new(),
             fresh: Default::default(),
             error: None,
@@ -996,17 +1024,52 @@ impl App {
         if full {
             self.last_full_refresh = Some(std::time::Instant::now());
         }
+        let pages = if full { self.chat_pages } else { 1 };
         Task::perform(
             async move {
-                if full {
-                    backend.conversations().await
-                } else {
-                    backend.recent_conversations().await
-                }
-                .map_err(Failure::from)
+                backend
+                    .conversation_pages(None, pages)
+                    .await
+                    .map_err(Failure::from)
             },
             move |r| Msg::Conversations(r, full),
         )
+    }
+
+    /// Dočte další starší stránku seznamu konverzací (při `want_all_chats` všechny zbylé).
+    fn load_older_chats(&mut self) -> Task<Msg> {
+        if self.loading_chats {
+            return Task::none();
+        }
+        let (Some(cursor), Some(backend)) = (
+            self.chats_older.clone(),
+            self.session().map(|s| s.backend.clone()),
+        ) else {
+            return Task::none();
+        };
+        self.loading_chats = true;
+        let pages = if self.want_all_chats {
+            tymy_api::chat::MAX_CONVERSATION_PAGES
+                .saturating_sub(self.chat_pages)
+                .max(1)
+        } else {
+            1
+        };
+        Task::perform(
+            async move {
+                backend
+                    .conversation_pages(Some(&cursor), pages)
+                    .await
+                    .map_err(Failure::from)
+            },
+            move |r| Msg::OlderChats(r, pages),
+        )
+    }
+
+    /// Chceme celý seznam konverzací (Týmy, hledání): dočíst, co ještě chybí.
+    fn want_all_chats(&mut self) -> Task<Msg> {
+        self.want_all_chats = true;
+        self.load_older_chats()
     }
 
     /// Je okno vidět a má fokus (uživatel opravdu čte otevřený chat)?
@@ -1976,15 +2039,40 @@ impl App {
                     self.fetch_conversations()
                 }
             }
-            Msg::Conversations(Ok(list), full) => {
+            Msg::Conversations(Ok(page), full) => {
                 self.refreshing = false;
                 let Some(session) = self.session().cloned() else {
                     return Task::none();
                 };
-                // nejnovější stránka: starší konverzace zůstanou z posledního celého seznamu
+                let list = page.conversations;
+                let mut more = None;
                 let list = if full {
-                    list
+                    // Za načtenými stránkami jsou ještě starší: ty, které známe (z cache nebo
+                    // z dřívějška) a jsou starší než všechno načtené, zatím ponecháme.
+                    self.chats_older = page
+                        .older
+                        .filter(|_| self.chat_pages < tymy_api::chat::MAX_CONVERSATION_PAGES);
+                    more = Some(self.chats_older.is_some() && self.want_all_chats);
+                    match list.last().map(|c| c.last_activity) {
+                        Some(oldest) if self.chats_older.is_some() => {
+                            let fresh: HashSet<ConversationId> =
+                                list.iter().map(|c| c.id.clone()).collect();
+                            let beyond = self
+                                .conversations
+                                .iter()
+                                .filter(|c| {
+                                    !fresh.contains(&c.id)
+                                        && !self.is_draft(&c.id)
+                                        && c.last_activity < oldest
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            list.into_iter().chain(beyond).collect()
+                        }
+                        _ => list,
+                    }
                 } else {
+                    // nejnovější stránka: starší konverzace zůstanou z posledního celého seznamu
                     let fresh: HashSet<ConversationId> =
                         list.iter().map(|c| c.id.clone()).collect();
                     let older = self
@@ -2061,7 +2149,83 @@ impl App {
                     self.tab = Tab::Chats;
                     tasks.push(Task::done(Msg::Select(conv)));
                 }
+                if more == Some(true) {
+                    tasks.push(self.load_older_chats());
+                }
                 Task::batch(tasks)
+            }
+            Msg::LoadOlderChats => self.load_older_chats(),
+            Msg::ChatListScrolled(viewport) => {
+                let rel = viewport.relative_offset().y;
+                if rel.is_finite() && rel >= 0.9 {
+                    self.load_older_chats()
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::OlderChats(Ok(page), pages) => {
+                self.loading_chats = false;
+                let Some(session) = self.session().cloned() else {
+                    return Task::none();
+                };
+                self.chat_pages =
+                    (self.chat_pages + pages).min(tymy_api::chat::MAX_CONVERSATION_PAGES);
+                // na limitu stránek už dál nedočítáme
+                self.chats_older = page
+                    .older
+                    .filter(|_| self.chat_pages < tymy_api::chat::MAX_CONVERSATION_PAGES);
+                let older: HashMap<ConversationId, Conversation> = page
+                    .conversations
+                    .into_iter()
+                    .filter(|c| c.kind != ConversationKind::System)
+                    .map(|c| (c.id.clone(), c))
+                    .collect();
+                // Známý chat: novější stav (z obnovy první stránky) má přednost, starší
+                // (z cache) nahradíme tím ze serveru.
+                let mut older = older;
+                for c in &mut self.conversations {
+                    if let Some(o) = older.remove(&c.id)
+                        && o.last_activity >= c.last_activity
+                    {
+                        *c = o;
+                    }
+                }
+                let added = older.len();
+                self.conversations.extend(older.into_values());
+                self.conversations
+                    .sort_by_key(|c| std::cmp::Reverse(c.last_activity));
+                tracing::info!(
+                    added,
+                    total = self.conversations.len(),
+                    more = self.chats_older.is_some(),
+                    "dočteny starší konverzace"
+                );
+                let real: Vec<Conversation> = self
+                    .conversations
+                    .iter()
+                    .filter(|c| !self.is_draft(&c.id))
+                    .cloned()
+                    .collect();
+                if let Some(store) = &session.store
+                    && let Err(e) = store.save_conversations(&session.profile.account_id, &real)
+                {
+                    tracing::warn!(error = %e, "uložení konverzací do cache");
+                }
+                self.peers.learn(
+                    &session.profile,
+                    self.conversations
+                        .iter()
+                        .filter_map(|c| c.last_message.as_ref()),
+                );
+                let mut tasks = vec![self.resolve_names()];
+                if self.want_all_chats {
+                    tasks.push(self.load_older_chats());
+                }
+                Task::batch(tasks)
+            }
+            Msg::OlderChats(Err(e), _) => {
+                self.loading_chats = false;
+                self.fail(e)
             }
             Msg::Conversations(Err(e), full) => {
                 if full {
@@ -2227,6 +2391,12 @@ impl App {
                 self.search = s;
                 self.search_seq += 1;
                 self.people_note = None;
+                // hledat se má ve všech chatech, ne jen v načtených
+                let load = if self.search.trim().is_empty() {
+                    Task::none()
+                } else {
+                    self.want_all_chats()
+                };
                 if self.tab != Tab::Chats {
                     self.people.clear();
                     self.searching_people = false;
@@ -2235,12 +2405,15 @@ impl App {
                     self.people.clear();
                     self.searching_people = false;
                     self.message_hits.clear();
-                    return Task::none();
+                    return load;
                 }
                 let seq = self.search_seq;
-                Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
-                    Msg::SearchFire(seq)
-                })
+                Task::batch([
+                    load,
+                    Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
+                        Msg::SearchFire(seq)
+                    }),
+                ])
             }
             Msg::SearchFire(seq) => {
                 let Some(backend) = self.session().map(|s| s.backend.clone()) else {
@@ -2749,7 +2922,12 @@ impl App {
                 self.people.clear();
                 self.people_note = None;
                 self.search_seq += 1;
-                Task::none()
+                // kanály s dávnou aktivitou jsou až na dalších stránkách seznamu
+                if tab == Tab::Teams {
+                    self.want_all_chats()
+                } else {
+                    Task::none()
+                }
             }
             Msg::Hover(id) => {
                 self.hovered = Some(id);
@@ -3419,6 +3597,7 @@ impl App {
             )
             .direction(style::scrollbar())
             .style(style::thin_scrollbar)
+            .on_scroll(Msg::ChatListScrolled)
             .height(Length::Fill),
         ])
         .width(SIDEBAR_WIDTH)
@@ -3447,6 +3626,9 @@ impl App {
             }
         }
         items.extend(rest.into_iter().map(|c| self.chat_row(session, c, None)));
+        if let Some(more) = self.more_chats_item() {
+            items.push(more);
+        }
 
         if query.chars().count() >= MIN_PEOPLE_QUERY {
             items.push(section_label("LIDÉ"));
@@ -3469,6 +3651,25 @@ impl App {
         }
         items.extend(self.hit_items(query));
         items
+    }
+
+    /// Konec načtené části seznamu: stav dočítání, nebo tlačítko pro další stránku.
+    fn more_chats_item<'a>(&self) -> Option<Element<'a, Msg>> {
+        self.chats_older.as_ref()?;
+        Some(if self.loading_chats {
+            note("Načítám starší chaty…")
+        } else {
+            container(
+                button(text("Načíst starší chaty").size(12).style(muted))
+                    .padding([4, 10])
+                    .style(style::ghost)
+                    .on_press(Msg::LoadOlderChats),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .padding([6, 0])
+            .into()
+        })
     }
 
     /// Sekce „Zprávy“ ve výsledcích hledání (fulltext v cache) a stav indexace.
@@ -3593,6 +3794,9 @@ impl App {
                     .into(),
             );
             items.extend(shown.into_iter().map(|c| self.channel_item(c)));
+        }
+        if let Some(more) = self.more_chats_item() {
+            items.push(more);
         }
         if items.is_empty() {
             items.push(note(if query.is_empty() {

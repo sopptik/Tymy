@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::Duration;
 use tokio::sync::Mutex;
 use tymy_core::{
-    AccountKind, ChatBackend, Conversation, ConversationId, Error, Event, MessagePage, Person,
-    Profile, Result, SentMessage, text,
+    AccountKind, ChatBackend, Conversation, ConversationId, ConversationPage, Error, Event,
+    MessagePage, Person, Profile, Result, SentMessage, text,
 };
 
 use crate::auth::{self, CredentialStore, SkypeSession};
@@ -139,14 +139,22 @@ impl ChatBackend for TeamsBackend {
     }
 
     async fn conversations(&self) -> Result<Vec<Conversation>> {
-        self.call(|s| async move {
-            chat::list_conversations(&self.http, &s, chat::MAX_CONVERSATION_PAGES).await
-        })
-        .await
+        Ok(self
+            .conversation_pages(None, chat::MAX_CONVERSATION_PAGES)
+            .await?
+            .conversations)
     }
 
     async fn recent_conversations(&self) -> Result<Vec<Conversation>> {
-        self.call(|s| async move { chat::list_conversations(&self.http, &s, 1).await })
+        Ok(self.conversation_pages(None, 1).await?.conversations)
+    }
+
+    async fn conversation_pages(
+        &self,
+        cursor: Option<&str>,
+        pages: usize,
+    ) -> Result<ConversationPage> {
+        self.call(|s| async move { chat::list_conversations(&self.http, &s, cursor, pages).await })
             .await
     }
 
