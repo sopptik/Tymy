@@ -15,7 +15,7 @@ Použitelný chat: okno `tymy` a vývojářské CLI `tymy-cli`. Podrobný stav j
 | Fáze | Obsah | Stav |
 |---|---|---|
 | 0 | Přihlášení, seznam chatů, historie, odesílání | ověřeno pro pracovní účet |
-| 1a | Chat: cache, formátování, odpovědi, reakce, úpravy, hledání, více účtů, skupinové chaty | hotovo, část čeká na test |
+| 1a | Chat: cache, formátování, odpovědi, reakce, úpravy, hledání, více účtů, skupinové chaty | hotovo |
 | 1b | Real-time (trouter), soubory, osobní účty | čeká na odchyt provozu; přihlášení v prohlížeči, hlášení přečtení a jména hotové |
 | 1c | Balíček `.deb`, spouštění po přihlášení | hotovo |
 | 2 | Hovory a videohovory (výzkum) | — |

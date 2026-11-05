@@ -78,11 +78,11 @@ Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `mess
 |---|---|---|
 | Historie po 200 | `pageSize=200` funguje (víc server odmítne); i v `backwardLink` | ✅ |
 | Seznam konverzací po stránkách | `_metadata: {backwardLink, forwardLink, syncState, totalCount}`; `backwardLink` míří na `/v1/users/8:orgid:<oid>/conversations?…&syncState=…` a vede na starší konverzace, poslední stránka ho nemá (ověřeno po 10: 4 stránky = všech 39) | ✅ |
-| Reakce přidat | `PUT …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like","value":<ms>}}` | ❓ neověřeno |
-| Reakce odebrat | `DELETE …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like"}}` | ❓ neověřeno |
-| Úprava | `PUT …/messages/{id}`, tělo `{id, type:"Message", conversationid, content, messagetype, contenttype, imdisplayname}` | ❓ neověřeno |
-| Smazání | `DELETE …/messages/{id}?behavior=softDelete` | ❓ neověřeno |
-| Přečteno | `PUT …/conversations/{id}/properties?name=consumptionhorizon`, tělo `{"consumptionhorizon":"<id zprávy>;<čas ms>;<clientmessageid>"}` (formát jako v seznamu konverzací) | ❓ neověřeno |
+| Reakce přidat | `PUT …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like","value":<ms>}}` | ✅ (uživatel 2026-11-05) |
+| Reakce odebrat | `DELETE …/messages/{id}/properties?name=emotions`, tělo `{"emotions":{"key":"like"}}` | ✅ (uživatel 2026-11-05) |
+| Úprava | `PUT …/messages/{id}`, tělo `{id, type:"Message", conversationid, content, messagetype, contenttype, imdisplayname}` | ✅ (uživatel 2026-11-05) |
+| Smazání | `DELETE …/messages/{id}?behavior=softDelete` | ✅ (uživatel 2026-11-05) |
+| Přečteno | `PUT …/conversations/{id}/properties?name=consumptionhorizon`, tělo `{"consumptionhorizon":"<id zprávy>;<čas ms>;<clientmessageid>"}` (formát jako v seznamu konverzací) | ✅ (uživatel 2026-11-05) |
 
 Přečtení Tymy hlásí jen pro otevřený chat, když má okno fokus a není skryté; jednou pro
 každou novou zprávu (i po chybě až s další zprávou).
@@ -158,7 +158,7 @@ přímo v HTML obsahu zprávy:
   | `imgpsh_fullsize_anim` | originál, u GIFů s animací; používáme po kliknutí ✅ |
   | `original` | `400 Bad Request` ❌ |
 
-- Nahrání obrázku (odeslání ze schránky) ❓ neověřeno, převzato z protokolu Skype:
+- Nahrání obrázku (odeslání ze schránky) ✅ (uživatel 2026-11-05), převzato z protokolu Skype:
   1. `POST https://eu-api.asm.skype.com/v1/objects` s `Authorization: skype_token …`,
      tělo `{"type": "pish/image", "permissions": {"<id chatu>": ["read"]}, "filename": "…"}` → `{"id": "0-weu-…"}`,
   2. `PUT …/v1/objects/<id>/content/imgpsh` (`application/octet-stream`, data obrázku),
@@ -204,9 +204,9 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - Dokud chat neexistuje, `GET …/conversations/<id>/messages` vrací `404` se `subCode: LocationLookupFailed` ✅.
 - Založení: zkusíme odeslat zprávu na odvozené id; při 404 `POST /v1/threads`
   `{members: [{id, role: "Admin"}…], properties: {threadType: "chat", fixedRoster: "true", uniquerosterthread: "true"}}`,
-  id z hlavičky `Location` ❓ (neověřeno).
+  id z hlavičky `Location` ✅ (uživatel 2026-11-05).
 - Skupinový chat: stejné `POST /v1/threads` se všemi členy, `fixedRoster: "false"`,
-  `uniquerosterthread: "false"` a volitelně `topic` v `properties` ❓ (neověřeno). Tymy ho
+  `uniquerosterthread: "false"` a volitelně `topic` v `properties` ✅ (uživatel 2026-11-05). Tymy ho
   zakládá až s první zprávou, do té doby je jen v okně (dočasné id `draft:group:<n>`).
 - Členové chatu: `GET /v1/threads/{id}?view=msnp24Equivalent` → `{id, members: [{id: "8:orgid:…",
   role, …}], properties, …}` ✅ (2026-11-04, skupinový chat, 12 členů).
@@ -235,7 +235,7 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - [ ] Zjistit skutečné hodnoty pro osobní účty (autorita, client id, scope, authz, chat host)
 - [x] Ověřit long-poll: nefunguje (410 Gone)
 - [ ] Implementovat trouter (WebSocket) pro okamžité doručování
-- [x] Hlásit přečtení serveru (consumption horizon); neověřeno proti produkci
+- [x] Hlásit přečtení serveru (consumption horizon); ✅ (uživatel 2026-11-05)
 - [x] Jména účastníků chatů bez nutnosti číst historii (profily z middle tier, 2026-11-04)
 - [x] Authorization code + PKCE pro organizace s blokovaným device code (2026-11-04)
 - [x] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty (2026-11-04)

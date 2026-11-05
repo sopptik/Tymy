@@ -42,6 +42,8 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   automaticky do schránky.
 - **Obrázky ze schránky (2026-11-04):** vkládat obrázky ze schránky; vložený obrázek musí
   jít odebrat.
+- **Souhrnný test (2026-11-05):** „bod 1 se zatím zdá že funguje vše jak má“ (reakce, úpravy,
+  mazání, odpovědi, obrázky, nové chaty, hlášení přečtení, citace, účty, autostart, `.deb`).
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová
@@ -85,28 +87,28 @@ podmínek služby Microsoftu.
 | Logování debug/production (soubor, rotace) | ✅ |
 | Hledání lidí v adresáři | ✅ |
 | Hledání lidí mimo organizaci | ❌ endpoint vrací 400, potřeba HAR |
-| Nový 1:1 chat z hledání | 🟡 prázdné vlákno ✅, založení první zprávou neověřeno |
-| Nový skupinový chat | 🟡 výběr lidí ✅ (snímek), založení první zprávou neověřeno |
+| Nový 1:1 chat z hledání | ✅ ověřeno uživatelem 2026-11-05 |
+| Nový skupinový chat | ✅ ověřeno uživatelem 2026-11-05 |
 | Záložky Chaty/Týmy, kanály po týmech, odznaky nepřečtených | ✅ |
 | Ruční pořadí chatů (připnutí, ▲▼) | ✅ lokálně |
 | Víceřádkové psaní (Shift+Enter) | ✅ |
 | Desktopové notifikace, ikona v liště, zavření = skrytí | ✅ |
 | Vzhled světlý/tmavý/podle systému, nový design | ✅ |
 | Kopírování zprávy, výběr textu s automatickým kopírováním | ✅ |
-| Vkládání obrázků ze schránky | 🟡 UI ✅, nahrání do AMS neověřeno proti produkci |
+| Vkládání obrázků ze schránky | ✅ ověřeno uživatelem 2026-11-05 |
 | Formátované zprávy (odkazy, kód, seznamy, tabulky, citace, zmínky) | ✅ ověřeno na reálných zprávách |
-| Odpověď na zprávu | 🟡 zobrazení ✅, odeslání neověřeno proti produkci |
-| Reakce, úprava a mazání vlastních zpráv | 🟡 UI ✅, volání neověřena proti produkci |
+| Odpověď na zprávu | ✅ ověřeno uživatelem 2026-11-05 |
+| Reakce, úprava a mazání vlastních zpráv | ✅ ověřeno uživatelem 2026-11-05 |
 | Hledání ve zprávách + indexace historie na pozadí | ✅ |
-| Přepínání účtů, přidání a odhlášení účtu | ✅ ověřeno se dvěma pracovními účty (odhlášení neověřeno) |
+| Přepínání účtů, přidání a odhlášení účtu | ✅ ověřeno se dvěma pracovními účty (ověřeno uživatelem 2026-11-05) |
 | Nepřečtené v neaktivních účtech (menu, odznak u jména, lišta) | ✅ |
 | Seznam konverzací po stránkách (>200 chatů) | ✅ líně: při startu jen první stránka (200); starší po dorolování na konec, celý seznam při otevření Týmů nebo hledání; po 5 min obnova načtených stránek, jinak nejnovější stránka (ladění: `TYMY_CONVERSATION_PAGE_SIZE`) |
-| Notifikace z neaktivních účtů (klik přepne účet) | 🟡 hotovo, zatím nevyzkoušeno |
+| Notifikace z neaktivních účtů (klik přepne účet) | ✅ ověřeno uživatelem 2026-11-05 |
 | Přihlášení v prohlížeči (PKCE, `http://localhost`) | ✅ ověřeno (druhý pracovní účet) |
 | Opuštěné týmy a kanály bez přístupu (403) | ✅ skryté |
 | Balíček `.deb`, instalace na čistém Ubuntu 24.04 | ✅ (Docker + Xvfb) |
-| Hlášení přečtení serveru | 🟡 hotovo, neověřeno proti produkci |
-| Skok z citace odpovědi na původní zprávu | 🟡 hotovo, klik zatím neověřen na snímku |
+| Hlášení přečtení serveru | ✅ ověřeno uživatelem 2026-11-05 |
+| Skok z citace odpovědi na původní zprávu | ✅ ověřeno uživatelem 2026-11-05 |
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
@@ -123,14 +125,14 @@ podmínek služby Microsoftu.
    nepřečtených; zavření okna = skrytí.
 5. **Lepší zobrazení zpráv:** ✅ obrázky, ✅ reakce, ✅ emoji jako text, ✅ klikatelné odkazy (i holé
    adresy), ✅ tučně/kurzíva/podtržení/přeškrtnutí, ✅ zmínky, ✅ kód v řádku i bloky kódu,
-   ✅ seznamy, nadpisy, tabulky, ✅ citace, přeposlané zprávy a odpovědi, 🟡 odpovídání na zprávy
-   (tlačítko ↩, Esc zruší; odeslání neověřeno proti produkci), 🟡 posílání reakcí (☺ u zprávy,
-   klik na reakci pod zprávou ji přidá/odebere; neověřeno proti produkci), ✅ klik na citaci
+   ✅ seznamy, nadpisy, tabulky, ✅ citace, přeposlané zprávy a odpovědi, ✅ odpovídání na zprávy
+   (tlačítko ↩, Esc zruší), ✅ posílání reakcí (☺ u zprávy, klik na reakci pod zprávou ji
+   přidá/odebere), ✅ klik na citaci
    odpovědi skočí na původní zprávu (z cache; když tam není, ukáže oznámení).
-6. 🟡 **Úpravy a mazání vlastních zpráv:** ✎ (nebo ↑ v prázdném poli) načte text do psacího pole,
+6. ✅ **Úpravy a mazání vlastních zpráv:** ✎ (nebo ↑ v prázdném poli) načte text do psacího pole,
    Enter uloží, Esc zruší; citace odpovědi a obrázky zůstanou, ostatní formátování se nahradí
    textem. 🗑 se potvrzuje. Změna se projeví hned, při chybě se vrátí stav ze serveru.
-   Neověřeno proti produkci.
+   Ověřeno uživatelem 2026-11-05.
 7. ✅ **Přepínání účtů** v okně: klik na profil v hlavičce panelu otevře menu účtů (přepnutí,
    „Přidat účet“ se Zpět, odhlášení s potvrzením, které smaže token i cache účtu). Aktivní je
    vždy jeden účet; naposledy použitý se pamatuje (`settings.toml` → `account`). Při přepnutí se
@@ -144,17 +146,17 @@ podmínek služby Microsoftu.
    klik otevře zprávu v kontextu a zvýrazní ji. Indexace historie na pozadí: po startu postupně
    stáhne historii všech konverzací (stránky po 200, 1,5 s pauza, max. rok / 5000 zpráv na
    konverzaci) a navazuje, kde skončila. „Načíst starší“ bere nejdřív z cache.
-9. 🟡 **Nový skupinový chat** (priorita uživatele 2): tlačítko ＋ vedle hledání v záložce Chaty,
+9. ✅ **Nový skupinový chat** (priorita uživatele 2): tlačítko ＋ vedle hledání v záložce Chaty,
    výběr lidí z adresáře (aspoň dva), nepovinný název. Chat je nejdřív jen v okně a na serveru
-   vznikne první zprávou (`POST /v1/threads` s `topic`). Neověřeno proti produkci.
+   vznikne první zprávou (`POST /v1/threads` s `topic`). Ověřeno uživatelem 2026-11-05.
 
 ### Fáze 1b: potřebuje odchyt provozu (HAR z web klienta)
 1. **Trouter (WebSocket):** okamžité doručování zpráv, „píše…“, přítomnost. Nahradí 5s obnovu.
    ⏸ **Odloženo na později** (rozhodnutí uživatele 2026-11-04); potřeba HAR záznam z web klienta
    včetně WebSocket rámců (postup v `docs/protocol/README.md`). Nejpozději před fází 2
    (příchozí hovory chodí přes trouter).
-2. 🟡 **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
-   Hotovo (2026-11-04), neověřeno proti produkci: otevřený chat se nahlásí jako přečtený, když
+2. ✅ **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
+   Hotovo (2026-11-04), ověřeno uživatelem 2026-11-05: otevřený chat se nahlásí jako přečtený, když
    má okno fokus a není skryté (při návratu do okna hned). Přečtení se teď i lokálně počítá
    jen při viditelném okně (dřív se otevřený chat označil jako přečtený i ve skrytém okně).
    Priorita uživatele (2026-11-04): 1. hlášení přečtení, 2. založení skupinového chatu,
@@ -213,9 +215,10 @@ podmínek služby Microsoftu.
 Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu
 (hlášení přečtení, jména účastníků, přihlášení v prohlížeči, stránkování seznamu).
 2026-11-05 navíc: líné načítání starších chatů, vynechání smazaných týmů (`isdeleted`).
-1. **Souhrnný test uživatelem** (domluveno): reakce, úpravy a mazání, odpovědi, obrázky,
-   nový 1:1 a skupinový chat, hlášení přečtení (shoduje se s mobilem/webem?), skok z citace,
-   odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení, instalace `.deb`.
+1. ✅ **Souhrnný test uživatelem** (2026-11-05: „zatím se zdá, že funguje vše, jak má“):
+   reakce, úpravy a mazání, odpovědi, obrázky, nový 1:1 a skupinový chat, hlášení přečtení,
+   skok z citace, odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení,
+   instalace `.deb`.
 2. **Společný odchyt provozu (HAR)** z web klienta, v tomto pořadí důležitosti:
    trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
    případně osobní účet (teams.live.com) a kalendář.
@@ -231,7 +234,7 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 12. ✅ **Design:** vlastní paleta, avatary, přepínač vzhledu (`settings.toml` → `theme`).
 13. ✅ **Kopírování:** ⧉ celá zpráva, ⌶/dvojklik režim výběru, automatické kopírování výběru
     (schránka i primární výběr X11).
-14. 🟡 **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace; odeslání přes AMS — ověřit.
+14. ✅ **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace; odeslání přes AMS (ověřeno uživatelem 2026-11-05).
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).
