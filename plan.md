@@ -47,8 +47,9 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   (celá obrazovka, Full HD). Řešení: šířka bubliny podle místa ve vlákně (320–1100 px místo
   pevných 560), sloupce tabulek podle obsahu.
 - **Tmavý vzhled (2026-11-05):** „u tmavého vzhledu by měla být moje konverzace taky tmavší“
-  → vlastní bubliny v tmavém vzhledu tlumeně tmavě tyrkysové (`#1A4750`) se světlým textem,
-  odkazy světle tyrkysové; světlý vzhled beze změny.
+  → vlastní bubliny v tmavém vzhledu tlumeně tmavě tyrkysové se světlým textem,
+  odkazy světle tyrkysové; světlý vzhled beze změny. Následně „ještě bych trochu ztmavil“
+  → `#14373E`.
 - **Hlavička web klienta (2026-11-05):** „zkus to poslat s hlavičkou webových teams a uvidíme
   jestli je to tím“ → media služba přijme obrázek jen s `x-ms-client-version` web klienta.
 - **Souhrnný test (2026-11-05):** „bod 1 se zatím zdá že funguje vše jak má“ (reakce, úpravy,
