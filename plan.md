@@ -237,7 +237,10 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
     (schránka i primární výběr X11).
 14. ❌ **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace ✅; odeslání: media služba odmítá
     zápis s `400 "The platform id could not be created from the … User-Agent header"` pro
-    `tymy/…` i pro hlavičku Chrome. Co posílá web klient, zjistí HAR (scénář „obrázek“).
+    `tymy/…` i pro hlavičku Chrome. HAR (2026-11-05): web klient nahrává přes
+    `eu-prod.asyncgw.teams.microsoft.com` se `sharingMode: Inline` a `amsreferences` ve zprávě
+    (Tymy už to dělají), navíc posílá `x-ms-client-version: 1415/…`. Ani brána nepomohla;
+    zbývá hlavička verze klienta = vydávat se za web klienta Teams → **rozhodne uživatel**.
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).

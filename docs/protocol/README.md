@@ -158,17 +158,28 @@ přímo v HTML obsahu zprávy:
   | `imgpsh_fullsize_anim` | originál, u GIFů s animací; používáme po kliknutí ✅ |
   | `original` | `400 Bad Request` ❌ |
 
-- Nahrání obrázku (odeslání ze schránky), převzato z protokolu Skype: ❌ `POST /v1/objects`
-  vrací `400 {"title":"The 'User-Agent' header is missing or invalid.", "detail":"The platform
-  id could not be created from the '…' value of 'User-Agent' header."}` pro `tymy/0.1.0 (Linux)`
-  i pro User-Agent Chrome na Linuxu (2026-11-05). Potřeba HAR: jaký host, hlavičky a User-Agent
-  posílá web klient (možná jiná brána než `*-api.asm.skype.com`). Ladění:
-  `TYMY_AMS_USER_AGENT=… tymy-cli upload <chat> <soubor>` (nahraje, zprávu neodešle):
-  1. `POST https://eu-api.asm.skype.com/v1/objects` s `Authorization: skype_token …`,
-     tělo `{"type": "pish/image", "permissions": {"<id chatu>": ["read"]}, "filename": "…"}` → `{"id": "0-weu-…"}`,
-  2. `PUT …/v1/objects/<id>/content/imgpsh` (`application/octet-stream`, data obrázku),
-  3. zpráva s `<img … itemtype="http://schema.skype.com/AMSImage" src="…/views/imgo" itemid="<id>">`.
-  Host podle regionu chat služby: `emea` → `eu-api` (ověřeno čtením), ostatní regiony hypotéza.
+- Nahrání obrázku (odeslání ze schránky) podle HAR web klienta (2026-11-05):
+  1. `POST https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/` (brána `asyncgw`, ne
+     `eu-api.asm.skype.com`), hlavičky `x-ams-post-sharing-mode: Inline`,
+     `x-ms-client-version: 1415/<verze>`, přihlášení v HAR chybí (export „sanitized“ odstranil
+     `Authorization`), tělo `{"type": "pish/image", "permissions": {"<id chatu>": ["read"]},
+     "sharingMode": "Inline", "filename": "…"}` → `201 {"id": "0-frca-d5-…"}`, `Location`;
+  2. `PUT …/v1/objects/{id}/content/imgpsh`, `application/octet-stream` → `201`;
+  3. zpráva `RichText/Html` s `<img src="https://eu-api.asm.skype.com/v1/objects/{id}/views/imgo"
+     itemtype="http://schema.skype.com/AMSImage" itemscope="png" width height id itemid …>`
+     (adresa na starém hostu) a v těle `"amsreferences": ["{id}"]`, v `properties` `blurHash`;
+  4. web klient pak čte náhled z `…asyncgw…/v1/{oid uživatele}/objects/{id}/views/imgo?v=1`.
+  Tymy (`skype_token`, bez `x-ms-client-version`): ❌ `400 {"title":"The 'User-Agent' header is
+  missing or invalid.", "detail":"The platform id could not be created from the '…' value of
+  'User-Agent' header."}` na obou hostech, s `User-Agent` Tymy i Chrome. Hypotéza: platforma
+  se bere z `x-ms-client-version` (`1415` = web klient Teams); zkouška čeká na rozhodnutí
+  uživatele (šlo by o vydávání se za oficiálního klienta). Ladění:
+  `TYMY_AMS_USER_AGENT=… tymy-cli upload <chat> <soubor>` (nahraje, zprávu neodešle).
+- „Píše…“ (odchozí): web klient posílá `POST …/messages` s `{"content": "", "contenttype":
+  "Application/Message", "messagetype": "Control/Typing"}` → `201` ✅ (HAR 2026-11-05).
+- Hlavičky web klienta k chat službě: `clientinfo: os=linux; …; clientName=skypeteams;
+  clientVer=1415/…`, `behavioroverride: redirectAs404`, `x-ms-migration: True`; chat služba
+  běží i přes proxy `https://teams.cloud.microsoft/api/chatsvc/emea/v1/…`.
 - Metadata objektu: `GET /v1/objects/{id}` vrací JSON, např. `{"type": "pish/image",
   "filename": "MicrosoftTeams-image.png", …}` ✅.
 - Ladění: `tymy-cli media <url> -o soubor`.
