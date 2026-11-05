@@ -65,16 +65,26 @@ pub async fn list_conversations(
     };
     let mut convs: Vec<Conversation> = vec![];
     let mut seen = std::collections::HashSet::new();
+    let mut deleted = std::collections::HashSet::new();
     let mut older = None;
     for page in 1..=max_pages.max(1) {
         let resp = authed(rb, session).send_logged().await.map_err(net_err)?;
         let r: wire::ConversationsResponse = json(check(resp).await?).await?;
         let empty = r.conversations.is_empty();
+        // kanály smazaného týmu příznak smazání nemají, jen odkaz na tým (`spaceId`)
+        deleted.extend(
+            r.conversations
+                .iter()
+                .filter(|c| c.deleted())
+                .map(|c| c.id.clone()),
+        );
         convs.extend(
             r.conversations
                 .into_iter()
-                // opuštěné týmy: oficiální klient je nezobrazuje, server k nim odpírá přístup
-                .filter(|c| !c.left_team())
+                // Opuštěné týmy a smazaná vlákna: oficiální klient je nezobrazuje, server
+                // k nim odpírá přístup (403) nebo je už nemá (404).
+                .filter(|c| !c.left_team() && !c.deleted())
+                .filter(|c| c.team_id().is_none_or(|t| !deleted.contains(t)))
                 .map(|c| c.into_domain())
                 .filter(|c| seen.insert(c.id.clone())),
         );
@@ -633,6 +643,29 @@ mod tests {
         .unwrap();
         let ids: Vec<_> = m.iter().map(|u| u.as_str()).collect();
         assert_eq!(ids, ["8:orgid:a", "8:orgid:b"], "boti se vynechají");
+    }
+
+    #[tokio::test]
+    async fn skips_deleted_teams_and_their_channels() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/ME/conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "conversations": [
+                    {"id": "19:gone@thread.tacv2", "threadProperties": {"threadType": "space", "isdeleted": true}},
+                    {"id": "19:ch@thread.tacv2", "threadProperties": {"threadType": "topic", "spaceId": "19:gone@thread.tacv2"}},
+                    {"id": "19:team@thread.tacv2", "threadProperties": {"threadType": "space"}},
+                    {"id": "19:ok@thread.tacv2", "threadProperties": {"threadType": "topic", "spaceId": "19:team@thread.tacv2"}}
+                ],
+                "_metadata": {"backwardLink": null}
+            })))
+            .mount(&server)
+            .await;
+        let (http, s) = (Http::new().unwrap(), session(&server.uri()));
+        let page = list_conversations(&http, &s, None, 1).await.unwrap();
+        let mut ids: Vec<_> = page.conversations.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["19:ok@thread.tacv2", "19:team@thread.tacv2"]);
     }
 
     #[tokio::test]
