@@ -62,6 +62,18 @@ pub(crate) struct ThreadProperties {
     pub last_join_at: Option<Value>,
     #[serde(default, rename = "lastleaveat")]
     pub last_leave_at: Option<Value>,
+    /// Smazané vlákno (zrušený tým, kanál): `true` (i jako text), s `deleteTime`.
+    #[serde(default, rename = "isdeleted")]
+    pub is_deleted: Option<Value>,
+}
+
+/// Logická hodnota z JSON (bool nebo text `"True"` / `"true"`).
+fn flag(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
 }
 
 /// Čas v ms z JSON hodnoty (text nebo číslo).
@@ -115,6 +127,21 @@ pub(crate) struct EventMessage {
 }
 
 impl WireConversation {
+    /// Smazané vlákno: seznam konverzací ho dál vrací, ale historie odpoví
+    /// 404 `ThreadNotFound` („hard-deleted“); oficiální klient ho nezobrazuje.
+    pub fn deleted(&self) -> bool {
+        flag(
+            self.thread_properties
+                .as_ref()
+                .and_then(|p| p.is_deleted.as_ref()),
+        )
+    }
+
+    /// Id kořenového vlákna týmu, do kterého kanál patří.
+    pub fn team_id(&self) -> Option<&str> {
+        self.thread_properties.as_ref()?.space_id.as_deref()
+    }
+
     /// Kanál nebo tým, který uživatel opustil (odchod je pozdější než poslední připojení).
     /// Seznam konverzací je dál vrací, oficiální klient je ale nezobrazuje (týmy bere
     /// z jiné služby) a server k nim často odepře přístup (403).
@@ -476,6 +503,20 @@ mod tests {
         );
         assert_eq!(c[1].topic.as_deref(), Some("Bootiq-crew"));
         assert!(c[2].team.is_none());
+    }
+
+    #[test]
+    fn deleted_threads_are_recognized() {
+        let raw = serde_json::json!({"conversations": [
+            {"id": "19:a@thread.tacv2", "threadProperties": {"threadType": "space", "isdeleted": true, "deleteTime": "2024-10-04T08:29:08.945Z"}},
+            {"id": "19:b@thread.tacv2", "threadProperties": {"threadType": "space", "isdeleted": "True"}},
+            {"id": "19:c@thread.tacv2", "threadProperties": {"threadType": "space", "isdeleted": false}},
+            {"id": "19:d@thread.v2", "threadProperties": {"threadType": "chat", "hidden": "false"}},
+            {"id": "8:orgid:e"}
+        ]});
+        let r: ConversationsResponse = serde_json::from_value(raw).unwrap();
+        let deleted: Vec<bool> = r.conversations.iter().map(|c| c.deleted()).collect();
+        assert_eq!(deleted, [true, true, false, false, false]);
     }
 
     #[test]

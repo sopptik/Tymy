@@ -192,6 +192,10 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
   a zprávy často končí `403` s `{"errorCode":209, "subCode":"AclCheckFailed", "details":
   "The initiator … is not a member of the roster …"}`. Tymy je ze seznamu vynechává
   (skupinové chaty ne); na `403` u jiných konverzací je skryje za běhu.
+- `isdeleted: true` (bool) a `deleteTime` ✅ (2026-11-05): smazaný (zrušený) tým. Seznam
+  konverzací ho vrací dál, historie odpoví `404` `{"subCode":"ThreadNotFound", "details":
+  "Thread was not found as it is hard-deleted."}`. Tymy ho vynechává, i s kanály, jejichž
+  `spaceId` míří na smazaný tým (samy příznak nemají).
 
 ## 8. Nový 1:1 chat
 
