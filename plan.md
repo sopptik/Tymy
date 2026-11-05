@@ -54,6 +54,7 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   jestli je to tím“ → media služba přijme obrázek jen s `x-ms-client-version` web klienta.
 - **Souhrnný test (2026-11-05):** „bod 1 se zatím zdá že funguje vše jak má“ (reakce, úpravy,
   mazání, odpovědi, obrázky, nové chaty, hlášení přečtení, citace, účty, autostart, `.deb`).
+- **Obrázek ze schránky (2026-11-05):** „obrázek ze schránky už jde odeslat“ → bod 14 ✅.
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová
@@ -105,7 +106,7 @@ podmínek služby Microsoftu.
 | Desktopové notifikace, ikona v liště, zavření = skrytí | ✅ |
 | Vzhled světlý/tmavý/podle systému, nový design | ✅ |
 | Kopírování zprávy, výběr textu s automatickým kopírováním | ✅ |
-| Vkládání obrázků ze schránky | 🟡 nahrání ✅ (s `x-ms-client-version` web klienta), odeslání z okna čeká na test |
+| Vkládání a odesílání obrázků ze schránky | ✅ (s `x-ms-client-version` web klienta) |
 | Formátované zprávy (odkazy, kód, seznamy, tabulky, citace, zmínky) | ✅ ověřeno na reálných zprávách |
 | Odpověď na zprávu | ✅ ověřeno uživatelem 2026-11-05 |
 | Reakce, úprava a mazání vlastních zpráv | ✅ ověřeno uživatelem 2026-11-05 |
@@ -228,10 +229,10 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 1. ✅ **Souhrnný test uživatelem** (2026-11-05: „zatím se zdá, že funguje vše, jak má“):
    reakce, úpravy a mazání, odpovědi, nový 1:1 a skupinový chat, hlášení přečtení,
    skok z citace, odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení,
-   instalace `.deb`. **Výjimka:** obrázek ze schránky (opraveno podle HAR, čeká na test, bod 14).
+   instalace `.deb`. Obrázek ze schránky po opravě podle HAR ověřen zvlášť (bod 14).
 2. **Společný odchyt provozu (HAR)** z web klienta (Chrome; postup a scénáře
    v `docs/protocol/README.md`, očištění `tools/har-redact.py`), v tomto pořadí důležitosti:
-   trouter (WebSocket rámce), odeslání obrázku a souboru, hledání lidí mimo organizaci,
+   trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
    případně osobní účet (teams.live.com) a kalendář.
 3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů),
    pak **soubory**.
@@ -245,11 +246,11 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 12. ✅ **Design:** vlastní paleta, avatary, přepínač vzhledu (`settings.toml` → `theme`).
 13. ✅ **Kopírování:** ⧉ celá zpráva, ⌶/dvojklik režim výběru, automatické kopírování výběru
     (schránka i primární výběr X11).
-14. 🟡 **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace ✅; odeslání: podle HAR
+14. ✅ **Obrázky ze schránky:** Ctrl+V, náhledy s ✕, Backspace ✅; odeslání: podle HAR
     (2026-11-05) přes `eu-prod.asyncgw.teams.microsoft.com`, `sharingMode: Inline`,
     `amsreferences` ve zprávě a hlavička `x-ms-client-version: 1415/…` (verze web klienta;
-    uživatel souhlasil 2026-11-05). Nahrání ✅ ověřeno (`tymy-cli upload`), odeslání zprávy
-    s obrázkem z okna čeká na test uživatelem.
+    uživatel souhlasil 2026-11-05). Nahrání ✅ (`tymy-cli upload`), odeslání z okna ✅
+    ověřeno uživatelem (2026-11-05).
 
 ## 6. Ověřování
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (CI).

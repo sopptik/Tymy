@@ -175,6 +175,7 @@ přímo v HTML obsahu zprávy:
   S `x-ms-client-version: 1415/26101515216` (verze web klienta, souhlas uživatele 2026-11-05)
   a vlastním `User-Agent` ✅ `201`. Verze je v `endpoints.toml` → `media_client_version`.
   Ladění: `tymy-cli upload <chat> <soubor>` (nahraje, zprávu neodešle).
+  Odeslání zprávy s obrázkem z okna ✅ ověřeno uživatelem (pracovní účet, 2026-11-05).
 - „Píše…“ (odchozí): web klient posílá `POST …/messages` s `{"content": "", "contenttype":
   "Application/Message", "messagetype": "Control/Typing"}` → `201` ✅ (HAR 2026-11-05).
 - Hlavičky web klienta k chat službě: `clientinfo: os=linux; …; clientName=skypeteams;
@@ -244,7 +245,7 @@ WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a
    - **trouter:** nechat Teams 1–2 min v klidu; z jiného zařízení (mobil, Tymy s druhým
      účtem) poslat do chatu zprávu, začít psát („píše…“), přidat reakci; změnit vlastní stav
      (dostupný → nerušit → dostupný);
-   - **obrázek:** do chatu vložit obrázek ze schránky (Ctrl+V) a odeslat;
+   - **obrázek:** do chatu vložit obrázek ze schránky (Ctrl+V) a odeslat (✅ zachyceno 2026-11-05, není třeba opakovat);
    - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
    - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
      organizace a otevřít s ním chat (nic neposílat);
@@ -286,4 +287,5 @@ Ladicí výstup Tymy: `tymy-cli -vv chats` vypíše těla odpovědí se zredigov
 - [x] Stránkování seznamu konverzací (`_metadata.backwardLink`) pro účty s >200 chaty (2026-11-04)
 - [x] Líné načítání starších stránek seznamu (kurzor `backwardLink` z předchozí části) (2026-11-05)
 - [x] Zobrazení vložených obrázků (AMS náhled + originál)
-- [ ] Odesílání obrázků a souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS
+- [x] Odesílání obrázků ze schránky (AMS přes `asyncgw`, `amsreferences`) (2026-11-05)
+- [ ] Odesílání souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`; personal = AMS
