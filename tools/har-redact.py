@@ -38,7 +38,9 @@ SECRET_KEYS = re.compile(
 JWT = re.compile(r"eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]*")
 SKYPETOKEN = re.compile(r"(skypetoken=|skype_token |Bearer |\"skypeToken\"\s*:\s*\")[^\s\"';&]+", re.I)
 LONG_SECRET = re.compile(r"\b(?:0\.A[\w-]{40,}|M\.C\d+_[\w!*$.-]{40,}|1\.A[\w-]{40,})")
-EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
+EMAIL = re.compile(r"(?<![\w:%-])[\w.%+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
+# Id konverzací vypadají jako e-mail (`19:…@thread.v2`, `…@unq.gbl.spaces`): nechat.
+NOT_EMAIL = re.compile(r"@(thread\.|unq\.gbl\.spaces|p2p\.|meeting)", re.I)
 # Osobní obsah (texty zpráv, jména, názvy chatů): k analýze protokolu stačí délka.
 TEXT_KEYS = re.compile(
     r"^(content|imdisplayname|displayName|givenName|surname|topic|threadtopic|"
@@ -72,7 +74,7 @@ def scrub_text(s: str) -> str:
     s = JWT.sub(lambda m: jwt_claims(m.group(0)), s)
     s = SKYPETOKEN.sub(lambda m: m.group(1) + REDACTED, s)
     s = LONG_SECRET.sub(REDACTED, s)
-    return EMAIL.sub("<e-mail>", s)
+    return EMAIL.sub(lambda m: m.group(0) if NOT_EMAIL.search(m.group(0)) else "<e-mail>", s)
 
 
 def scrub_value(k, x):
@@ -161,7 +163,9 @@ def scrub_entry(e):
     ]
     post = req.get("postData")
     if post:
-        if "text" in post:
+        if "text" in post and BINARY_MIME.search(post.get("mimeType", "")):
+            post["text"] = f"<{len(post['text'])} znaků vynecháno>"
+        elif "text" in post:
             post["text"] = scrub_body(post["text"], post.get("mimeType", ""))
         post["params"] = [
             {**p, "value": REDACTED if SECRET_KEYS.match(p.get("name", "")) else scrub_text(p.get("value", ""))}
@@ -229,6 +233,18 @@ def summary(har, out=sys.stdout):
     for (method, host, path), n in sorted(calls.items(), key=lambda kv: (kv[0][1], kv[0][2])):
         st = ",".join(f"{s}" + (f"×{c}" if c > 1 else "") for s, c in sorted(statuses[(method, host, path)].items()))
         print(f"  {n:4} {method:6} {host}{path}  [{st}]", file=out)
+    browser_auth = {
+        h["name"].lower()
+        for e in entries
+        for h in e.get("request", {}).get("headers", [])
+        if h.get("name", "").lower() in ("authorization", "cookie")
+    }
+    if not browser_auth:
+        print(
+            "\n⚠ Záznam neobsahuje hlavičky Authorization/Cookie: Chrome ho uložil jako"
+            " „sanitized“. Pro přihlašovací údaje exportujte „with sensitive data“.",
+            file=out,
+        )
     print(f"\nWebSockety: {len(sockets)}", file=out)
     for e in sockets:
         u = urlsplit(e["request"]["url"])
@@ -238,7 +254,7 @@ def summary(har, out=sys.stdout):
         prefixes = collections.Counter(re.sub(r"\d+", "#", (f.get("data") or "")[:12]) for f in frames)
         for p, n in prefixes.most_common(8):
             print(f"      {n:4}× začátek {p!r}", file=out)
-    if not any(e.get("_webSocketMessages") for e in sockets):
+    if sockets and not any(e.get("_webSocketMessages") for e in sockets):
         print("  (žádné rámce: Firefox je do HAR neukládá, použijte Chromium/Chrome)", file=out)
 
 

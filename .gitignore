@@ -9,3 +9,4 @@
 *.har
 /dumps/
 *.tokens.json
+__pycache__/

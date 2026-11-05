@@ -177,6 +177,7 @@ pub async fn send_html(
     conversation: &ConversationId,
     html: &str,
     display_name: Option<&str>,
+    ams_references: &[String],
 ) -> Result<SentMessage> {
     let url = api_url(
         session,
@@ -190,13 +191,17 @@ pub async fn send_html(
         ],
     );
     let client_message_id = new_client_message_id();
-    let body = json!({
+    let mut body = json!({
         "content": html,
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "clientmessageid": client_message_id,
         "imdisplayname": display_name.unwrap_or_default(),
     });
+    // vložené obrázky: id objektů v media službě (jako web klient)
+    if !ams_references.is_empty() {
+        body["amsreferences"] = json!(ams_references);
+    }
     let resp = authed(http.client.post(url), session)
         .json(&body)
         .send_logged()
@@ -762,6 +767,7 @@ mod tests {
                 assert_eq!(body["content"], "<p>Ahoj</p>");
                 assert_eq!(body["messagetype"], "RichText/Html");
                 assert_eq!(body["imdisplayname"], "Jan");
+                assert_eq!(body["amsreferences"], json!(["0-weu-d1-x"]));
                 ResponseTemplate::new(201)
                     .set_body_json(json!({"OriginalArrivalTime": 1700000000000i64}))
             })
@@ -775,6 +781,7 @@ mod tests {
             &"19:abc@thread.v2".into(),
             "<p>Ahoj</p>",
             Some("Jan"),
+            &["0-weu-d1-x".to_owned()],
         )
         .await
         .unwrap();

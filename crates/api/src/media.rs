@@ -24,8 +24,10 @@ fn ams_user_agent(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 /// Skypetoken posíláme jen na hosty media služby.
 pub(crate) fn validate_url(url: &str) -> Result<Url> {
     let u = Url::parse(url).map_err(|e| Error::Protocol(format!("URL média {url}: {e}")))?;
-    let allowed =
-        u.scheme() == "https" && u.host_str().is_some_and(|h| h.ends_with(".asm.skype.com"));
+    let allowed = u.scheme() == "https"
+        && u.host_str().is_some_and(|h| {
+            h.ends_with(".asm.skype.com") || h.ends_with(".asyncgw.teams.microsoft.com")
+        });
     // V testech povolujeme mock server na loopbacku.
     let test_loopback = cfg!(test) && u.host_str() == Some("127.0.0.1");
     if !allowed && !test_loopback {
@@ -74,11 +76,32 @@ pub(crate) fn ams_base(session: &SkypeSession) -> Url {
     Url::parse(&format!("https://{prefix}-api.asm.skype.com/")).expect("platná URL")
 }
 
+/// Brána media služby pro zápis, kterou používá web klient (HAR 2026-11-05, EMEA:
+/// `eu-prod.asyncgw.teams.microsoft.com`; ostatní regiony odvozené, NEOVĚŘENO). Starý host
+/// `*-api.asm.skype.com` zápis odmítá (`400` „platform id … User-Agent“); čtení přes něj
+/// funguje a adresy obrázků ve zprávách na něj míří dál.
+pub(crate) fn upload_base(session: &SkypeSession) -> Url {
+    let host = session.chat_service.host_str().unwrap_or_default();
+    if cfg!(test) && host == "127.0.0.1" {
+        return session.chat_service.clone();
+    }
+    let prefix = match host.split('.').next().unwrap_or_default() {
+        "emea" | "eu" => "eu",
+        "apac" | "jp" | "au" | "in" => "apac",
+        _ => "us",
+    };
+    Url::parse(&format!(
+        "https://{prefix}-prod.asyncgw.teams.microsoft.com/"
+    ))
+    .expect("platná URL")
+}
+
 /// Nahraje obrázek do media služby a vrátí id objektu (`0-weu-d1-…`).
 ///
-/// Postup (převzato z protokolu Skype):
-/// 1. `POST /v1/objects` `{type: "pish/image", permissions: {<chat>: ["read"]}, filename}` → `{id}`
-/// 2. `PUT /v1/objects/<id>/content/imgpsh` s daty obrázku
+/// Postup jako web klient (HAR 2026-11-05):
+/// 1. `POST /v1/objects/` `{type: "pish/image", permissions: {<chat>: ["read"]},
+///    sharingMode: "Inline", filename}` s `x-ams-post-sharing-mode: Inline` → `201 {id}`
+/// 2. `PUT /v1/objects/<id>/content/imgpsh` s daty obrázku → `201`
 pub async fn upload_image(
     http: &Http,
     session: &SkypeSession,
@@ -89,16 +112,18 @@ pub async fn upload_image(
     if bytes.len() as u64 > MAX_BYTES {
         return Err(Error::Other("obrázek je příliš velký (max. 25 MB)".into()));
     }
-    let base = ams_base(session);
+    let base = upload_base(session);
     let auth = format!("skype_token {}", session.token);
-    let url = base.join("v1/objects").expect("platná cesta");
+    let url = base.join("v1/objects/").expect("platná cesta");
     let body = json!({
         "type": "pish/image",
         "permissions": { conversation.as_str(): ["read"] },
+        "sharingMode": "Inline",
         "filename": filename,
     });
     let resp = ams_user_agent(http.client.post(url))
         .header(reqwest::header::AUTHORIZATION, &auth)
+        .header("x-ams-post-sharing-mode", "Inline")
         .json(&body)
         .send_logged()
         .await
@@ -188,7 +213,8 @@ mod tests {
         use wiremock::matchers::body_string_contains;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/objects"))
+            .and(path("/v1/objects/"))
+            .and(header("x-ams-post-sharing-mode", "Inline"))
             .and(header("Authorization", "skype_token st"))
             .and(body_string_contains("\"19:c@thread.v2\":[\"read\"]"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "0-weu-d1-new"})))
@@ -218,6 +244,7 @@ mod tests {
     #[test]
     fn only_media_hosts_get_the_token() {
         assert!(validate_url("https://eu-api.asm.skype.com/v1/objects/x/views/imgo").is_ok());
+        assert!(validate_url("https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/").is_ok());
         assert!(validate_url("https://evil.example/x").is_err());
         assert!(validate_url("https://asm.skype.com.evil.example/x").is_err());
         assert!(validate_url("http://eu-api.asm.skype.com/x").is_err());

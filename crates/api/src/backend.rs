@@ -225,6 +225,7 @@ impl ChatBackend for TeamsBackend {
         if !message.text.trim().is_empty() {
             html.push_str(&text::plain_to_html(&message.text));
         }
+        let mut ams = vec![];
         if !message.images.is_empty() {
             let session = self.session().await?;
             for img in &message.images {
@@ -235,12 +236,13 @@ impl ChatBackend for TeamsBackend {
                     })
                     .await?;
                 html.push_str(&media::image_html(&session, &id, img.width, img.height));
+                ams.push(id);
             }
         }
         let name = self.profile.display_name.as_deref();
         self.call(|s| {
-            let html = &html;
-            async move { chat::send_html(&self.http, &s, conversation, html, name).await }
+            let (html, ams) = (&html, &ams);
+            async move { chat::send_html(&self.http, &s, conversation, html, name, ams).await }
         })
         .await
     }
