@@ -35,7 +35,7 @@ fn main() -> iced::Result {
         .subscription(app::App::subscription)
         .theme(app::App::theme)
         .window(iced::window::Settings {
-            size: iced::Size::new(1100.0, 720.0),
+            size: iced::Size::new(app::WINDOW_WIDTH, 720.0),
             icon: tray::window_icon(64),
             visible: !hidden,
             // WM_CLASS / app id = název .desktop souboru (ikona a seskupení v panelu)
