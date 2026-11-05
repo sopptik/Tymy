@@ -219,7 +219,8 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
    reakce, úpravy a mazání, odpovědi, obrázky, nový 1:1 a skupinový chat, hlášení přečtení,
    skok z citace, odhlášení účtu, notifikace z neaktivního účtu, spouštění po přihlášení,
    instalace `.deb`.
-2. **Společný odchyt provozu (HAR)** z web klienta, v tomto pořadí důležitosti:
+2. **Společný odchyt provozu (HAR)** z web klienta (Chrome; postup a scénáře
+   v `docs/protocol/README.md`, očištění `tools/har-redact.py`), v tomto pořadí důležitosti:
    trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
    případně osobní účet (teams.live.com) a kalendář.
 3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů),
