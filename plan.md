@@ -100,7 +100,7 @@ podmínek služby Microsoftu.
 | Hledání ve zprávách + indexace historie na pozadí | ✅ |
 | Přepínání účtů, přidání a odhlášení účtu | ✅ ověřeno se dvěma pracovními účty (odhlášení neověřeno) |
 | Nepřečtené v neaktivních účtech (menu, odznak u jména, lišta) | ✅ |
-| Seznam konverzací po stránkách (>200 chatů) | ✅ celý při startu a po 5 min, jinak nejnovější stránka |
+| Seznam konverzací po stránkách (>200 chatů) | ✅ líně: při startu jen první stránka (200); starší po dorolování na konec, celý seznam při otevření Týmů nebo hledání; po 5 min obnova načtených stránek, jinak nejnovější stránka (ladění: `TYMY_CONVERSATION_PAGE_SIZE`) |
 | Notifikace z neaktivních účtů (klik přepne účet) | 🟡 hotovo, zatím nevyzkoušeno |
 | Přihlášení v prohlížeči (PKCE, `http://localhost`) | ✅ ověřeno (druhý pracovní účet) |
 | Opuštěné týmy a kanály bez přístupu (403) | ✅ skryté |

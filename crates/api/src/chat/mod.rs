@@ -6,7 +6,8 @@ use chrono::{TimeZone, Utc};
 use reqwest::RequestBuilder;
 use serde_json::{Value, json};
 use tymy_core::{
-    Conversation, ConversationId, Error, MessageId, MessagePage, Result, SentMessage, UserId,
+    Conversation, ConversationId, ConversationPage, Error, MessageId, MessagePage, Result,
+    SentMessage, UserId,
 };
 use url::Url;
 
@@ -33,24 +34,38 @@ pub(crate) fn authed(rb: RequestBuilder, session: &SkypeSession) -> RequestBuild
     rb.header("Authentication", format!("skypetoken={}", session.token))
 }
 
-/// Nejvýš kolik stránek seznamu konverzací (po 200) načíst při úplném načtení.
+/// Nejvýš kolik stránek seznamu konverzací (po 200) načíst najednou („celý seznam“).
 pub const MAX_CONVERSATION_PAGES: usize = 10;
 
-/// Seznam konverzací od nejnovější aktivity; `max_pages` stránek po 200 přes
-/// `_metadata.backwardLink` (ověřeno 2026-11-04). `max_pages = 1` = jen nejnovější.
+/// Seznam konverzací od nejnovější aktivity: `max_pages` stránek po 200 přes
+/// `_metadata.backwardLink` (ověřeno 2026-11-04), od začátku (`cursor = None`) nebo od
+/// kurzoru z předchozího volání. Vrácený `older` = kurzor na další stránku, `None` = konec.
 pub async fn list_conversations(
     http: &Http,
     session: &SkypeSession,
+    cursor: Option<&str>,
     max_pages: usize,
-) -> Result<Vec<Conversation>> {
-    let first = api_url(session, &["v1", "users", "ME", "conversations"]);
-    let mut rb = http.client.get(first).query(&[
-        ("view", "msnp24Equivalent"),
-        ("pageSize", "200"),
-        ("targetType", "Passport|Skype|Lync|Thread|Agent|ShortCircuit|PSTN|Flxt|NotificationStream|ModernBots|secureThreads|InviteFree"),
-    ]);
+) -> Result<ConversationPage> {
+    // ladění stránkování: `TYMY_CONVERSATION_PAGE_SIZE=10`
+    let page_size = std::env::var("TYMY_CONVERSATION_PAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(200)
+        .to_string();
+    let mut rb = match cursor {
+        Some(link) => http.client.get(same_origin(session, link)?),
+        None => http
+            .client
+            .get(api_url(session, &["v1", "users", "ME", "conversations"]))
+            .query(&[
+                ("view", "msnp24Equivalent"),
+                ("pageSize", page_size.as_str()),
+                ("targetType", "Passport|Skype|Lync|Thread|Agent|ShortCircuit|PSTN|Flxt|NotificationStream|ModernBots|secureThreads|InviteFree"),
+            ]),
+    };
     let mut convs: Vec<Conversation> = vec![];
     let mut seen = std::collections::HashSet::new();
+    let mut older = None;
     for page in 1..=max_pages.max(1) {
         let resp = authed(rb, session).send_logged().await.map_err(net_err)?;
         let r: wire::ConversationsResponse = json(check(resp).await?).await?;
@@ -63,20 +78,21 @@ pub async fn list_conversations(
                 .map(|c| c.into_domain())
                 .filter(|c| seen.insert(c.id.clone())),
         );
+        // prázdná stránka = konec seznamu, i kdyby server poslal další odkaz
         let Some(next) = r.metadata.backward_link.filter(|_| !empty) else {
             break;
         };
-        if page == max_pages {
-            tracing::warn!(
-                pages = page,
-                "seznam konverzací je delší, zbytek vynechávám"
-            );
+        if page == max_pages.max(1) {
+            older = Some(next);
             break;
         }
         rb = http.client.get(same_origin(session, &next)?);
     }
     convs.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
-    Ok(convs)
+    Ok(ConversationPage {
+        conversations: convs,
+        older,
+    })
 }
 
 /// `cursor` je `backwardLink` z předchozí stránky.
@@ -645,17 +661,24 @@ mod tests {
                 ],
                 "_metadata": {"backwardLink": null}
             })))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
         let (http, s) = (Http::new().unwrap(), session(&server.uri()));
-        let all = list_conversations(&http, &s, MAX_CONVERSATION_PAGES)
+        let all = list_conversations(&http, &s, None, MAX_CONVERSATION_PAGES)
             .await
             .unwrap();
-        let ids: Vec<_> = all.iter().map(|c| c.id.as_str()).collect();
+        let ids: Vec<_> = all.conversations.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids.len(), 2, "duplicita mezi stránkami se vynechá: {ids:?}");
-        let recent = list_conversations(&http, &s, 1).await.unwrap();
-        assert_eq!(recent.len(), 1, "jen první stránka");
+        assert_eq!(all.older, None, "seznam je celý");
+        let first = list_conversations(&http, &s, None, 1).await.unwrap();
+        assert_eq!(first.conversations.len(), 1, "jen první stránka");
+        let cursor = first.older.expect("kurzor na další stránku");
+        let rest = list_conversations(&http, &s, Some(&cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(rest.conversations.len(), 2);
+        assert_eq!(rest.older, None);
     }
 
     #[tokio::test]

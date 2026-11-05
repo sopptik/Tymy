@@ -13,6 +13,14 @@ pub struct MessagePage {
     pub older: Option<String>,
 }
 
+/// Část seznamu konverzací (od nejnovější aktivity).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationPage {
+    pub conversations: Vec<Conversation>,
+    /// Neprůhledný kurzor na další (starší) část; `None` = seznam je celý.
+    pub older: Option<String>,
+}
+
 /// Rozhraní, přes které UI a synchronizace mluví s jedním přihlášeným účtem.
 ///
 /// Implementace musí sama řešit obnovu tokenů. Chyba [`crate::Error::ReauthRequired`]
@@ -29,6 +37,23 @@ pub trait ChatBackend: Send + Sync {
     /// Jen nejnověji aktivní konverzace (pro častou obnovu); výchozí = celý seznam.
     async fn recent_conversations(&self) -> Result<Vec<Conversation>> {
         self.conversations().await
+    }
+
+    /// `pages` stránek seznamu od začátku (`cursor = None`) nebo od kurzoru z předchozí
+    /// části. Výchozí implementace nestránkuje: vrátí celý seznam najednou.
+    async fn conversation_pages(
+        &self,
+        cursor: Option<&str>,
+        pages: usize,
+    ) -> Result<ConversationPage> {
+        let _ = pages;
+        Ok(match cursor {
+            None => ConversationPage {
+                conversations: self.conversations().await?,
+                older: None,
+            },
+            Some(_) => ConversationPage::default(),
+        })
     }
 
     /// Stránka historie. `cursor = None` načte nejnovější zprávy.
