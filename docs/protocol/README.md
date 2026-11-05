@@ -158,7 +158,12 @@ přímo v HTML obsahu zprávy:
   | `imgpsh_fullsize_anim` | originál, u GIFů s animací; používáme po kliknutí ✅ |
   | `original` | `400 Bad Request` ❌ |
 
-- Nahrání obrázku (odeslání ze schránky) ✅ (uživatel 2026-11-05), převzato z protokolu Skype:
+- Nahrání obrázku (odeslání ze schránky), převzato z protokolu Skype: ❌ `POST /v1/objects`
+  vrací `400 {"title":"The 'User-Agent' header is missing or invalid.", "detail":"The platform
+  id could not be created from the '…' value of 'User-Agent' header."}` pro `tymy/0.1.0 (Linux)`
+  i pro User-Agent Chrome na Linuxu (2026-11-05). Potřeba HAR: jaký host, hlavičky a User-Agent
+  posílá web klient (možná jiná brána než `*-api.asm.skype.com`). Ladění:
+  `TYMY_AMS_USER_AGENT=… tymy-cli upload <chat> <soubor>` (nahraje, zprávu neodešle):
   1. `POST https://eu-api.asm.skype.com/v1/objects` s `Authorization: skype_token …`,
      tělo `{"type": "pish/image", "permissions": {"<id chatu>": ["read"]}, "filename": "…"}` → `{"id": "0-weu-…"}`,
   2. `PUT …/v1/objects/<id>/content/imgpsh` (`application/octet-stream`, data obrázku),
@@ -228,6 +233,7 @@ WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a
    - **trouter:** nechat Teams 1–2 min v klidu; z jiného zařízení (mobil, Tymy s druhým
      účtem) poslat do chatu zprávu, začít psát („píše…“), přidat reakci; změnit vlastní stav
      (dostupný → nerušit → dostupný);
+   - **obrázek:** do chatu vložit obrázek ze schránky (Ctrl+V) a odeslat;
    - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
    - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
      organizace a otevřít s ním chat (nic neposílat);
@@ -248,6 +254,8 @@ Zajímá nás hlavně:
 - trouter: `GET …/v4/a` (nebo `/v3/a`) s parametry, odpověď (`socketio`, `surl`, `ccid`),
   registrace `POST https://teams.microsoft.com/registrar/prod/V2/registrations`, URL WebSocketu
   a sled rámců (handshake, autentizace, `ping`, příchozí `3:::{…}` a odpovědi na ně);
+- obrázek: host a hlavičky nahrání (`POST …/v1/objects`, `User-Agent`, `x-ms-*`), tělo
+  a následné `PUT` s obsahem;
 - soubor: nahrání do OneDrive/SharePointu (hostitel, token pro koho), sdílení a tělo odeslané
   zprávy s `properties.files`;
 - hledání mimo organizaci: hlavičky a token požadavku na `externalsearchv3` / `userdiscovery`.
