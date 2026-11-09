@@ -58,6 +58,11 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Kalendář (2026-11-09):** „přidej kalendář. chci aby notifikoval schůzky a jiné události
   z kalendáře.“ a „tlačítko kalendáře bych přidal jako další menu pod Týmy a Chaty jako další
   řádek“ → záložka Kalendář na druhém řádku pod Chaty/Týmy, připomínky notifikací (fáze 3).
+  Dále: „chci na ikonce ve status baru vidět že je notifikace schůzky … stejně jako je vidět
+  nový chat měla by být vidět i schůzka. po najetí myši by mělo být vidět že se jedná
+  o schůzku a ne nový chat“ → ikona v liště má u připomenuté schůzky oranžové hodiny vpravo
+  dole (nepřečtené chaty zůstávají červenou tečkou vpravo nahoře), popisek „Připomínka
+  schůzky: … v 10:00 (za 12 min)“ a položku v menu ikony; trvá i po zmizení notifikace.
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová
@@ -235,6 +240,9 @@ Priorita uživatele 2026-11-09 (předběhla HAR a hovory); bez odchytu provozu, 
    klik otevře událost (případně přepne účet), „Připojit“, „Odložit o 5 min“ (nejdéle do
    začátku). Zobrazené připomínky v `~/.local/state/tymy/calendar-reminders.json`, aby se
    po restartu neopakovaly; spuštění během schůzky ji ještě připomene.
+   Ikona v liště: oranžové hodiny + popisek a položka menu „Schůzka: …“, dokud si uživatel
+   schůzku neotevře (klik na notifikaci, menu ikony, výběr v agendě, záložka Kalendář,
+   „Připojit“) nebo dokud neskončí.
 4. Volitelně přijetí/odmítnutí pozvánky, týdenní mřížka, barvy kategorií.
 
 ## 5. Moje doporučení k pořadí

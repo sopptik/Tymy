@@ -163,6 +163,9 @@ struct CalendarState {
     selected: Option<String>,
     /// Událost k otevření po přepnutí účtu (klik na připomínku z jiného účtu).
     open_after_switch: Option<String>,
+    /// Připomenuté schůzky, které si uživatel ještě neotevřel (ukazuje je ikona v liště,
+    /// i když notifikace mezitím zmizela). Zmizí otevřením, připojením nebo koncem události.
+    alerts: Vec<(AccountId, CalendarEvent)>,
 }
 
 impl CalendarState {
@@ -178,6 +181,7 @@ impl CalendarState {
                 .unwrap_or_default(),
             selected: None,
             open_after_switch: None,
+            alerts: vec![],
         }
     }
 }
@@ -230,6 +234,8 @@ pub enum Msg {
     SelectEvent(String),
     /// Otevřít chat schůzky.
     OpenMeetingChat(ConversationId),
+    /// Připojit se ke schůzce z detailu (id výskytu, odkaz).
+    JoinMeeting(String, String),
     /// Výsledek úlohy spuštěné v daném „období“ (při přepnutí účtu se staré zahodí).
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
@@ -356,6 +362,12 @@ pub enum Msg {
 }
 
 impl Msg {
+    /// Výsledky úloh, které se netýkají jen účtu otevřeného v okně (kalendáře a připomínky
+    /// všech účtů): platí i po přepnutí účtu.
+    fn global(&self) -> bool {
+        matches!(self, Msg::CalendarLoaded(..) | Msg::Reminder(..))
+    }
+
     /// Ladicí záznam o události: název a stručná metadata, nikdy obsah zpráv.
     fn log(&self) {
         use tracing::{debug, trace};
@@ -376,6 +388,7 @@ impl Msg {
             Msg::Reminder(account, _, choice) => debug!(%account, ?choice, "update: Reminder"),
             Msg::SelectEvent(_) => debug!("update: SelectEvent"),
             Msg::OpenMeetingChat(id) => debug!(%id, "update: OpenMeetingChat"),
+            Msg::JoinMeeting(..) => debug!("update: JoinMeeting"),
             Msg::Booted(r) => debug!(
                 result = ok(r.is_ok()),
                 account = matches!(r, Ok(Some(_))),
@@ -762,6 +775,8 @@ pub struct App {
     tray: Option<TrayHandle>,
     /// Počet nepřečtených, který ikona v liště naposledy ukazovala.
     tray_unread: usize,
+    /// Popisky schůzek, které ikona v liště naposledy ukazovala.
+    tray_meetings: Vec<String>,
     /// Okno je skryté do lišty.
     hidden: bool,
     /// Ručně seřazené připnuté chaty (první = nahoře).
@@ -854,6 +869,7 @@ impl App {
             notify_ready: false,
             tray: None,
             tray_unread: 0,
+            tray_meetings: vec![],
             hidden: false,
             pins: vec![],
             hovered: None,
@@ -883,6 +899,7 @@ impl App {
         fresh.hidden = self.hidden;
         fresh.tray = self.tray.take();
         fresh.tray_unread = self.tray_unread;
+        fresh.tray_meetings = std::mem::take(&mut self.tray_meetings);
         std::mem::swap(&mut fresh.calendar, &mut self.calendar);
         fresh.calendar.selected = None;
         *self = fresh;
@@ -1527,10 +1544,19 @@ impl App {
     /// Zobrazí připomínky událostí, na které je čas (ze všech účtů). Účty, jejichž kalendář
     /// se právě načítá, počkají na čerstvá data (např. po probuzení ze spánku).
     fn check_reminders(&mut self) -> Task<Msg> {
+        let now = Utc::now();
+        // skončené (nebo mezitím zrušené či odmítnuté) schůzky už v liště neukazovat
+        let current = &self.calendar.events;
+        self.calendar.alerts.retain(|(account, e)| {
+            let latest = current
+                .get(account)
+                .and_then(|evs| evs.iter().find(|x| x.id == e.id))
+                .unwrap_or(e);
+            latest.end > now && latest.wants_reminder()
+        });
         if !self.calendar.settings.reminders {
             return Task::none();
         }
-        let now = Utc::now();
         let minutes = i64::from(self.calendar.settings.reminder_minutes);
         let known: HashSet<&AccountId> = self.accounts.iter().map(|a| &a.id).collect();
         let loading = &self.calendar.loading;
@@ -1541,6 +1567,11 @@ impl App {
             .filter(|(id, _)| known.contains(id) && !loading.contains(*id))
             .flat_map(|(id, evs)| evs.iter().map(move |e| (id, e)));
         let due = self.calendar.reminders.take_due(events, now, minutes);
+        for (account, e) in &due {
+            let alerts = &mut self.calendar.alerts;
+            alerts.retain(|(a, x)| !(a == account && x.id == e.id));
+            alerts.push((account.clone(), e.clone()));
+        }
         let multi = self.accounts.len() > 1;
         let tasks: Vec<_> = due
             .into_iter()
@@ -1561,8 +1592,26 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Uživatel si připomenutou schůzku otevřel: v liště ji už neukazovat.
+    fn ack_meeting(&mut self, account: &AccountId, event: &str) {
+        self.calendar
+            .alerts
+            .retain(|(a, e)| !(a == account && e.id == event));
+    }
+
+    /// Popisky připomenutých schůzek pro lištu: „Porada v 10:00 (za 12 min)“.
+    fn meeting_labels(&self) -> Vec<String> {
+        let now = Utc::now();
+        self.calendar
+            .alerts
+            .iter()
+            .map(|(_, e)| format!("{} {}", e.subject, cal::when_label(e, now)))
+            .collect()
+    }
+
     /// Otevře událost v záložce Kalendář (u jiného účtu po přepnutí na něj).
     fn open_event(&mut self, account: AccountId, event: String) -> Task<Msg> {
+        self.ack_meeting(&account, &event);
         if self.active_account() == Some(&account) {
             let tab = self.update(Msg::SetTab(Tab::Calendar));
             self.calendar.selected = Some(event);
@@ -1966,7 +2015,7 @@ impl App {
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
         let msg = match msg {
-            Msg::Scoped(epoch, inner) if epoch == self.epoch => *inner,
+            Msg::Scoped(epoch, inner) if epoch == self.epoch || inner.global() => *inner,
             Msg::Scoped(epoch, inner) => {
                 tracing::debug!(
                     epoch,
@@ -1996,11 +2045,13 @@ impl App {
         };
         // v liště součet za všechny účty
         let n = self.conversations.iter().filter(|c| self.unread(c)).count() + self.others_unread();
-        if n == self.tray_unread {
+        let meetings = self.meeting_labels();
+        if n == self.tray_unread && meetings == self.tray_meetings {
             return Task::none();
         }
         self.tray_unread = n;
-        Task::perform(tray.set_unread(n), |_| Msg::Noop)
+        self.tray_meetings = meetings.clone();
+        Task::perform(tray.set_state(n, meetings), |_| Msg::Noop)
     }
 
     /// Zobrazí okno (i skryté v liště) a dá mu fokus.
@@ -2257,6 +2308,7 @@ impl App {
             Msg::Reminder(account, event, choice) => match choice {
                 ReminderChoice::Open => self.open_event(account, event.id),
                 ReminderChoice::Join => {
+                    self.ack_meeting(&account, &event.id);
                     if let Some(url) = &event.join_url {
                         open_url(url);
                     }
@@ -2269,7 +2321,17 @@ impl App {
                 ReminderChoice::Dismissed => Task::none(),
             },
             Msg::SelectEvent(id) => {
+                if let Some(account) = self.active_account().cloned() {
+                    self.ack_meeting(&account, &id);
+                }
                 self.calendar.selected = Some(id);
+                Task::none()
+            }
+            Msg::JoinMeeting(id, url) => {
+                if let Some(account) = self.active_account().cloned() {
+                    self.ack_meeting(&account, &id);
+                }
+                open_url(&url);
                 Task::none()
             }
             Msg::OpenMeetingChat(id) => {
@@ -2854,6 +2916,10 @@ impl App {
             }
             Msg::Tray(TrayEvent::Show) => self.show_window(),
             Msg::Tray(TrayEvent::Quit) => iced::exit(),
+            Msg::Tray(TrayEvent::OpenMeeting(i)) => match self.calendar.alerts.get(i).cloned() {
+                Some((account, event)) => self.open_event(account, event.id),
+                None => self.show_window(),
+            },
             Msg::CloseRequested(id) => {
                 if self.tray.is_some() {
                     // zavření okna = skrytí do lišty; ukončení je v menu ikony
@@ -3178,7 +3244,15 @@ impl App {
                 // kanály s dávnou aktivitou jsou až na dalších stránkách seznamu
                 match tab {
                     Tab::Teams => self.want_all_chats(),
-                    Tab::Calendar => self.refresh_calendar(chrono::Duration::minutes(1)),
+                    Tab::Calendar => {
+                        if let (Some(account), Some(id)) = (
+                            self.active_account().cloned(),
+                            self.selected_event().map(|e| e.id.clone()),
+                        ) {
+                            self.ack_meeting(&account, &id);
+                        }
+                        self.refresh_calendar(chrono::Duration::minutes(1))
+                    }
                     Tab::Chats => Task::none(),
                 }
             }
@@ -3996,7 +4070,7 @@ impl App {
                 button(text("Připojit").size(13).font(SEMIBOLD))
                     .padding([7, 16])
                     .style(style::primary)
-                    .on_press(Msg::OpenUrl(url.clone())),
+                    .on_press(Msg::JoinMeeting(e.id.clone(), url.clone())),
             );
         }
         if let Some(chat) = e

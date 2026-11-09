@@ -225,6 +225,23 @@ pub fn time_label(e: &CalendarEvent) -> String {
     }
 }
 
+/// Krátce, kdy událost je vzhledem k `now`: „v 10:00 (za 12 min)“, „probíhá od 10:00“,
+/// celodenní „celý den“.
+pub fn when_label(e: &CalendarEvent, now: DateTime<Utc>) -> String {
+    if e.all_day {
+        return time_label(e).to_lowercase();
+    }
+    let start = e.start.with_timezone(&Local).format("%H:%M");
+    let secs = (e.start - now).num_seconds();
+    let mins = secs.div_euclid(60) + i64::from(secs.rem_euclid(60) > 0);
+    match mins {
+        m if m > 60 => format!("v {start}"),
+        m if m > 0 => format!("v {start} (za {m} min)"),
+        0 => format!("v {start} (začíná)"),
+        _ => format!("probíhá od {start}"),
+    }
+}
+
 /// Text připomínky: kdy událost začíná vzhledem k `now` a kde.
 pub fn reminder_body(e: &CalendarEvent, now: DateTime<Utc>) -> String {
     let when = if e.all_day {
@@ -384,6 +401,9 @@ mod tests {
         assert!(reminder_body(&e, at(9, 45)).starts_with("Za 15 min"));
         assert!(reminder_body(&e, at(10, 0)).starts_with("Začíná teď"));
         assert!(reminder_body(&e, at(10, 5)).starts_with("Probíhá od"));
+        let start = e.start.with_timezone(&Local).format("%H:%M").to_string();
+        assert_eq!(when_label(&e, at(9, 48)), format!("v {start} (za 12 min)"));
+        assert_eq!(when_label(&e, at(10, 1)), format!("probíhá od {start}"));
     }
 
     #[test]
