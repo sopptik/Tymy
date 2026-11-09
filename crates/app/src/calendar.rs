@@ -474,6 +474,29 @@ pub fn week_layout(
     (all_day, blocks)
 }
 
+/// Krok výběru času tažením v mřížce (minuty).
+pub const DRAG_STEP: i64 = 15;
+
+/// Výběr času tažením myši: od kotvy (stisk) po aktuální pozici, v minutách od půlnoci.
+/// Zaokrouhleno na `DRAG_STEP` ven; pouhé kliknutí = 30 minut od kliknuté čtvrthodiny.
+pub fn drag_range(anchor: i64, current: i64) -> (i64, i64) {
+    let (a, b) = (anchor.min(current), anchor.max(current));
+    let from = (a / DRAG_STEP * DRAG_STEP).clamp(0, 24 * 60 - DRAG_STEP);
+    let to = ((b + DRAG_STEP - 1) / DRAG_STEP * DRAG_STEP).clamp(0, 24 * 60);
+    // myš se skoro nepohnula = klik
+    if b - a < DRAG_STEP / 2 || to - from < DRAG_STEP {
+        (from, (from + 30).min(24 * 60))
+    } else {
+        (from, to)
+    }
+}
+
+/// Minuty od půlnoci jako čas (24:00 → 23:59, schůzka musí skončit týž den).
+pub fn minutes_time(m: i64) -> NaiveTime {
+    let m = m.clamp(0, 24 * 60 - 1) as u32;
+    NaiveTime::from_hms_opt(m / 60, m % 60, 0).unwrap_or(NaiveTime::MIN)
+}
+
 /// Moje odpověď lidsky.
 pub fn response_label(e: &CalendarEvent) -> Option<&'static str> {
     Some(match e.response {
@@ -748,6 +771,23 @@ mod tests {
         assert_eq!((night[0].day, night[0].from, night[0].to), (1, 1380, 1440));
         assert_eq!((night[1].day, night[1].from, night[1].to), (2, 0, 60));
         assert!(find(5).is_empty(), "další týden");
+    }
+
+    #[test]
+    fn drag_ranges_snap_to_quarters() {
+        assert_eq!(drag_range(605, 605), (600, 630), "klik = 30 min");
+        assert_eq!(drag_range(600, 668), (600, 675));
+        assert_eq!(drag_range(668, 600), (600, 675), "táhnutí nahoru");
+        assert_eq!(drag_range(1430, 1450), (1425, 1440));
+        assert_eq!(drag_range(-5, 20), (0, 30));
+        assert_eq!(
+            minutes_time(630),
+            NaiveTime::from_hms_opt(10, 30, 0).unwrap()
+        );
+        assert_eq!(
+            minutes_time(1440),
+            NaiveTime::from_hms_opt(23, 59, 0).unwrap()
+        );
     }
 
     #[test]

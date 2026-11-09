@@ -132,6 +132,14 @@ pub struct MeetingForm {
     error: Option<String>,
 }
 
+/// Výběr času tažením myši v jednom dni týdenní mřížky (minuty od půlnoci).
+#[derive(Debug, Clone, Copy)]
+pub struct GridDrag {
+    day: usize,
+    anchor: i64,
+    current: i64,
+}
+
 /// Pole formuláře nové schůzky.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeetingField {
@@ -376,6 +384,11 @@ pub enum Msg {
     /// Týdenní mřížka: posun o týdny (0 = tento týden), načtený týden, zavřít kartu události,
     /// Esc mimo psací pole.
     WeekShift(i64),
+    /// Myš nad dnem mřížky (den, svislá pozice v px), stisk v prázdném místě dne,
+    /// puštění tlačítka (kdekoli) → formulář nové schůzky s vybraným časem.
+    GridMove(usize, f32),
+    GridPress(usize),
+    MouseUp,
     WeekLoaded(
         AccountId,
         chrono::NaiveDate,
@@ -485,6 +498,8 @@ impl Msg {
             Msg::ToggleChatPanel => debug!("update: ToggleChatPanel"),
             Msg::NewMeeting => debug!("update: NewMeeting"),
             Msg::WeekShift(d) => debug!(d, "update: WeekShift"),
+            Msg::GridMove(..) | Msg::MouseUp => trace!("update: GridMouse"),
+            Msg::GridPress(day) => debug!(day, "update: GridPress"),
             Msg::WeekLoaded(account, week, r) => debug!(
                 %account,
                 %week,
@@ -926,6 +941,9 @@ pub struct App {
     week_cache: HashMap<(AccountId, chrono::NaiveDate), Vec<CalendarEvent>>,
     week_fetched: HashMap<(AccountId, chrono::NaiveDate), DateTime<Utc>>,
     week_loading: HashSet<(AccountId, chrono::NaiveDate)>,
+    /// Poslední pozice myši nad mřížkou (den, minuty) a rozpracovaný výběr času tažením.
+    grid_hover: Option<(usize, i64)>,
+    grid_drag: Option<GridDrag>,
     /// Formulář nové schůzky; událost čekající na potvrzení zrušení; běží změna události.
     meeting_form: Option<MeetingForm>,
     confirm_cancel_event: Option<String>,
@@ -1118,6 +1136,8 @@ impl App {
             week_cache: HashMap::new(),
             week_fetched: HashMap::new(),
             week_loading: HashSet::new(),
+            grid_hover: None,
+            grid_drag: None,
             meeting_form: None,
             confirm_cancel_event: None,
             event_busy: false,
@@ -1282,6 +1302,9 @@ impl App {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                 ..
             }) if _status == iced::event::Status::Ignored => Some(Msg::Escape),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Msg::MouseUp)
+            }
             _ => None,
         });
         let always = [
@@ -3917,6 +3940,39 @@ impl App {
                 let fetch = self.fetch_week(chrono::Duration::minutes(1));
                 Task::batch([fetch, self.scroll_week(None)])
             }
+            Msg::GridMove(day, y) => {
+                let minutes = ((y / WEEK_HOUR * 60.0) as i64).clamp(0, 24 * 60);
+                self.grid_hover = Some((day, minutes));
+                // táhne se jen v rámci dne, kde začal výběr (i když myš přejde jinam)
+                if let Some(d) = &mut self.grid_drag {
+                    d.current = minutes;
+                }
+                Task::none()
+            }
+            Msg::GridPress(day) => {
+                if let Some((d, minutes)) = self.grid_hover.filter(|(d, _)| *d == day) {
+                    self.grid_drag = Some(GridDrag {
+                        day: d,
+                        anchor: minutes,
+                        current: minutes,
+                    });
+                }
+                Task::none()
+            }
+            Msg::MouseUp => {
+                let Some(drag) = self.grid_drag.take() else {
+                    return Task::none();
+                };
+                let (from, to) = cal::drag_range(drag.anchor, drag.current);
+                let day = self.week + chrono::Duration::days(drag.day as i64);
+                let open = self.update(Msg::NewMeeting);
+                if let Some(f) = &mut self.meeting_form {
+                    f.date = day.format("%-d. %-m. %Y").to_string();
+                    f.start = cal::minutes_time(from).format("%H:%M").to_string();
+                    f.end = cal::minutes_time(to).format("%H:%M").to_string();
+                }
+                open
+            }
             Msg::WeekLoaded(account, week, r) => {
                 let key = (account, week);
                 self.week_loading.remove(&key);
@@ -5656,9 +5712,55 @@ impl App {
                     .into(),
                 );
             }
-            grid = grid
-                .push(vline())
-                .push(iced::widget::Stack::with_children(layers));
+            if let Some(drag) = self.grid_drag.filter(|g| g.day == d) {
+                let (from, to) = cal::drag_range(drag.anchor, drag.current);
+                let label = format!(
+                    "{}–{}",
+                    cal::minutes_time(from).format("%H:%M"),
+                    cal::minutes_time(to).format("%H:%M")
+                );
+                layers.push(
+                    container(
+                        container(text(label).size(11).font(SEMIBOLD))
+                            .padding([2, 6])
+                            .width(col_w - 4.0)
+                            .height((to - from) as f32 / 60.0 * WEEK_HOUR)
+                            .style(|t: &Theme| {
+                                let c = style::colors(t);
+                                container::Style {
+                                    background: Some(
+                                        Color {
+                                            a: 0.35,
+                                            ..c.primary
+                                        }
+                                        .into(),
+                                    ),
+                                    text_color: Some(c.text),
+                                    border: Border {
+                                        color: c.primary,
+                                        width: 1.0,
+                                        radius: 5.0.into(),
+                                    },
+                                    ..Default::default()
+                                }
+                            }),
+                    )
+                    .padding(iced::Padding {
+                        top: from as f32 / 60.0 * WEEK_HOUR,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 2.0,
+                    })
+                    .into(),
+                );
+            }
+            // tažením v prázdném místě dne se vybere čas nové schůzky (klik na schůzku
+            // zachytí její tlačítko dřív)
+            let day_area = mouse_area(iced::widget::Stack::with_children(layers))
+                .on_move(move |p| Msg::GridMove(d, p.y))
+                .on_press(Msg::GridPress(d))
+                .interaction(iced::mouse::Interaction::Crosshair);
+            grid = grid.push(vline()).push(day_area);
         }
         let body = scrollable(container(grid).padding(iced::Padding {
             top: 6.0,

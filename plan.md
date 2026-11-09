@@ -287,7 +287,12 @@ Priorita uživatele 2026-11-09 (předběhla HAR a hovory); čtení bez odchytu p
    schůzku (v mřížce i v agendě) otevře detail jako kartu nad mřížkou (✕, Esc, klik vedle).
    Týdny mimo 14 dní se načítají zvlášť. „duplicitní tlačítko nová schůzka. ponechal bych jen
    jedno v pravém rohu“ → jen „＋ Nová schůzka“ vpravo nahoře.
-6. Volitelně barvy kategorií, opakované schůzky, úprava schůzky, přetažení v mřížce.
+6. 🟡 **Výběr času tažením** (2026-11-09, „přidej ještě možnost označit blok v jednom dni
+   v kalendáři a po uvolnění tlačítka myši zobraz dialog nová schůzka“): tažením v prázdném
+   místě dne se označí čas (po čtvrthodinách, s popiskem od–do), po puštění tlačítka se otevře
+   formulář nové schůzky s datem a časem; klik bez tažení = 30 minut. Výběr zůstává v jednom
+   dni, i když myš přejde jinam; puštění se hlídá v celém okně. Ovládání myší ověří uživatel.
+7. Volitelně barvy kategorií, opakované schůzky, úprava schůzky, přesun schůzky v mřížce.
 
 ## 5. Moje doporučení k pořadí
 Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu
