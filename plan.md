@@ -146,7 +146,12 @@ samostatného commitu“)
    `properties.mentions` (JSON v řetězci: `@type`, `itemid`, `mri`, `mentionType: person`,
    `displayName`). Nabídka ověřena v okně; odeslání zmínky čeká na test uživatelem.
    Ladění: `TYMY_OPEN_CHAT=… TYMY_COMPOSE="Ahoj @mat"` (jen vyplní pole).
-3. **Formátování při psaní.**
+3. 🟡 **Formátování při psaní** (Markdown, `crates/core/src/text/markdown.rs`): `**tučně**`,
+   `_kurzíva_`, `~~škrtnuté~~`, `` `kód` ``, bloky ```` ``` ````, odrážky `- `, číslované
+   seznamy (od dvou řádků, ať „9. 11. máme poradu“ zůstane textem), citace `> `, odkazy
+   `[text](url)` a holé adresy jako `<a>`. Úprava zprávy převede HTML zpět na Markdown,
+   takže formátování přežije (zmínky zůstanou jako text „@Jméno“). Nápověda v psacím poli.
+   Odeslání čeká na test uživatelem (jak to zobrazí oficiální Teams, hlavně `<pre>`).
 4. **Výběr emoji.**
 5. **Správa skupinových chatů** (přejmenovat, přidat/odebrat lidi, opustit).
 

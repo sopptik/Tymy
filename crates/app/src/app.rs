@@ -3295,7 +3295,7 @@ impl App {
                 let Some(m) = self.find_message(&id) else {
                     return Task::none();
                 };
-                let text = rich::plain(&rich::parse(&m.content));
+                let text = tymy_core::text::markdown::from_blocks(&rich::parse(&m.content));
                 let original = m.content.clone();
                 let draft = match &self.editing {
                     Some(ed) => ed.draft.clone(),
@@ -5097,7 +5097,7 @@ impl App {
         let banner: Element<'a, Msg> = if self.editing.is_some() {
             composer_banner(
                 "Úprava zprávy".into(),
-                "Enter uloží, Esc zruší. Formátování se nahradí prostým textem.".into(),
+                "Enter uloží, Esc zruší. Formátování zůstane, zmínky se změní na text.".into(),
                 Msg::CancelEdit,
                 "Zrušit úpravu (Esc)",
             )
@@ -5147,7 +5147,9 @@ impl App {
                 row![
                     text_editor(&self.composer)
                         .id(COMPOSER)
-                        .placeholder("Napište zprávu…  (Shift+Enter = nový řádek)")
+                        .placeholder(
+                            "Napište zprávu…  (Shift+Enter nový řádek · **tučně** _kurzíva_ `kód` · @zmínka)",
+                        )
                         .on_action(Msg::Compose)
                         .key_binding({
                             let remove_last =

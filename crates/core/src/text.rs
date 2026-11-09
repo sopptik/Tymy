@@ -3,6 +3,7 @@
 //! Plnohodnotné vykreslení rich textu bude v UI; tady je jen to, co potřebuje
 //! odesílání, CLI a náhledy v seznamu chatů. Strukturovaný obsah pro okno je v [`rich`].
 
+pub mod markdown;
 pub mod rich;
 
 /// Escapuje prostý text do HTML zprávy Teams (`<p>…</p>`, nové řádky jako `<br>`).
@@ -10,60 +11,15 @@ pub fn plain_to_html(text: &str) -> String {
     compose_html(text, &[]).0
 }
 
-/// HTML odesílané zprávy z textu psacího pole. „@Jméno“ lidí z `mentions` se převede na
-/// zmínku Teams (`<span itemtype="http://schema.skype.com/Mention" itemid="N">Jméno</span>`).
+/// HTML odesílané zprávy z textu psacího pole: jednoduchý Markdown (viz [`markdown`])
+/// a „@Jméno“ lidí z `mentions` jako zmínky Teams
+/// (`<span itemtype="http://schema.skype.com/Mention" itemid="N">Jméno</span>`).
 /// Vrací HTML a skutečně použité zmínky v pořadí `itemid` (pro `properties.mentions`).
 pub fn compose_html(
     text: &str,
     mentions: &[crate::MentionRef],
 ) -> (String, Vec<crate::MentionRef>) {
-    // delší jména dřív („@Jan Novák“ před „@Jan“)
-    let mut by_len: Vec<&crate::MentionRef> =
-        mentions.iter().filter(|m| !m.name.is_empty()).collect();
-    by_len.sort_by_key(|m| std::cmp::Reverse(m.name.len()));
-    let text = text.trim_end();
-    let mut used: Vec<crate::MentionRef> = vec![];
-    let mut out = String::with_capacity(text.len() + 7);
-    out.push_str("<p>");
-    let mut prev: Option<char> = None;
-    let mut i = 0;
-    while let Some(c) = text[i..].chars().next() {
-        if c == '@' && prev.is_none_or(|p| p.is_whitespace() || "([{\"'".contains(p)) {
-            let rest = &text[i + 1..];
-            let found = by_len.iter().find(|m| {
-                rest.starts_with(m.name.as_str())
-                    && rest[m.name.len()..]
-                        .chars()
-                        .next()
-                        .is_none_or(|n| !n.is_alphanumeric())
-            });
-            if let Some(m) = found {
-                out.push_str(&format!(
-                    r#"<span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="{}">{}</span>"#,
-                    used.len(),
-                    escape_text(&m.name)
-                ));
-                used.push((*m).clone());
-                i += 1 + m.name.len();
-                prev = m.name.chars().last();
-                continue;
-            }
-        }
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            '\n' => out.push_str("<br>"),
-            '\r' => {}
-            c => out.push(c),
-        }
-        prev = Some(c);
-        i += c.len_utf8();
-    }
-    out.push_str("</p>");
-    (out, used)
+    markdown::to_html(text, mentions)
 }
 
 /// HTML citace pro odpověď na zprávu (stejný tvar, jaký posílá web klient Teams).
@@ -86,7 +42,8 @@ pub fn reply_html(r: &crate::ReplyRef) -> String {
 }
 
 /// Nový obsah upravené zprávy: text z editoru, ale zachová citaci odpovědi a vložené
-/// obrázky z původní zprávy (ty v editoru nejsou). Ostatní formátování se nahradí textem.
+/// obrázky z původní zprávy (ty v editoru nejsou). Text je Markdown jako při psaní
+/// (viz [`markdown::from_blocks`] pro opačný směr).
 pub fn edited_html(original: &str, text: &str) -> String {
     let mut out = String::new();
     if let Some(start) = find_ascii_ci(original, "<blockquote")
