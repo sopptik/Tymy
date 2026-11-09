@@ -140,7 +140,12 @@ samostatného commitu“)
    obrázky a odpověď se při přepnutí odloží a po návratu vrátí (dřív text přešel do jiného
    chatu). V seznamu chatů „Koncept: …“ červeně. Neodeslaná zpráva se při chybě vrátí do
    konceptu svého chatu, i když je otevřený jiný. Jen v paměti (ne po restartu).
-2. **@zmínky při psaní.**
+2. 🟡 **@zmínky při psaní:** „@“ + začátek jména nabídne lidi chatu (členové z chat služby
+   + profily, záloha odesílatelé zpráv; bez diakritiky, „novot“ najde Novotného), ↑↓, Enter/Tab,
+   Esc, klik. Odesílá se `<span itemtype="http://schema.skype.com/Mention" itemid="N">` a
+   `properties.mentions` (JSON v řetězci: `@type`, `itemid`, `mri`, `mentionType: person`,
+   `displayName`). Nabídka ověřena v okně; odeslání zmínky čeká na test uživatelem.
+   Ladění: `TYMY_OPEN_CHAT=… TYMY_COMPOSE="Ahoj @mat"` (jen vyplní pole).
 3. **Formátování při psaní.**
 4. **Výběr emoji.**
 5. **Správa skupinových chatů** (přejmenovat, přidat/odebrat lidi, opustit).

@@ -253,8 +253,11 @@ impl ChatBackend for TeamsBackend {
             .as_ref()
             .map(text::reply_html)
             .unwrap_or_default();
+        let mut mentions = vec![];
         if !message.text.trim().is_empty() {
-            html.push_str(&text::plain_to_html(&message.text));
+            let (body, used) = text::compose_html(&message.text, &message.mentions);
+            html.push_str(&body);
+            mentions = used;
         }
         let mut ams = vec![];
         if !message.images.is_empty() {
@@ -269,8 +272,10 @@ impl ChatBackend for TeamsBackend {
         }
         let name = self.profile.display_name.as_deref();
         self.call(|s| {
-            let (html, ams) = (&html, &ams);
-            async move { chat::send_html(&self.http, &s, conversation, html, name, ams).await }
+            let (html, ams, mentions) = (&html, &ams, &mentions);
+            async move {
+                chat::send_html(&self.http, &s, conversation, html, name, ams, mentions).await
+            }
         })
         .await
     }

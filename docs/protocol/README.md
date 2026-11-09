@@ -87,6 +87,14 @@ Formát zprávy: `id` (ms timestamp), `clientmessageid`, `content` (HTML), `mess
 Přečtení Tymy hlásí jen pro otevřený chat, když má okno fokus a není skryté; jednou pro
 každou novou zprávu (i po chybě až s další zprávou).
 
+### Zmínky při odesílání 🟡
+
+Obsah: `<span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="0">Jan Novák</span>`
+(bez „@“), `itemid` = pořadí zmínky ve zprávě. V těle zprávy `"properties": {"mentions":
+"[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":0,\"mri\":\"8:orgid:<oid>\",
+\"mentionType\":\"person\",\"displayName\":\"Jan Novák\"}]"}` (seznam jako JSON řetězec).
+Tvar podle přijatých zpráv a známých klientů; odeslání čeká na ověření (2026-11-09).
+
 ### Obsah zpráv (HTML) ✅
 
 Ověřeno na ~1200 reálných zprávách (struktura značek, bez obsahu):

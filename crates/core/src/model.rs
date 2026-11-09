@@ -340,6 +340,15 @@ pub struct Outgoing {
     pub text: String,
     pub images: Vec<OutgoingImage>,
     pub reply_to: Option<ReplyRef>,
+    /// Lidé zmínění v textu jako „@Jméno“ (viz [`crate::text::compose_html`]).
+    pub mentions: Vec<MentionRef>,
+}
+
+/// Zmínka osoby v odesílané zprávě; v textu psacího pole je jako „@Jméno“.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionRef {
+    pub mri: UserId,
+    pub name: String,
 }
 
 /// Na co zpráva odpovídá (v Teams se posílá jako citace s náhledem).

@@ -7,9 +7,48 @@ pub mod rich;
 
 /// Escapuje prostý text do HTML zprávy Teams (`<p>…</p>`, nové řádky jako `<br>`).
 pub fn plain_to_html(text: &str) -> String {
+    compose_html(text, &[]).0
+}
+
+/// HTML odesílané zprávy z textu psacího pole. „@Jméno“ lidí z `mentions` se převede na
+/// zmínku Teams (`<span itemtype="http://schema.skype.com/Mention" itemid="N">Jméno</span>`).
+/// Vrací HTML a skutečně použité zmínky v pořadí `itemid` (pro `properties.mentions`).
+pub fn compose_html(
+    text: &str,
+    mentions: &[crate::MentionRef],
+) -> (String, Vec<crate::MentionRef>) {
+    // delší jména dřív („@Jan Novák“ před „@Jan“)
+    let mut by_len: Vec<&crate::MentionRef> =
+        mentions.iter().filter(|m| !m.name.is_empty()).collect();
+    by_len.sort_by_key(|m| std::cmp::Reverse(m.name.len()));
+    let text = text.trim_end();
+    let mut used: Vec<crate::MentionRef> = vec![];
     let mut out = String::with_capacity(text.len() + 7);
     out.push_str("<p>");
-    for c in text.trim_end().chars() {
+    let mut prev: Option<char> = None;
+    let mut i = 0;
+    while let Some(c) = text[i..].chars().next() {
+        if c == '@' && prev.is_none_or(|p| p.is_whitespace() || "([{\"'".contains(p)) {
+            let rest = &text[i + 1..];
+            let found = by_len.iter().find(|m| {
+                rest.starts_with(m.name.as_str())
+                    && rest[m.name.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|n| !n.is_alphanumeric())
+            });
+            if let Some(m) = found {
+                out.push_str(&format!(
+                    r#"<span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="{}">{}</span>"#,
+                    used.len(),
+                    escape_text(&m.name)
+                ));
+                used.push((*m).clone());
+                i += 1 + m.name.len();
+                prev = m.name.chars().last();
+                continue;
+            }
+        }
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -20,9 +59,11 @@ pub fn plain_to_html(text: &str) -> String {
             '\r' => {}
             c => out.push(c),
         }
+        prev = Some(c);
+        i += c.len_utf8();
     }
     out.push_str("</p>");
-    out
+    (out, used)
 }
 
 /// HTML citace pro odpověď na zprávu (stejný tvar, jaký posílá web klient Teams).
@@ -309,6 +350,35 @@ mod tests {
             plain_to_html("a < b & \"c\"\ndruhý řádek\n"),
             "<p>a &lt; b &amp; &quot;c&quot;<br>druhý řádek</p>"
         );
+    }
+
+    #[test]
+    fn composes_mentions() {
+        let jan = crate::MentionRef {
+            mri: "8:orgid:j".into(),
+            name: "Jan Novák".into(),
+        };
+        let jana = crate::MentionRef {
+            mri: "8:orgid:a".into(),
+            name: "Jan".into(),
+        };
+        let (html, used) = compose_html(
+            "@Jan Novák, @Jan a <b>@Janek</b> mail@Jan\n(@Jan Novák)",
+            &[jana.clone(), jan.clone()],
+        );
+        assert_eq!(
+            html,
+            "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"0\">Jan Novák</span>, \
+             <span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"1\">Jan</span> a \
+             &lt;b&gt;@Janek&lt;/b&gt; mail@Jan<br>\
+             (<span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"2\">Jan Novák</span>)</p>"
+        );
+        assert_eq!(used, vec![jan.clone(), jana, jan]);
+        // vlastní HTML naše čtení zpráv pozná jako zmínky
+        let blocks = rich::parse(&html);
+        assert!(format!("{blocks:?}").contains("mention: true"));
+        // bez zmínek stejné jako prostý text
+        assert_eq!(compose_html("@Jan", &[]).0, "<p>@Jan</p>");
     }
 
     #[test]

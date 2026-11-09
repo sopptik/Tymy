@@ -178,6 +178,7 @@ pub async fn send_html(
     html: &str,
     display_name: Option<&str>,
     ams_references: &[String],
+    mentions: &[tymy_core::MentionRef],
 ) -> Result<SentMessage> {
     let url = api_url(
         session,
@@ -202,6 +203,10 @@ pub async fn send_html(
     if !ams_references.is_empty() {
         body["amsreferences"] = json!(ams_references);
     }
+    // zmínky: `itemid` = pořadí `<span … itemid="N">` v obsahu; seznam je JSON v řetězci
+    if !mentions.is_empty() {
+        body["properties"] = json!({ "mentions": mentions_property(mentions) });
+    }
     let resp = authed(http.client.post(url), session)
         .json(&body)
         .send_logged()
@@ -218,6 +223,24 @@ pub async fn send_html(
         client_message_id,
         arrived_at,
     })
+}
+
+/// `properties.mentions` zprávy (tvar jako u web klienta Teams).
+fn mentions_property(mentions: &[tymy_core::MentionRef]) -> String {
+    let list: Vec<Value> = mentions
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            json!({
+                "@type": "http://schema.skype.com/Mention",
+                "itemid": i,
+                "mri": m.mri.as_str(),
+                "mentionType": "person",
+                "displayName": m.name,
+            })
+        })
+        .collect();
+    Value::Array(list).to_string()
 }
 
 /// URL jedné zprávy (`…/conversations/{id}/messages/{msg}`) s volitelnými dalšími segmenty.
@@ -768,6 +791,14 @@ mod tests {
                 assert_eq!(body["messagetype"], "RichText/Html");
                 assert_eq!(body["imdisplayname"], "Jan");
                 assert_eq!(body["amsreferences"], json!(["0-weu-d1-x"]));
+                let mentions: Value =
+                    serde_json::from_str(body["properties"]["mentions"].as_str().unwrap())
+                        .unwrap();
+                assert_eq!(
+                    mentions,
+                    json!([{"@type": "http://schema.skype.com/Mention", "itemid": 0,
+                            "mri": "8:orgid:j", "mentionType": "person", "displayName": "Jan Novák"}])
+                );
                 ResponseTemplate::new(201)
                     .set_body_json(json!({"OriginalArrivalTime": 1700000000000i64}))
             })
@@ -782,6 +813,10 @@ mod tests {
             "<p>Ahoj</p>",
             Some("Jan"),
             &["0-weu-d1-x".to_owned()],
+            &[tymy_core::MentionRef {
+                mri: "8:orgid:j".into(),
+                name: "Jan Novák".into(),
+            }],
         )
         .await
         .unwrap();

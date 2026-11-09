@@ -20,8 +20,8 @@ use tymy_core::text::{
 };
 use tymy_core::{
     AccountId, AccountKind, CalendarEvent, ChatBackend, Conversation, ConversationId,
-    ConversationKind, ConversationPage, Error, EventResponse, Message, MessageId, MessageKind,
-    MessagePage, Outgoing, OutgoingImage, Person, Profile, ReplyRef, one_on_one_id,
+    ConversationKind, ConversationPage, Error, EventResponse, MentionRef, Message, MessageId,
+    MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile, ReplyRef, one_on_one_id,
     one_on_one_peer,
 };
 
@@ -31,6 +31,7 @@ use iced::widget::text::Wrapping;
 
 use crate::calendar::{self as cal, Reminders};
 use crate::clipboard::{self, Clip};
+use crate::mention;
 use crate::notify::{self, ReminderChoice};
 use crate::state::{
     PeerNames, channel_name, group_teams, is_me, is_unread, merge_messages, move_pin, my_mri,
@@ -326,6 +327,12 @@ pub enum Msg {
     MovePin(ConversationId, isize),
     /// Úprava textu v psacím poli.
     Compose(text_editor::Action),
+    /// Nabídka @zmínek: posun výběru, výběr (`None` = vybraná položka), zavření.
+    MentionMove(isize),
+    MentionPick(Option<usize>),
+    MentionClose,
+    /// Členové chatu pro nabídku zmínek.
+    Roster(ConversationId, Result<Vec<Person>, Failure>),
     /// Odpovědět na zprávu (citace nad psacím polem).
     Reply(MessageId),
     CancelReply,
@@ -378,6 +385,15 @@ impl Msg {
                 trace!(event = ?std::mem::discriminant(self), "update")
             }
             Msg::Tick => trace!("update: Tick"),
+            Msg::MentionMove(d) => trace!(d, "update: MentionMove"),
+            Msg::MentionPick(i) => debug!(?i, "update: MentionPick"),
+            Msg::MentionClose => debug!("update: MentionClose"),
+            Msg::Roster(id, r) => debug!(
+                %id,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: Roster"
+            ),
             Msg::CalendarTick => trace!("update: CalendarTick"),
             Msg::CalendarLoaded(account, r) => debug!(
                 %account,
@@ -628,6 +644,7 @@ struct Draft {
     text: String,
     images: Vec<PendingImage>,
     reply: Option<ReplyRef>,
+    mentions: Vec<MentionRef>,
 }
 
 impl Draft {
@@ -748,6 +765,17 @@ pub struct App {
     pending_images: Vec<PendingImage>,
     /// Rozepsané zprávy ostatních chatů (psací pole patří vždy otevřenému chatu).
     drafts: HashMap<ConversationId, Draft>,
+    /// Rozepsaná @zmínka u kurzoru (nabídka lidí) a vybraná položka nabídky.
+    mention: Option<mention::Query>,
+    mention_index: usize,
+    /// Zmínka zavřená Esc (znovu se nenabídne, dokud se nezmění).
+    mention_dismissed: Option<(usize, usize)>,
+    /// Lidé vybraní do zmínek v psacím poli; právě odesílané zmínky.
+    composer_mentions: Vec<MentionRef>,
+    in_flight_mentions: Vec<MentionRef>,
+    /// Členové chatů pro nabídku zmínek (načtené při první „@“).
+    rosters: HashMap<ConversationId, Vec<Person>>,
+    roster_loading: HashSet<ConversationId>,
     /// Obrázky právě odesílané (vrátí se při chybě).
     in_flight_images: Vec<PendingImage>,
     /// Zpráva, na kterou se odpovídá, a odpověď právě odesílaná (vrátí se při chybě).
@@ -861,6 +889,13 @@ impl App {
             tab: Tab::Chats,
             pending_images: vec![],
             drafts: HashMap::new(),
+            mention: None,
+            mention_index: 0,
+            mention_dismissed: None,
+            composer_mentions: vec![],
+            in_flight_mentions: vec![],
+            rosters: HashMap::new(),
+            roster_loading: HashSet::new(),
             in_flight_images: vec![],
             replying: None,
             in_flight_reply: None,
@@ -1862,7 +1897,9 @@ impl App {
             text: self.composer.text(),
             images: std::mem::take(&mut self.pending_images),
             reply: self.replying.take(),
+            mentions: std::mem::take(&mut self.composer_mentions),
         };
+        self.mention = None;
         if let Some(from) = self.selected.clone() {
             if current.is_empty() {
                 self.drafts.remove(&from);
@@ -1876,6 +1913,115 @@ impl App {
             .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
         self.pending_images = next.images;
         self.replying = next.reply;
+        self.composer_mentions = next.mentions;
+    }
+
+    /// Po změně psacího pole: rozepsaná @zmínka u kurzoru (a načtení členů chatu).
+    fn refresh_mention(&mut self) -> Task<Msg> {
+        let cursor = self.composer.cursor();
+        let query = if self.editing.is_some() || cursor.selection.is_some() {
+            None
+        } else {
+            let line = cursor.position.line;
+            self.composer
+                .line(line)
+                .and_then(|l| mention::query_at(line, &l.text, cursor.position.column))
+                .filter(|q| self.mention_dismissed != Some((q.line, q.at)))
+                // za hotovou zmínkou („@Jan Novák …“) už nic nenabízet
+                .filter(|q| {
+                    !self
+                        .composer_mentions
+                        .iter()
+                        .any(|m| q.text.starts_with(&m.name) && q.text.len() > m.name.len())
+                })
+        };
+        let key = |q: &Option<mention::Query>| q.as_ref().map(|q| (q.text.clone(), q.at));
+        if key(&query) != key(&self.mention) {
+            self.mention_index = 0;
+        }
+        self.mention = query;
+        if self.mention.is_none() {
+            return Task::none();
+        }
+        self.fetch_roster()
+    }
+
+    /// Načte členy otevřeného chatu pro zmínky (jednou za běh).
+    fn fetch_roster(&mut self) -> Task<Msg> {
+        let (Some(id), Some(s)) = (self.selected.clone(), self.session()) else {
+            return Task::none();
+        };
+        let kind = self
+            .conversations
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.kind.clone());
+        // kanály mají celý tým; tam stačí odesílatelé zpráv
+        let fits = matches!(
+            kind,
+            Some(ConversationKind::OneOnOne | ConversationKind::Group | ConversationKind::Meeting)
+        );
+        if !fits
+            || self.is_draft(&id)
+            || self.rosters.contains_key(&id)
+            || self.roster_loading.contains(&id)
+        {
+            return Task::none();
+        }
+        let (backend, me) = (s.backend.clone(), my_mri(&s.profile));
+        self.roster_loading.insert(id.clone());
+        Task::perform(
+            {
+                let id = id.clone();
+                async move {
+                    let members = backend.members(&id).await?;
+                    let others: Vec<_> = members.into_iter().filter(|m| *m != me).collect();
+                    backend.profiles(&others).await
+                }
+            },
+            move |r| Msg::Roster(id.clone(), r.map_err(Failure::from)),
+        )
+    }
+
+    /// Lidé, které nabídnout k rozepsané zmínce: členové chatu a odesílatelé zpráv (bez mě).
+    fn mention_candidates(&self) -> Vec<MentionRef> {
+        const MAX: usize = 6;
+        let (Some(q), Some(id), Some(s)) = (&self.mention, &self.selected, self.session()) else {
+            return vec![];
+        };
+        let me = my_mri(&s.profile);
+        let mut people: Vec<MentionRef> = vec![];
+        let mut add = |mri: &tymy_core::UserId, name: &str| {
+            let name = name.trim();
+            if *mri != me && !name.is_empty() && !people.iter().any(|p| p.mri == *mri) {
+                people.push(MentionRef {
+                    mri: mri.clone(),
+                    name: name.to_owned(),
+                });
+            }
+        };
+        // 1:1 chat: protějšek podle id chatu a jména v seznamu
+        if let Some(oid) = me.as_str().strip_prefix("8:orgid:")
+            && let Some(peer) = one_on_one_peer(id, oid)
+            && let Some(c) = self.conversations.iter().find(|c| &c.id == id)
+        {
+            add(&peer, &self.peers.title(c));
+        }
+        for p in self.rosters.get(id).into_iter().flatten() {
+            add(&p.mri, &p.display_name);
+        }
+        for m in self.messages.get(id).into_iter().flatten().rev() {
+            if let (Some(mri), Some(name)) = (&m.sender, &m.sender_name) {
+                add(mri, name);
+            }
+        }
+        let mut found: Vec<MentionRef> = people
+            .into_iter()
+            .filter(|p| mention::matches(&p.name, &q.text))
+            .collect();
+        found.sort_by_key(|p| mention::fold(&p.name));
+        found.truncate(MAX);
+        found
     }
 
     /// Koncept chatu pro náhled v seznamu (první neprázdný řádek textu).
@@ -2509,6 +2655,13 @@ impl App {
                                 || self.peers.title(c).to_lowercase().contains(&want)
                         }) {
                             tasks.push(Task::done(Msg::Select(c.id.clone())));
+                            // ladění: `TYMY_COMPOSE=<text>` vloží text do psacího pole
+                            // (nic neodesílá; např. zkouška nabídky zmínek)
+                            if let Ok(t) = std::env::var("TYMY_COMPOSE") {
+                                tasks.push(Task::done(Msg::Compose(text_editor::Action::Edit(
+                                    text_editor::Edit::Paste(Arc::new(t)),
+                                ))));
+                            }
                         }
                     }
                     // ladění: `TYMY_SEARCH=<dotaz>` vyplní hledání
@@ -3352,6 +3505,57 @@ impl App {
             }
             Msg::Compose(action) => {
                 self.composer.perform(action);
+                self.refresh_mention()
+            }
+            Msg::MentionMove(delta) => {
+                let n = self.mention_candidates().len();
+                if n > 0 {
+                    self.mention_index =
+                        (self.mention_index as isize + delta).rem_euclid(n as isize) as usize;
+                }
+                Task::none()
+            }
+            Msg::MentionPick(index) => {
+                let candidates = self.mention_candidates();
+                let Some(q) = self.mention.take() else {
+                    return Task::none();
+                };
+                let Some(person) = candidates.get(index.unwrap_or(self.mention_index)).cloned()
+                else {
+                    return Task::none();
+                };
+                // nahradit „@dotaz“ za „@Jméno “
+                for _ in 0..=q.text.chars().count() {
+                    self.composer
+                        .perform(text_editor::Action::Select(text_editor::Motion::Left));
+                }
+                self.composer
+                    .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                        Arc::new(format!("@{} ", person.name)),
+                    )));
+                if !self.composer_mentions.iter().any(|m| m.mri == person.mri) {
+                    self.composer_mentions.push(person);
+                }
+                operation::focus(COMPOSER)
+            }
+            Msg::MentionClose => {
+                if let Some(q) = self.mention.take() {
+                    self.mention_dismissed = Some((q.line, q.at));
+                }
+                Task::none()
+            }
+            Msg::Roster(id, r) => {
+                self.roster_loading.remove(&id);
+                match r {
+                    Ok(people) => {
+                        self.rosters.insert(id, people);
+                    }
+                    Err(e) => {
+                        tracing::warn!(%id, error = %e.text, "členové chatu pro zmínky");
+                        // záloha: odesílatelé zpráv; znovu nezkoušet
+                        self.rosters.insert(id, vec![]);
+                    }
+                }
                 Task::none()
             }
             Msg::Send => {
@@ -3374,6 +3578,14 @@ impl App {
                 self.in_flight_images = std::mem::take(&mut self.pending_images);
                 self.in_flight_reply = self.replying.take();
                 let reply_to = self.in_flight_reply.clone();
+                self.mention = None;
+                self.in_flight_mentions = std::mem::take(&mut self.composer_mentions);
+                let mentions: Vec<MentionRef> = self
+                    .in_flight_mentions
+                    .iter()
+                    .filter(|m| text.contains(&format!("@{}", m.name)))
+                    .cloned()
+                    .collect();
                 let images: Vec<OutgoingImage> = self
                     .in_flight_images
                     .iter()
@@ -3392,6 +3604,7 @@ impl App {
                     text: text.clone(),
                     images,
                     reply_to,
+                    mentions,
                 });
                 // U nového chatu: když vlákno neexistuje, založit ho a poslat znovu.
                 let draft_peer = self.draft_people.get(&id).map(|p| p.mri.clone());
@@ -3433,6 +3646,7 @@ impl App {
             }
             Msg::Sent(requested, _, Ok(id)) => {
                 self.sending = false;
+                self.in_flight_mentions.clear();
                 self.in_flight_images.clear();
                 self.in_flight_reply = None;
                 if id != requested {
@@ -3469,6 +3683,7 @@ impl App {
                 self.sending = false;
                 let images = std::mem::take(&mut self.in_flight_images);
                 let reply = self.in_flight_reply.take();
+                let mentions = std::mem::take(&mut self.in_flight_mentions);
                 if self.selected.as_ref() != Some(&requested) {
                     // uživatel mezitím přešel jinam: vrátit do konceptu toho chatu
                     let d = self.drafts.entry(requested).or_default();
@@ -3481,6 +3696,7 @@ impl App {
                     if d.reply.is_none() {
                         d.reply = reply;
                     }
+                    d.mentions.extend(mentions);
                     return self.fail(e);
                 }
                 // vrátit i obrázky
@@ -3490,6 +3706,7 @@ impl App {
                 if self.replying.is_none() {
                     self.replying = reply;
                 }
+                self.composer_mentions.extend(mentions);
                 // vrátit text, ať se neztratí
                 if self.composer.text().trim().is_empty() {
                     self.composer = text_editor::Content::with_text(&text);
@@ -4894,8 +5111,37 @@ impl App {
         } else {
             space().into()
         };
+        let mention_candidates = self.mention_candidates();
+        let mention_list: Element<'a, Msg> = if mention_candidates.is_empty() {
+            space().into()
+        } else {
+            let items = mention_candidates.iter().enumerate().map(|(i, p)| {
+                let selected = i == self.mention_index;
+                button(
+                    row![avatar(&p.name, 24.0), text(p.name.clone()).size(13)]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([4, 8])
+                .style(move |t: &Theme, st| style::list_item(t, st, selected))
+                .on_press(Msg::MentionPick(Some(i)))
+                .into()
+            });
+            container(
+                column![
+                    text("Zmínit (↑↓, Enter, Esc)").size(11).style(muted),
+                    Column::with_children(items).spacing(1),
+                ]
+                .spacing(4),
+            )
+            .padding([6, 4])
+            .max_width(360)
+            .into()
+        };
         let composer = container(
             container(column![
+                mention_list,
                 banner,
                 attachments,
                 row![
@@ -4908,6 +5154,7 @@ impl App {
                                 self.composer.text().trim_end_matches('\n').is_empty()
                                     && !self.pending_images.is_empty();
                             let keys = ComposerKeys {
+                                mention: !mention_candidates.is_empty(),
                                 remove_last,
                                 cancel: if self.editing.is_some() {
                                     Some(Msg::CancelEdit)
@@ -5008,6 +5255,8 @@ impl App {
 
 /// Stav psacího pole pro klávesové zkratky.
 struct ComposerKeys {
+    /// Je otevřená nabídka zmínek (šipky, Enter/Tab, Esc patří jí).
+    mention: bool,
     /// Pole je prázdné a jsou vložené obrázky → Backspace odebere poslední.
     remove_last: bool,
     /// Co zruší Esc (úprava, odpověď).
@@ -5069,6 +5318,18 @@ fn composer_keys(
     keys: &ComposerKeys,
 ) -> Option<text_editor::Binding<Msg>> {
     use iced::keyboard::{Key, key::Named};
+    if keys.mention && kp.modifiers.is_empty() {
+        let msg = match kp.key {
+            Key::Named(Named::ArrowUp) => Some(Msg::MentionMove(-1)),
+            Key::Named(Named::ArrowDown) => Some(Msg::MentionMove(1)),
+            Key::Named(Named::Enter | Named::Tab) => Some(Msg::MentionPick(None)),
+            Key::Named(Named::Escape) => Some(Msg::MentionClose),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            return Some(text_editor::Binding::Custom(msg));
+        }
+    }
     if let Some(cancel) = &keys.cancel
         && kp.key == Key::Named(Named::Escape)
     {
