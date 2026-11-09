@@ -278,6 +278,8 @@ Priorita uživatele 2026-11-09 (předběhla HAR a hovory); čtení bez odchytu p
    u pozvánky Přijmout / Předběžně / Odmítnout. Zápis přes Microsoft Graph (stejné přihlášení,
    `Calendars.ReadWrite`); web klient jde přes Outlook (OWA + GraphQL), viz protokol.
    Formulář ověřen v okně, zápis na server čeká na test. Ladění: `TYMY_OPEN_TAB=meeting`.
+   Připomínka uživatele (2026-11-09): „když kliknu přidat schůzku, mělo by zmizet vybrání schůzky
+   ve sloupci“ → při otevřeném formuláři není v agendě nic vybrané.
 5. Volitelně týdenní mřížka, barvy kategorií, opakované schůzky, úprava schůzky.
 
 ## 5. Moje doporučení k pořadí

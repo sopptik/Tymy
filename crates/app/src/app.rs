@@ -5061,7 +5061,11 @@ impl App {
                     .flatten()
                     .any(|s| s.to_lowercase().contains(query))
         };
-        let selected = self.selected_event().map(|e| e.id.as_str());
+        // při psaní nové schůzky není v agendě nic vybrané
+        let selected = self
+            .selected_event()
+            .filter(|_| self.meeting_form.is_none())
+            .map(|e| e.id.as_str());
         let mut day = None;
         let mut any = false;
         for e in events.iter().filter(matches) {
