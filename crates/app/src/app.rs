@@ -622,6 +622,20 @@ pub struct PendingImage {
     preview: image::Handle,
 }
 
+/// Rozepsaná zpráva chatu, který zrovna není otevřený: text, vložené obrázky a odpověď.
+#[derive(Default)]
+struct Draft {
+    text: String,
+    images: Vec<PendingImage>,
+    reply: Option<ReplyRef>,
+}
+
+impl Draft {
+    fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.images.is_empty() && self.reply.is_none()
+    }
+}
+
 /// Zpráva v režimu výběru: její text v (jen pro čtení) editoru, který umí označování.
 pub struct Selecting {
     id: MessageId,
@@ -732,6 +746,8 @@ pub struct App {
     tab: Tab,
     /// Obrázky vložené do psacího pole, čekající na odeslání.
     pending_images: Vec<PendingImage>,
+    /// Rozepsané zprávy ostatních chatů (psací pole patří vždy otevřenému chatu).
+    drafts: HashMap<ConversationId, Draft>,
     /// Obrázky právě odesílané (vrátí se při chybě).
     in_flight_images: Vec<PendingImage>,
     /// Zpráva, na kterou se odpovídá, a odpověď právě odesílaná (vrátí se při chybě).
@@ -844,6 +860,7 @@ impl App {
             media: HashMap::new(),
             tab: Tab::Chats,
             pending_images: vec![],
+            drafts: HashMap::new(),
             in_flight_images: vec![],
             replying: None,
             in_flight_reply: None,
@@ -1822,6 +1839,39 @@ impl App {
     }
 
     /// Ukončí úpravu zprávy a vrátí do psacího pole původně rozepsaný text.
+    /// Odloží rozepsanou zprávu otevřeného chatu a do psacího pole dá koncept chatu `to`.
+    fn switch_draft(&mut self, to: &ConversationId) {
+        let current = Draft {
+            text: self.composer.text(),
+            images: std::mem::take(&mut self.pending_images),
+            reply: self.replying.take(),
+        };
+        if let Some(from) = self.selected.clone() {
+            if current.is_empty() {
+                self.drafts.remove(&from);
+            } else {
+                self.drafts.insert(from, current);
+            }
+        }
+        let next = self.drafts.remove(to).unwrap_or_default();
+        self.composer = text_editor::Content::with_text(next.text.trim_end_matches('\n'));
+        self.composer
+            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+        self.pending_images = next.images;
+        self.replying = next.reply;
+    }
+
+    /// Koncept chatu pro náhled v seznamu (první neprázdný řádek textu).
+    fn draft_preview(&self, id: &ConversationId) -> Option<String> {
+        let d = self.drafts.get(id).filter(|d| !d.is_empty())?;
+        let line = d.text.lines().map(str::trim).find(|l| !l.is_empty());
+        Some(match line {
+            Some(l) => l.to_owned(),
+            None if !d.images.is_empty() => "obrázek".into(),
+            None => "odpověď".into(),
+        })
+    }
+
     fn cancel_edit(&mut self) {
         if let Some(ed) = self.editing.take() {
             self.composer = text_editor::Content::with_text(&ed.draft);
@@ -2563,8 +2613,8 @@ impl App {
             Msg::Select(id) => {
                 self.group_builder = None;
                 if self.selected.as_ref() != Some(&id) {
-                    self.replying = None;
                     self.cancel_edit();
+                    self.switch_draft(&id);
                 }
                 self.highlight = None;
                 self.reacting = None;
@@ -3398,14 +3448,30 @@ impl App {
                     operation::snap_to_end(MESSAGES),
                 ])
             }
-            Msg::Sent(_, text, Err(e)) => {
+            Msg::Sent(requested, text, Err(e)) => {
                 self.sending = false;
+                let images = std::mem::take(&mut self.in_flight_images);
+                let reply = self.in_flight_reply.take();
+                if self.selected.as_ref() != Some(&requested) {
+                    // uživatel mezitím přešel jinam: vrátit do konceptu toho chatu
+                    let d = self.drafts.entry(requested).or_default();
+                    if d.text.trim().is_empty() {
+                        d.text = text;
+                    }
+                    let mut back = images;
+                    back.append(&mut d.images);
+                    d.images = back;
+                    if d.reply.is_none() {
+                        d.reply = reply;
+                    }
+                    return self.fail(e);
+                }
                 // vrátit i obrázky
-                let mut back = std::mem::take(&mut self.in_flight_images);
+                let mut back = images;
                 back.append(&mut self.pending_images);
                 self.pending_images = back;
                 if self.replying.is_none() {
-                    self.replying = self.in_flight_reply.take();
+                    self.replying = reply;
                 }
                 // vrátit text, ať se neztratí
                 if self.composer.text().trim().is_empty() {
@@ -4417,6 +4483,12 @@ impl App {
                     String::new()
                 }
             });
+        let draft = (!selected).then(|| self.draft_preview(&c.id)).flatten();
+        let has_draft = draft.is_some();
+        let preview = match draft {
+            Some(d) => format!("Koncept: {d}"),
+            None => preview,
+        };
         let title_font = if unread { BOLD } else { SEMIBOLD };
         let top = row![
             text(truncate(&title, 20))
@@ -4435,7 +4507,7 @@ impl App {
             text(truncate(&preview, 27))
                 .wrapping(Wrapping::None)
                 .size(12)
-                .style(muted),
+                .style(if has_draft { style::danger } else { muted }),
             space::horizontal(),
             unread_dot(unread),
         ]

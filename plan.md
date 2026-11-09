@@ -134,6 +134,17 @@ podmínek služby Microsoftu.
 | Kalendář: agenda 14 dní, detail, „Připojit“, chat schůzky | ✅ (middle tier, ověřeno na obou pracovních účtech) |
 | Připomínky událostí (všechny účty, Připojit / Odložit) | 🟡 hotovo, čeká na test uživatelem |
 
+## 3a. Psaní a správa chatů (2026-11-09, zadání „naimplementuj body 1-5 a každý dej do
+samostatného commitu“)
+1. ✅ **Koncepty po chatech:** psací pole patří otevřenému chatu; rozepsaný text, vložené
+   obrázky a odpověď se při přepnutí odloží a po návratu vrátí (dřív text přešel do jiného
+   chatu). V seznamu chatů „Koncept: …“ červeně. Neodeslaná zpráva se při chybě vrátí do
+   konceptu svého chatu, i když je otevřený jiný. Jen v paměti (ne po restartu).
+2. **@zmínky při psaní.**
+3. **Formátování při psaní.**
+4. **Výběr emoji.**
+5. **Správa skupinových chatů** (přejmenovat, přidat/odebrat lidi, opustit).
+
 ## 4. Plán dalších kroků
 
 ### Fáze 1a: dokončení chatu (nepotřebuje odchyt provozu)
