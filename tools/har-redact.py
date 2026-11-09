@@ -41,6 +41,8 @@ LONG_SECRET = re.compile(r"\b(?:0\.A[\w-]{40,}|M\.C\d+_[\w!*$.-]{40,}|1\.A[\w-]{
 EMAIL = re.compile(r"(?<![\w:%-])[\w.%+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
 # Id konverzací vypadají jako e-mail (`19:…@thread.v2`, `…@unq.gbl.spaces`): nechat.
 NOT_EMAIL = re.compile(r"@(thread\.|unq\.gbl\.spaces|p2p\.|meeting)", re.I)
+# E-mail zakódovaný v URL (`jan.novak%40firma.cz`, dvakrát `%2540`).
+EMAIL_ENC = re.compile(r"[\w.+-]+%(?:25)?40[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}", re.I)
 # Osobní obsah (texty zpráv, jména, názvy chatů): k analýze protokolu stačí délka.
 TEXT_KEYS = re.compile(
     r"^(content|imdisplayname|displayName|givenName|surname|topic|threadtopic|"
@@ -74,6 +76,7 @@ def scrub_text(s: str) -> str:
     s = JWT.sub(lambda m: jwt_claims(m.group(0)), s)
     s = SKYPETOKEN.sub(lambda m: m.group(1) + REDACTED, s)
     s = LONG_SECRET.sub(REDACTED, s)
+    s = EMAIL_ENC.sub("<e-mail>", s)
     return EMAIL.sub(lambda m: m.group(0) if NOT_EMAIL.search(m.group(0)) else "<e-mail>", s)
 
 
@@ -194,7 +197,19 @@ def scrub_entry(e):
     for frame in e.get("_webSocketMessages", []) or []:
         if isinstance(frame.get("data"), str):
             frame["data"] = scrub_body(frame["data"])
-    return e
+    # pojistka: všechny řetězce v záznamu (i `_initiator` od Chrome, klíče JSON v tělech)
+    return scrub_strings(e)
+
+
+def scrub_strings(x):
+    """Projde celou strukturu a v každém řetězci (i v klíčích) odstraní tokeny a e-maily."""
+    if isinstance(x, dict):
+        return {scrub_text(k): scrub_strings(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [scrub_strings(v) for v in x]
+    if isinstance(x, str):
+        return scrub_text(x)
+    return x
 
 
 ID_PATTERNS = [
@@ -269,8 +284,8 @@ def main():
     KEEP_TEXT = args.keep_text
     har = json.loads(args.har.read_text(encoding="utf-8"))
     if not args.summary_only:
-        for e in har.get("log", {}).get("entries", []):
-            scrub_entry(e)
+        log = har.get("log", {})
+        log["entries"] = [scrub_entry(e) for e in log.get("entries", [])]
         har.get("log", {}).pop("pages", None)
         out = args.output or args.har.with_name(args.har.stem + ".redacted.har")
         if out.resolve() == args.har.resolve():
