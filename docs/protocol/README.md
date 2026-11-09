@@ -252,6 +252,11 @@ výchozí je proto z `settings.toml`. Další pole: `iCalUID`, `cleanGlobalObjec
 
 ## 7. Týmy a kanály ✅
 
+Prázdné konverzace (ještě bez jediné zprávy) mají v `properties` `isemptyconversation: "True"`
+a žádnou `lastMessage`: chaty naplánovaných schůzek, 1:1 s aplikací (`28:…`), nové kanály.
+Web klient je v seznamu chatů neukazuje; Tymy také ne (kromě rozepsaného nového chatu
+a otevřeného chatu), kanály ano (2026-11-09).
+
 Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - kořen týmu (zároveň obecný kanál): `threadType: "space"`, `productThreadType: "TeamsTeam"`,
   `spaceThreadTopic` = název týmu, `groupId`,

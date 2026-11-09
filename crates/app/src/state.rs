@@ -114,6 +114,13 @@ pub fn is_unread(c: &Conversation, me: &Profile, read_locally: Option<&MessageId
         && n(&last.id) > read
 }
 
+/// Prázdný chat: ještě v něm nepadla žádná zpráva (server ho posílá s
+/// `isemptyconversation: True`, např. chat naplánované schůzky nebo konverzace s aplikací).
+/// Web klient Teams takové chaty v seznamu neukazuje; kanály se ukazují vždy.
+pub fn is_empty_chat(c: &Conversation) -> bool {
+    c.is_chat() && c.last_message.is_none()
+}
+
 /// Počet nepřečtených konverzací (pro neaktivní účet, bez lokálního čtení).
 pub fn unread_count(convs: &[Conversation], me: &Profile) -> usize {
     convs.iter().filter(|c| is_unread(c, me, None)).count()
@@ -303,6 +310,19 @@ mod tests {
             read_up_to: None,
             team: None,
         }
+    }
+
+    #[test]
+    fn empty_chats_are_recognized() {
+        let mut c = conv(Some("Schůzka"));
+        c.kind = ConversationKind::Meeting;
+        assert!(is_empty_chat(&c), "chat schůzky bez zpráv");
+        c.kind = ConversationKind::Channel;
+        assert!(!is_empty_chat(&c), "kanál se ukazuje i prázdný");
+        let mut chat = conv(None);
+        assert!(is_empty_chat(&chat));
+        chat.last_message = Some(msg("1", "8:orgid:x", "Jan Novák"));
+        assert!(!is_empty_chat(&chat), "chat se zprávou se ukazuje");
     }
 
     fn at(id: &str, ms: Option<i64>) -> Conversation {

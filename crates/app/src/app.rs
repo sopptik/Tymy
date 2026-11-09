@@ -35,8 +35,8 @@ use crate::emoji;
 use crate::mention;
 use crate::notify::{self, ReminderChoice};
 use crate::state::{
-    PeerNames, channel_name, group_teams, is_me, is_unread, merge_messages, move_pin, my_mri,
-    order_chats, toggle_reaction, unread_count,
+    PeerNames, channel_name, group_teams, is_empty_chat, is_me, is_unread, merge_messages,
+    move_pin, my_mri, order_chats, toggle_reaction, unread_count,
 };
 use crate::style::{self, BOLD, SEMIBOLD, accent, muted};
 use crate::tray::{self, TrayEvent, TrayHandle};
@@ -5414,7 +5414,11 @@ impl App {
     /// Záložka Týmy: týmy podle názvu, pod nimi kanály.
     /// Zobrazit konverzaci v seznamu? Nepřístupné ne (kromě právě otevřené).
     fn listed(&self, c: &Conversation) -> bool {
-        !self.forbidden.contains(&c.id) || self.selected.as_ref() == Some(&c.id)
+        if self.selected.as_ref() == Some(&c.id) {
+            return true;
+        }
+        // bez přístupu (403) a prázdné chaty (bez zpráv, kromě rozepsaných nových) skrýt
+        !self.forbidden.contains(&c.id) && !(is_empty_chat(c) && !self.is_draft(&c.id))
     }
 
     fn team_list<'a>(&'a self, query: &str) -> Vec<Element<'a, Msg>> {
