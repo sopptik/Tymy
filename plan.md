@@ -63,6 +63,9 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   o schůzku a ne nový chat“ → ikona v liště má u připomenuté schůzky oranžové hodiny vpravo
   dole (nepřečtené chaty zůstávají červenou tečkou vpravo nahoře), popisek „Připomínka
   schůzky: … v 10:00 (za 12 min)“ a položku v menu ikony; trvá i po zmizení notifikace.
+- **Smazání hledání (2026-11-09):** „přidej do políčka vyhledávání ikonku na smazání obsahu
+  vstupního políčka“ → křížek ✕ vpravo v poli (jen když není prázdné), smaže dotaz a vrátí
+  kurzor do pole.
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová

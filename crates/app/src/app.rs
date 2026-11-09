@@ -43,6 +43,7 @@ use crate::tray::{self, TrayEvent, TrayHandle};
 
 const COMPOSER: Id = Id::new("composer");
 const GROUP_QUERY: Id = Id::new("group-query");
+const SEARCH: Id = Id::new("search");
 const MESSAGES: Id = Id::new("messages");
 /// Dokud nemáme trouter (WebSocket), obnovujeme seznam chatů periodicky (jen nejnovější
 /// stránku ke sloučení). Jednou za `FULL_REFRESH` znovu načteme všechny už načtené stránky
@@ -318,6 +319,8 @@ pub enum Msg {
     /// Klik na „Nové zprávy“: posunout na nejnovější.
     JumpToNewest,
     Search(String),
+    /// Křížek v hledání: smazat dotaz a vrátit kurzor do pole.
+    ClearSearch,
     /// Uplynula pauza v psaní hledaného výrazu (`u64` = pořadí dotazu).
     SearchFire(u64),
     People(u64, Result<Vec<Person>, Failure>),
@@ -499,6 +502,7 @@ impl Msg {
             }
             Msg::Tick => trace!("update: Tick"),
             Msg::MentionMove(d) => trace!(d, "update: MentionMove"),
+            Msg::ClearSearch => debug!("update: ClearSearch"),
             Msg::ToggleEmoji => debug!("update: ToggleEmoji"),
             Msg::ToggleChatPanel => debug!("update: ToggleChatPanel"),
             Msg::NewMeeting => debug!("update: NewMeeting"),
@@ -3379,6 +3383,9 @@ impl App {
                 }
             }
 
+            Msg::ClearSearch => {
+                Task::done(Msg::Search(String::new())).chain(operation::focus(SEARCH))
+            }
             Msg::Search(s) if self.tab == Tab::Calendar => {
                 self.search = s;
                 Task::none()
@@ -5305,11 +5312,38 @@ impl App {
             self.account_menu_view(session),
             container(tabs).padding([0, 12]),
             container({
-                let search = text_input(placeholder, &self.search)
+                let filled = !self.search.is_empty();
+                let input = text_input(placeholder, &self.search)
+                    .id(SEARCH)
                     .on_input(Msg::Search)
-                    .padding([8, 12])
+                    .padding(iced::Padding {
+                        top: 8.0,
+                        right: if filled { 32.0 } else { 12.0 },
+                        bottom: 8.0,
+                        left: 12.0,
+                    })
                     .size(13)
                     .style(style::search_input);
+                let mut search = stack![input].width(Length::Fill);
+                if filled {
+                    search = search.push(
+                        container(iced::widget::tooltip(
+                            button(text("✕").size(12).center())
+                                .width(24)
+                                .height(24)
+                                .padding(0)
+                                .style(style::ghost)
+                                .on_press(Msg::ClearSearch),
+                            container(text("Smazat hledání").size(11))
+                                .padding([3, 8])
+                                .style(style::tooltip),
+                            iced::widget::tooltip::Position::Bottom,
+                        ))
+                        .padding([0, 4])
+                        .align_right(Length::Fill)
+                        .center_y(Length::Fill),
+                    );
+                }
                 let plus = match self.tab {
                     Tab::Chats => Some((Msg::NewGroup, "Nový skupinový chat")),
                     // nová schůzka je jen vpravo nahoře nad týdenní mřížkou
