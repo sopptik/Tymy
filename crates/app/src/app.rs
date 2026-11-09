@@ -295,7 +295,7 @@ pub enum Msg {
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
     /// Nová šířka okna (šířka bublin se odvíjí od místa ve vlákně).
-    WindowResized(f32),
+    WindowResized(f32, f32),
     Tick,
     /// Seznam konverzací; `bool` = všechny dosud načtené stránky (jinak jen nejnovější
     /// stránka ke sloučení).
@@ -389,6 +389,11 @@ pub enum Msg {
     GridMove(usize, f32),
     GridPress(usize),
     MouseUp,
+    /// Přesun plovoucího formuláře: myš nad hlavičkou (pozice v ní), stisk hlavičky,
+    /// pohyb myši v okně během přesunu.
+    FormGrabMove(iced::Point),
+    FormGrab,
+    CursorMoved(iced::Point),
     WeekLoaded(
         AccountId,
         chrono::NaiveDate,
@@ -499,6 +504,8 @@ impl Msg {
             Msg::NewMeeting => debug!("update: NewMeeting"),
             Msg::WeekShift(d) => debug!(d, "update: WeekShift"),
             Msg::GridMove(..) | Msg::MouseUp => trace!("update: GridMouse"),
+            Msg::FormGrabMove(_) | Msg::CursorMoved(_) => trace!("update: FormMove"),
+            Msg::FormGrab => debug!("update: FormGrab"),
             Msg::GridPress(day) => debug!(day, "update: GridPress"),
             Msg::WeekLoaded(account, week, r) => debug!(
                 %account,
@@ -731,7 +738,7 @@ impl Msg {
             Msg::HideToast(_) => trace!("update: HideToast"),
             Msg::SystemTheme(mode) => debug!(?mode, "update: SystemTheme"),
             Msg::WindowFocus(f) => debug!(focused = f, "update: WindowFocus"),
-            Msg::WindowResized(w) => trace!(width = w, "update: WindowResized"),
+            Msg::WindowResized(w, h) => trace!(width = w, height = h, "update: WindowResized"),
             Msg::NotificationClicked(id) => debug!(%id, "update: NotificationClicked"),
             Msg::Noop => trace!("update: Noop"),
             Msg::TrayReady(_) => debug!("update: TrayReady"),
@@ -799,6 +806,8 @@ const WEEK_GUTTER: f32 = 44.0;
 const WEEK_PAD: f32 = 12.0;
 const WEEK_SCROLLBAR: f32 = 12.0;
 const WEEK_GRID: Id = Id::new("week-grid");
+/// Šířka plovoucího formuláře nové schůzky.
+const FORM_WIDTH: f32 = 460.0;
 /// Výchozí šířka okna (než přijde první událost o velikosti).
 pub const WINDOW_WIDTH: f32 = 1100.0;
 
@@ -944,6 +953,11 @@ pub struct App {
     /// Poslední pozice myši nad mřížkou (den, minuty) a rozpracovaný výběr času tažením.
     grid_hover: Option<(usize, i64)>,
     grid_drag: Option<GridDrag>,
+    /// Plovoucí formulář schůzky: poloha levého horního rohu v panelu (`None` = výchozí
+    /// vpravo), místo uchopení v hlavičce a jestli se právě přesouvá.
+    form_pos: Option<(f32, f32)>,
+    form_grab: (f32, f32),
+    form_moving: bool,
     /// Formulář nové schůzky; událost čekající na potvrzení zrušení; běží změna události.
     meeting_form: Option<MeetingForm>,
     confirm_cancel_event: Option<String>,
@@ -1008,6 +1022,8 @@ pub struct App {
     focused: bool,
     /// Šířka okna (px); podle ní se počítá šířka bublin.
     window_width: f32,
+    /// Výška okna (px); podle ní se omezí výška plovoucího formuláře schůzky.
+    window_height: f32,
     /// Notifikace až po prvním obnovení ze sítě.
     notify_ready: bool,
     tray: Option<TrayHandle>,
@@ -1115,6 +1131,7 @@ impl App {
             system_dark: false,
             focused: true,
             window_width: WINDOW_WIDTH,
+            window_height: 720.0,
             notify_ready: false,
             tray: None,
             tray_unread: 0,
@@ -1138,6 +1155,9 @@ impl App {
             week_loading: HashSet::new(),
             grid_hover: None,
             grid_drag: None,
+            form_pos: None,
+            form_grab: (0.0, 0.0),
+            form_moving: false,
             meeting_form: None,
             confirm_cancel_event: None,
             event_busy: false,
@@ -1155,6 +1175,7 @@ impl App {
         fresh.system_dark = self.system_dark;
         fresh.focused = self.focused;
         fresh.window_width = self.window_width;
+        fresh.window_height = self.window_height;
         fresh.hidden = self.hidden;
         fresh.tray = self.tray.take();
         fresh.tray_unread = self.tray_unread;
@@ -1293,10 +1314,10 @@ impl App {
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::WindowFocus(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::WindowFocus(false)),
             iced::Event::Window(iced::window::Event::Resized(size)) => {
-                Some(Msg::WindowResized(size.width))
+                Some(Msg::WindowResized(size.width, size.height))
             }
             iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
-                Some(Msg::WindowResized(size.width))
+                Some(Msg::WindowResized(size.width, size.height))
             }
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
@@ -1313,7 +1334,7 @@ impl App {
             tray::subscription(),
             iced::window::close_requests().map(Msg::CloseRequested),
         ];
-        match self.phase {
+        let subs = match self.phase {
             Phase::Ready(_) => Subscription::batch(always.into_iter().chain([
                 iced::time::every(REFRESH).map(|_| Msg::Tick),
                 iced::time::every(CALENDAR_TICK).map(|_| Msg::CalendarTick),
@@ -1324,6 +1345,17 @@ impl App {
                 },
             ])),
             _ => Subscription::batch(always),
+        };
+        if self.form_moving {
+            let moves = iced::event::listen_with(|event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Msg::CursorMoved(position))
+                }
+                _ => None,
+            });
+            Subscription::batch([subs, moves])
+        } else {
+            subs
         }
     }
 
@@ -1943,6 +1975,20 @@ impl App {
             async move { backend.calendar(from, to).await.map_err(Failure::from) },
             move |r| Msg::WeekLoaded(key.0.clone(), key.1, r),
         )
+    }
+
+    /// Den v zobrazeném týdnu a minuty od–do z formuláře nové schůzky (je-li čitelný).
+    fn form_slot(&self) -> Option<(usize, i64, i64)> {
+        let f = self.meeting_form.as_ref()?;
+        let day = cal::parse_date(&f.date, Local::now().date_naive())?;
+        let index = (day - self.week).num_days();
+        if !(0..7).contains(&index) {
+            return None;
+        }
+        let minutes = |t: chrono::NaiveTime| i64::from(t.hour() * 60 + t.minute());
+        let from = minutes(cal::parse_time(&f.start)?);
+        let to = minutes(cal::parse_time(&f.end)?);
+        (to > from).then_some((index as usize, from, to))
     }
 
     /// Posune mřížku na hodinu před `at`, jinak na začátek pracovního dne (u dneška hodinu
@@ -2925,8 +2971,14 @@ impl App {
                 }
                 ReminderChoice::Dismissed => Task::none(),
             },
+            Msg::SelectEvent(id) if self.meeting_form.is_some() => {
+                // rozepsaný formulář nezavírat; jen ukázat týden s událostí
+                if let Some(day) = self.find_event(&id).map(cal::start_day) {
+                    self.week = cal::week_start(day);
+                }
+                self.fetch_week(chrono::Duration::minutes(1))
+            }
             Msg::SelectEvent(id) => {
-                self.meeting_form = None;
                 self.confirm_cancel_event = None;
                 if let Some(account) = self.active_account().cloned() {
                     self.ack_meeting(&account, &id);
@@ -3512,8 +3564,9 @@ impl App {
                 Task::none()
             }
             Msg::GroupCreate => self.create_group_draft(),
-            Msg::WindowResized(w) => {
+            Msg::WindowResized(w, h) => {
                 self.window_width = w;
+                self.window_height = h;
                 Task::none()
             }
             Msg::WindowFocus(f) => {
@@ -3959,13 +4012,44 @@ impl App {
                 }
                 Task::none()
             }
+            Msg::FormGrabMove(p) => {
+                if !self.form_moving {
+                    self.form_grab = (p.x, p.y);
+                }
+                Task::none()
+            }
+            Msg::FormGrab => {
+                self.form_moving = true;
+                Task::none()
+            }
+            Msg::CursorMoved(p) => {
+                if self.form_moving {
+                    let pane_x = SIDEBAR_WIDTH + 1.0;
+                    let pane_w = self.window_width - pane_x;
+                    let x = (p.x - pane_x - self.form_grab.0)
+                        .clamp(0.0, (pane_w - FORM_WIDTH).max(0.0));
+                    let y =
+                        (p.y - self.form_grab.1).clamp(0.0, (self.window_height - 80.0).max(0.0));
+                    self.form_pos = Some((x, y));
+                }
+                Task::none()
+            }
             Msg::MouseUp => {
+                if self.form_moving {
+                    self.form_moving = false;
+                    return Task::none();
+                }
                 let Some(drag) = self.grid_drag.take() else {
                     return Task::none();
                 };
                 let (from, to) = cal::drag_range(drag.anchor, drag.current);
                 let day = self.week + chrono::Duration::days(drag.day as i64);
-                let open = self.update(Msg::NewMeeting);
+                // otevřený formulář jen dostane nový čas (rozepsané údaje zůstanou)
+                let open = if self.meeting_form.is_some() {
+                    Task::none()
+                } else {
+                    self.update(Msg::NewMeeting)
+                };
                 if let Some(f) = &mut self.meeting_form {
                     f.date = day.format("%-d. %-m. %Y").to_string();
                     f.start = cal::minutes_time(from).format("%H:%M").to_string();
@@ -3988,6 +4072,11 @@ impl App {
             Msg::CloseEvent => {
                 self.calendar.selected = None;
                 self.confirm_cancel_event = None;
+                Task::none()
+            }
+            Msg::Escape if self.tab == Tab::Calendar && self.meeting_form.is_some() => {
+                self.meeting_form = None;
+                self.form_moving = false;
                 Task::none()
             }
             Msg::Escape => {
@@ -5323,10 +5412,28 @@ impl App {
     /// Záložka Kalendář vpravo: formulář nové schůzky, jinak týdenní mřížka a nad ní
     /// karta vybrané události.
     fn calendar_pane(&self) -> Element<'_, Msg> {
-        if let Some(f) = &self.meeting_form {
-            return meeting_form_view(f);
-        }
         let week = self.week_view();
+        if let Some(f) = &self.meeting_form {
+            // plovoucí karta bez ztmavení, aby byl vidět kalendář; přesouvá se za hlavičku
+            let pane_w = self.window_width - SIDEBAR_WIDTH - 1.0;
+            let (x, y) = self
+                .form_pos
+                .unwrap_or(((pane_w - FORM_WIDTH - 24.0).max(0.0), 56.0));
+            let body_h = (self.window_height - y - 90.0).clamp(160.0, 620.0);
+            let card = container(meeting_form_view(f, body_h, self.form_moving))
+                .width(FORM_WIDTH)
+                .style(style::floating_card);
+            return stack![
+                week,
+                container(card).padding(iced::Padding {
+                    top: y,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: x,
+                }),
+            ]
+            .into();
+        }
         let Some(e) = self.selected_event() else {
             return week;
         };
@@ -5712,8 +5819,15 @@ impl App {
                     .into(),
                 );
             }
-            if let Some(drag) = self.grid_drag.filter(|g| g.day == d) {
-                let (from, to) = cal::drag_range(drag.anchor, drag.current);
+            // výběr tažením, jinak čas z otevřeného formuláře nové schůzky
+            let pending = match self.grid_drag {
+                Some(g) => (g.day == d).then(|| cal::drag_range(g.anchor, g.current)),
+                None => self
+                    .form_slot()
+                    .filter(|(day, _, _)| *day == d)
+                    .map(|(_, from, to)| (from, to)),
+            };
+            if let Some((from, to)) = pending {
                 let label = format!(
                     "{}–{}",
                     cal::minutes_time(from).format("%H:%M"),
@@ -7036,21 +7150,37 @@ fn meeting_from_form(f: &MeetingForm) -> Result<tymy_core::NewMeeting, String> {
 }
 
 /// Formulář nové schůzky (místo detailu události).
-fn meeting_form_view(f: &MeetingForm) -> Element<'_, Msg> {
+fn meeting_form_view(f: &MeetingForm, body_height: f32, moving: bool) -> Element<'_, Msg> {
+    let title = column![
+        text("Nová schůzka").size(16).font(BOLD),
+        text(if f.attendees.is_empty() {
+            "Bez účastníků se uloží jen do vašeho kalendáře."
+        } else {
+            "Účastníci dostanou pozvánku e-mailem a v Teams."
+        })
+        .size(12)
+        .style(muted),
+    ]
+    .spacing(1)
+    .width(Length::Fill);
+    // hlavička je úchyt pro přesun karty (mimo tlačítko zavření)
+    let handle = mouse_area(container(title).padding([12, 0]).width(Length::Fill))
+        .on_move(Msg::FormGrabMove)
+        .on_press(Msg::FormGrab)
+        .interaction(if moving {
+            iced::mouse::Interaction::Grabbing
+        } else {
+            iced::mouse::Interaction::Grab
+        });
     let header = container(
-        column![
-            text("Nová schůzka").size(16).font(BOLD),
-            text(if f.attendees.is_empty() {
-                "Bez účastníků se uloží jen do vašeho kalendáře."
-            } else {
-                "Účastníci dostanou pozvánku e-mailem a v Teams."
-            })
-            .size(12)
-            .style(muted),
+        row![
+            handle,
+            icon_button("✕", Some(Msg::MeetingClose), "Zavřít (Esc)"),
         ]
-        .spacing(1),
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     )
-    .padding([12, 20])
+    .padding([0, 16])
     .width(Length::Fill)
     .style(style::header);
     let field =
@@ -7184,14 +7314,13 @@ fn meeting_form_view(f: &MeetingForm) -> Element<'_, Msg> {
         .spacing(10),
     ]
     .spacing(10)
-    .padding([16, 24])
-    .max_width(640);
+    .padding([14, 20]);
     column![
         header,
         scrollable(body)
             .direction(style::scrollbar())
             .style(style::thin_scrollbar)
-            .height(Length::Fill),
+            .height(Length::Fixed(body_height)),
     ]
     .into()
 }

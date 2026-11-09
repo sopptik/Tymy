@@ -292,7 +292,12 @@ Priorita uživatele 2026-11-09 (předběhla HAR a hovory); čtení bez odchytu p
    místě dne se označí čas (po čtvrthodinách, s popiskem od–do), po puštění tlačítka se otevře
    formulář nové schůzky s datem a časem; klik bez tažení = 30 minut. Výběr zůstává v jednom
    dni, i když myš přejde jinam; puštění se hlídá v celém okně. Ovládání myší ověří uživatel.
-7. Volitelně barvy kategorií, opakované schůzky, úprava schůzky, přesun schůzky v mřížce.
+7. 🟡 **Plovoucí formulář** (2026-11-09, „dialog nová schůzka přepni do overlay dialogu, který
+   půjde drag&drop aby bylo možné jej přemístit nad kalendářem tak aby bylo vidět sloupec
+   v kalendáři“): formulář je karta nad týdenní mřížkou bez ztmavení (výchozí vpravo nahoře),
+   přesouvá se tažením za hlavičku; zvolený čas je v mřížce zvýrazněný, další tažení v mřížce
+   jen změní datum a čas ve formuláři; ✕ nebo Esc zavře. Ovládání myší ověří uživatel.
+8. Volitelně barvy kategorií, opakované schůzky, úprava schůzky, přesun schůzky v mřížce.
 
 ## 5. Moje doporučení k pořadí
 Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu

@@ -629,6 +629,26 @@ pub fn event_block(
     }
 }
 
+/// Plovoucí karta nad obsahem (formulář nové schůzky): pozadí, okraj a stín.
+pub fn floating_card(t: &Theme) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(c.surface.into()),
+        text_color: Some(c.text),
+        border: Border {
+            color: c.border,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 28.0,
+        },
+        ..Default::default()
+    }
+}
+
 pub fn list_item(t: &Theme, status: button::Status, selected: bool) -> button::Style {
     let c = colors(t);
     let background = if selected {
