@@ -66,6 +66,10 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Smazání hledání (2026-11-09):** „přidej do políčka vyhledávání ikonku na smazání obsahu
   vstupního políčka“ → křížek ✕ vpravo v poli (jen když není prázdné), smaže dotaz a vrátí
   kurzor do pole.
+- **Barevné emoji (2026-11-09):** „mohli by být smailíci barevní?“ → emoji v textu (zprávy,
+  citace, náhledy v seznamu, reakce, výsledky hledání, psací pole) se kreslí fontem Noto Color
+  Emoji; jinak je iced bral z prvního fontu s glyfem, který byl černobílý. V psacím poli přes
+  highlighter `text_editor`.
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová

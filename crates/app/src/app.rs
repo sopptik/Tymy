@@ -6037,12 +6037,16 @@ impl App {
             .enumerate()
         {
             // liché úseky jsou mezi značkami = nalezená slova
-            let sp = span(part.to_owned());
-            spans.push(if i % 2 == 1 {
-                sp.font(BOLD).color(c.primary)
-            } else {
-                sp.color(c.muted)
-            });
+            for (run, is_emoji) in emoji::runs(part) {
+                let sp = span(run.to_owned());
+                spans.push(if is_emoji {
+                    sp.font(style::EMOJI)
+                } else if i % 2 == 1 {
+                    sp.font(BOLD).color(c.primary)
+                } else {
+                    sp.color(c.muted)
+                });
+            }
         }
         button(
             column![
@@ -6241,10 +6245,9 @@ impl App {
         };
         let title_font = if unread { BOLD } else { SEMIBOLD };
         let top = row![
-            text(truncate(&title, 20))
+            emoji_text(truncate(&title, 20), title_font)
                 .wrapping(Wrapping::None)
-                .size(14)
-                .font(title_font),
+                .size(14),
             space::horizontal(),
             text(short_time(c.last_activity))
                 .wrapping(Wrapping::None)
@@ -6254,7 +6257,7 @@ impl App {
         .spacing(6)
         .align_y(iced::Alignment::Center);
         let bottom = row![
-            text(truncate(&preview, 27))
+            emoji_text(truncate(&preview, 27), Font::DEFAULT)
                 .wrapping(Wrapping::None)
                 .size(12)
                 .style(if has_draft { style::danger } else { muted }),
@@ -6856,6 +6859,7 @@ impl App {
                 row![
                     text_editor(&self.composer)
                         .id(COMPOSER)
+                        .highlight_with::<emoji::Highlighter>((), emoji::format)
                         .placeholder(
                             "Napište zprávu…  (Shift+Enter nový řádek · **tučně** _kurzíva_ `kód` · @zmínka)",
                         )
@@ -7933,7 +7937,7 @@ fn message_view<'a>(
                 .reactions
                 .iter()
                 .any(|r| r.key == *key && r.users.iter().any(|u| u.as_str().ends_with(me)));
-            button(text(*emoji).size(18).line_height(1.1))
+            button(text(*emoji).font(style::EMOJI).size(18).line_height(1.1))
                 .padding([2, 6])
                 .style(move |t: &Theme, st| style::reaction_button(t, st, by_me))
                 .on_press(Msg::React(m.id.clone(), (*key).to_owned()))
@@ -7955,7 +7959,7 @@ fn message_view<'a>(
             } else {
                 r.emoji()
             };
-            let chip = button(text(label).size(15).line_height(1.1))
+            let chip = button(emoji_text(label, Font::DEFAULT).size(15).line_height(1.1))
                 .padding([1, 8])
                 .style(move |t: &Theme, st| style::reaction_button(t, st, by_me));
             if can_copy {
@@ -8174,6 +8178,17 @@ fn table_columns(rows: &[Vec<rich::Cell>], max: f32) -> Vec<f32> {
     cols
 }
 
+/// Jednořádkový text, ve kterém jsou emoji barevným fontem.
+fn emoji_text<'a, M: 'a>(s: String, font: Font) -> iced::widget::text::Rich<'a, (), M> {
+    let spans: Vec<iced::widget::text::Span<'a, ()>> = emoji::runs(&s)
+        .into_iter()
+        .map(|(part, is_emoji)| {
+            span(part.to_owned()).font(if is_emoji { style::EMOJI } else { font })
+        })
+        .collect();
+    rich_text(spans)
+}
+
 /// Odstavec formátovaného textu; klik na odkaz ho otevře v prohlížeči.
 fn paragraph<'a>(
     spans: &[rich::Span],
@@ -8186,7 +8201,8 @@ fn paragraph<'a>(
     let code_bg = style::bubble_tint(c, mine, 0.12);
     let spans: Vec<iced::widget::text::Span<'a, String>> = spans
         .iter()
-        .map(|s| {
+        .flat_map(|s| emoji::runs(&s.text).into_iter().map(move |run| (s, run)))
+        .map(|(s, (part, is_emoji))| {
             let st = s.style;
             let mut font = if st.code {
                 Font::MONOSPACE
@@ -8201,8 +8217,8 @@ fn paragraph<'a>(
             if st.italic {
                 font.style = iced::font::Style::Italic;
             }
-            let mut sp = span(s.text.clone())
-                .font(font)
+            let mut sp = span(part.to_owned())
+                .font(if is_emoji { style::EMOJI } else { font })
                 .underline(st.underline || s.link.is_some())
                 .strikethrough(st.strike);
             if st.code {
