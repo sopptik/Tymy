@@ -280,7 +280,14 @@ Priorita uživatele 2026-11-09 (předběhla HAR a hovory); čtení bez odchytu p
    Formulář ověřen v okně, zápis na server čeká na test. Ladění: `TYMY_OPEN_TAB=meeting`.
    Připomínka uživatele (2026-11-09): „když kliknu přidat schůzku, mělo by zmizet vybrání schůzky
    ve sloupci“ → při otevřeném formuláři není v agendě nic vybrané.
-5. Volitelně týdenní mřížka, barvy kategorií, opakované schůzky, úprava schůzky.
+5. ✅ **Týdenní náhled** (2026-11-09, „bylo by možné místo náhledu schůzky vytvořit klasický
+   týdenní náhled kalendáře?“): vpravo mřížka Po–Ne × 0–24 h (po otevření posunutá na pracovní
+   dobu), přepínání ‹ Dnes ›, celodenní události nahoře, souběžné schůzky vedle sebe, čára
+   aktuálního času, předběžné a nezodpovězené s obrysem, zrušené/odmítnuté tlumeně. Klik na
+   schůzku (v mřížce i v agendě) otevře detail jako kartu nad mřížkou (✕, Esc, klik vedle).
+   Týdny mimo 14 dní se načítají zvlášť. „duplicitní tlačítko nová schůzka. ponechal bych jen
+   jedno v pravém rohu“ → jen „＋ Nová schůzka“ vpravo nahoře.
+6. Volitelně barvy kategorií, opakované schůzky, úprava schůzky, přetažení v mřížce.
 
 ## 5. Moje doporučení k pořadí
 Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu

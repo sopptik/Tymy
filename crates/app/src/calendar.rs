@@ -339,6 +339,141 @@ pub fn default_slot(now: DateTime<Utc>) -> (NaiveDate, NaiveTime, NaiveTime) {
     (start_dt.date(), start_dt.time(), end_dt.time())
 }
 
+/// Pondělí týdne, do kterého patří `day`.
+pub fn week_start(day: NaiveDate) -> NaiveDate {
+    day - Duration::days(i64::from(day.weekday().num_days_from_monday()))
+}
+
+/// Interval týdne od pondělní místní půlnoci (pro načtení z kalendáře).
+pub fn week_range(monday: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
+    (
+        local_midnight(monday),
+        local_midnight(monday + Duration::days(7)),
+    )
+}
+
+/// Nadpis týdne: „9.–15. 11. 2026“, přes měsíc „28. 9.–4. 10. 2026“.
+pub fn week_label(monday: NaiveDate) -> String {
+    let sunday = monday + Duration::days(6);
+    if monday.month() == sunday.month() {
+        format!(
+            "{}.–{}. {}. {}",
+            monday.day(),
+            sunday.day(),
+            sunday.month(),
+            sunday.year()
+        )
+    } else if monday.year() == sunday.year() {
+        format!(
+            "{}. {}.–{}. {}. {}",
+            monday.day(),
+            monday.month(),
+            sunday.day(),
+            sunday.month(),
+            sunday.year()
+        )
+    } else {
+        format!(
+            "{}. {}. {}–{}. {}. {}",
+            monday.day(),
+            monday.month(),
+            monday.year(),
+            sunday.day(),
+            sunday.month(),
+            sunday.year()
+        )
+    }
+}
+
+/// Zkratka dne v týdnu (0 = pondělí).
+pub fn weekday_short(i: usize) -> &'static str {
+    WEEKDAYS[i % 7]
+}
+
+/// Blok události v týdenní mřížce: den (0 = pondělí), minuty od půlnoci a sloupec
+/// mezi souběžnými událostmi (`lane` z `lanes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub event: usize,
+    pub day: usize,
+    pub from: i64,
+    pub to: i64,
+    pub lane: usize,
+    pub lanes: usize,
+}
+
+/// Nejkratší zobrazená délka bloku (krátké události by nešly přečíst).
+const MIN_BLOCK_MINUTES: i64 = 20;
+
+/// Rozloží události do týdne: celodenní (index, první a poslední den v týdnu) a bloky
+/// časovaných událostí po dnech. Událost přes půlnoc má blok v každém dni. Souběžné
+/// události se dělí o šířku dne (sloupce přidělené zleva podle začátku).
+pub fn week_layout(
+    events: &[CalendarEvent],
+    monday: NaiveDate,
+) -> (Vec<(usize, usize, usize)>, Vec<Block>) {
+    let mut all_day = vec![];
+    let mut blocks: Vec<Block> = vec![];
+    for (i, e) in events.iter().enumerate() {
+        if e.all_day {
+            let first = (start_day(e) - monday).num_days();
+            let last = (last_day(e) - monday).num_days();
+            if last >= 0 && first <= 6 {
+                all_day.push((i, first.max(0) as usize, last.min(6) as usize));
+            }
+            continue;
+        }
+        for d in 0..7 {
+            let day_start = local_midnight(monday + Duration::days(d));
+            let day_end = local_midnight(monday + Duration::days(d + 1));
+            if e.start >= day_end || e.end.max(e.start + Duration::minutes(1)) <= day_start {
+                continue;
+            }
+            let from = (e.start.max(day_start) - day_start).num_minutes();
+            let to = (e.end.min(day_end) - day_start).num_minutes();
+            let day_len = (day_end - day_start).num_minutes();
+            let to = to.max(from + MIN_BLOCK_MINUTES).min(day_len);
+            let from = from.min(to - 1);
+            blocks.push(Block {
+                event: i,
+                day: d as usize,
+                from,
+                to,
+                lane: 0,
+                lanes: 1,
+            });
+        }
+    }
+    // sloupce souběžných událostí: po dnech, shluky navzájem se překrývajících
+    blocks.sort_by_key(|b| (b.day, b.from, std::cmp::Reverse(b.to)));
+    let mut i = 0;
+    while i < blocks.len() {
+        let mut j = i;
+        let mut cluster_end = blocks[i].to;
+        let mut lane_ends: Vec<i64> = vec![];
+        while j < blocks.len() && blocks[j].day == blocks[i].day && blocks[j].from < cluster_end {
+            let lane = match lane_ends.iter().position(|end| *end <= blocks[j].from) {
+                Some(l) => {
+                    lane_ends[l] = blocks[j].to;
+                    l
+                }
+                None => {
+                    lane_ends.push(blocks[j].to);
+                    lane_ends.len() - 1
+                }
+            };
+            blocks[j].lane = lane;
+            cluster_end = cluster_end.max(blocks[j].to);
+            j += 1;
+        }
+        for b in &mut blocks[i..j] {
+            b.lanes = lane_ends.len();
+        }
+        i = j;
+    }
+    (all_day, blocks)
+}
+
 /// Moje odpověď lidsky.
 pub fn response_label(e: &CalendarEvent) -> Option<&'static str> {
     Some(match e.response {
@@ -539,6 +674,98 @@ mod tests {
         assert_eq!(
             default_slot(late).0,
             NaiveDate::from_ymd_opt(2026, 11, 10).unwrap()
+        );
+    }
+
+    fn local(d: u32, h: u32, m: u32) -> DateTime<Utc> {
+        local_to_utc(
+            NaiveDate::from_ymd_opt(2026, 11, d).unwrap(),
+            NaiveTime::from_hms_opt(h, m, 0).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn week_helpers() {
+        let thu = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let mon = week_start(thu);
+        assert_eq!(mon, NaiveDate::from_ymd_opt(2026, 11, 9).unwrap());
+        assert_eq!(week_start(mon), mon);
+        assert_eq!(week_label(mon), "9.–15. 11. 2026");
+        assert_eq!(
+            week_label(NaiveDate::from_ymd_opt(2026, 9, 28).unwrap()),
+            "28. 9.–4. 10. 2026"
+        );
+        assert_eq!(
+            week_label(NaiveDate::from_ymd_opt(2026, 12, 28).unwrap()),
+            "28. 12. 2026–3. 1. 2027"
+        );
+        let (from, to) = week_range(mon);
+        assert_eq!((to - from).num_days(), 7);
+    }
+
+    #[test]
+    fn lays_out_week_with_overlaps() {
+        let mon = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let ev = |id: &str, s: DateTime<Utc>, e: DateTime<Utc>| {
+            let mut x = event(id, s, 0);
+            x.end = e;
+            x
+        };
+        let events = vec![
+            ev("a", local(9, 10, 0), local(9, 11, 0)),
+            ev("b", local(9, 10, 30), local(9, 11, 30)),
+            ev("c", local(9, 11, 0), local(9, 12, 0)),
+            ev("d", local(9, 13, 0), local(9, 13, 5)),
+            ev("noc", local(10, 23, 0), local(11, 1, 0)),
+            ev("mimo", local(16, 9, 0), local(16, 10, 0)),
+        ];
+        let (all_day, blocks) = week_layout(&events, mon);
+        assert!(all_day.is_empty());
+        let find = |i: usize| {
+            blocks
+                .iter()
+                .filter(|b| b.event == i)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let (a, b, c) = (&find(0)[0], &find(1)[0], &find(2)[0]);
+        assert_eq!((a.day, a.from, a.to), (0, 600, 660));
+        assert_eq!(
+            (a.lane, b.lane, c.lane),
+            (0, 1, 0),
+            "c navazuje na a, b vedle"
+        );
+        assert_eq!((a.lanes, b.lanes, c.lanes), (2, 2, 2));
+        let d = &find(3)[0];
+        assert_eq!(
+            (d.from, d.to, d.lanes),
+            (780, 800, 1),
+            "krátká událost má min. 20 min"
+        );
+        let night = find(4);
+        assert_eq!(night.len(), 2, "přes půlnoc ve dvou dnech");
+        assert_eq!((night[0].day, night[0].from, night[0].to), (1, 1380, 1440));
+        assert_eq!((night[1].day, night[1].from, night[1].to), (2, 0, 60));
+        assert!(find(5).is_empty(), "další týden");
+    }
+
+    #[test]
+    fn all_day_in_week() {
+        let mon = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let mut e = event(
+            "x",
+            local_midnight(NaiveDate::from_ymd_opt(2026, 11, 7).unwrap()),
+            0,
+        );
+        e.all_day = true;
+        e.end = local_midnight(NaiveDate::from_ymd_opt(2026, 11, 11).unwrap());
+        let (all_day, blocks) = week_layout(&[e], mon);
+        assert!(blocks.is_empty());
+        assert_eq!(
+            all_day,
+            vec![(0, 0, 1)],
+            "od soboty do úterý → v týdnu Po–Út"
         );
     }
 

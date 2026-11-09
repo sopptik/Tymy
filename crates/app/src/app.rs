@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use iced::widget::{
     Column, Id, button, column, container, image, mouse_area, operation, rich_text, row,
     scrollable, space, span, stack, text, text_editor, text_input,
@@ -373,6 +373,16 @@ pub enum Msg {
     MovePin(ConversationId, isize),
     /// Úprava textu v psacím poli.
     Compose(text_editor::Action),
+    /// Týdenní mřížka: posun o týdny (0 = tento týden), načtený týden, zavřít kartu události,
+    /// Esc mimo psací pole.
+    WeekShift(i64),
+    WeekLoaded(
+        AccountId,
+        chrono::NaiveDate,
+        Result<Vec<CalendarEvent>, Failure>,
+    ),
+    CloseEvent,
+    Escape,
     /// Nová schůzka: otevřít formulář, pole, Teams schůzka, hledání a výběr lidí, uložení.
     NewMeeting,
     MeetingInput(MeetingField, String),
@@ -474,6 +484,16 @@ impl Msg {
             Msg::ToggleEmoji => debug!("update: ToggleEmoji"),
             Msg::ToggleChatPanel => debug!("update: ToggleChatPanel"),
             Msg::NewMeeting => debug!("update: NewMeeting"),
+            Msg::WeekShift(d) => debug!(d, "update: WeekShift"),
+            Msg::WeekLoaded(account, week, r) => debug!(
+                %account,
+                %week,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: WeekLoaded"
+            ),
+            Msg::CloseEvent => debug!("update: CloseEvent"),
+            Msg::Escape => trace!("update: Escape"),
             Msg::MeetingInput(..) => trace!("update: MeetingInput"),
             Msg::MeetingOnline(on) => debug!(on, "update: MeetingOnline"),
             Msg::MeetingSearchFire(seq) => debug!(seq, "update: MeetingSearchFire"),
@@ -758,6 +778,12 @@ const TOAST_DURATION: Duration = Duration::from_millis(1800);
 
 /// Šířka levého panelu.
 const SIDEBAR_WIDTH: f32 = 320.0;
+/// Týdenní mřížka: výška hodiny, sloupec s hodinami, okraje a místo pro posuvník.
+const WEEK_HOUR: f32 = 44.0;
+const WEEK_GUTTER: f32 = 44.0;
+const WEEK_PAD: f32 = 12.0;
+const WEEK_SCROLLBAR: f32 = 12.0;
+const WEEK_GRID: Id = Id::new("week-grid");
 /// Výchozí šířka okna (než přijde první událost o velikosti).
 pub const WINDOW_WIDTH: f32 = 1100.0;
 
@@ -895,6 +921,11 @@ pub struct App {
     group_builder: Option<GroupBuilder>,
     /// Otevřené nastavení skupinového chatu.
     chat_panel: Option<ChatPanel>,
+    /// Zobrazený týden (pondělí) a načtené týdny aktivního účtu: události, kdy a co se načítá.
+    week: chrono::NaiveDate,
+    week_cache: HashMap<(AccountId, chrono::NaiveDate), Vec<CalendarEvent>>,
+    week_fetched: HashMap<(AccountId, chrono::NaiveDate), DateTime<Utc>>,
+    week_loading: HashSet<(AccountId, chrono::NaiveDate)>,
     /// Formulář nové schůzky; událost čekající na potvrzení zrušení; běží změna události.
     meeting_form: Option<MeetingForm>,
     confirm_cancel_event: Option<String>,
@@ -1083,6 +1114,10 @@ impl App {
             draft_seq: 0,
             group_builder: None,
             chat_panel: None,
+            week: cal::week_start(Local::now().date_naive()),
+            week_cache: HashMap::new(),
+            week_fetched: HashMap::new(),
+            week_loading: HashSet::new(),
             meeting_form: None,
             confirm_cancel_event: None,
             event_busy: false,
@@ -1243,6 +1278,10 @@ impl App {
             iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
                 Some(Msg::WindowResized(size.width))
             }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                ..
+            }) if _status == iced::event::Status::Ignored => Some(Msg::Escape),
             _ => None,
         });
         let always = [
@@ -1846,18 +1885,93 @@ impl App {
     }
 
     /// Upraví událost aktivního účtu v paměti (do další obnovy kalendáře).
-    fn update_active_event(&mut self, id: &str, f: impl FnOnce(&mut CalendarEvent)) {
+    fn update_active_event(&mut self, id: &str, f: impl Fn(&mut CalendarEvent)) {
         let Some(account) = self.active_account().cloned() else {
             return;
         };
-        if let Some(e) = self
-            .calendar
-            .events
-            .get_mut(&account)
-            .and_then(|evs| evs.iter_mut().find(|e| e.id == id))
-        {
+        let in_weeks = self
+            .week_cache
+            .iter_mut()
+            .filter(|((a, _), _)| *a == account)
+            .flat_map(|(_, evs)| evs.iter_mut());
+        let in_list = self.calendar.events.get_mut(&account).into_iter().flatten();
+        for e in in_list.chain(in_weeks).filter(|e| e.id == id) {
             f(e);
         }
+    }
+
+    /// Načte zobrazený týden aktivního účtu, pokud je starší než `max_age`.
+    fn fetch_week(&mut self, max_age: chrono::Duration) -> Task<Msg> {
+        let Some(s) = self.session() else {
+            return Task::none();
+        };
+        let key = (s.profile.account_id.clone(), self.week);
+        let fresh = self
+            .week_fetched
+            .get(&key)
+            .is_some_and(|t| Utc::now() - *t < max_age);
+        if fresh || self.week_loading.contains(&key) {
+            return Task::none();
+        }
+        let backend = s.backend.clone();
+        let (from, to) = cal::week_range(self.week);
+        self.week_loading.insert(key.clone());
+        Task::perform(
+            async move { backend.calendar(from, to).await.map_err(Failure::from) },
+            move |r| Msg::WeekLoaded(key.0.clone(), key.1, r),
+        )
+    }
+
+    /// Posune mřížku na hodinu před `at`, jinak na začátek pracovního dne (u dneška hodinu
+    /// před aktuálním časem).
+    fn scroll_week(&self, at: Option<DateTime<Utc>>) -> Task<Msg> {
+        let now = Utc::now();
+        let hour = match at {
+            Some(t) => t.with_timezone(&Local).hour() as f32 - 1.0,
+            None if self.week == cal::week_start(now.with_timezone(&Local).date_naive()) => {
+                (now.with_timezone(&Local).hour() as f32 - 1.0).min(8.0)
+            }
+            None => 7.0,
+        };
+        operation::scroll_to(
+            WEEK_GRID,
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(hour.max(0.0) * WEEK_HOUR),
+            },
+        )
+    }
+
+    /// Události zobrazeného týdne: načtené pro týden, jinak z kalendáře na 14 dní dopředu.
+    fn week_events(&self) -> Vec<CalendarEvent> {
+        let Some(account) = self.active_account() else {
+            return vec![];
+        };
+        if let Some(evs) = self.week_cache.get(&(account.clone(), self.week)) {
+            return evs.clone();
+        }
+        let (from, to) = cal::week_range(self.week);
+        self.active_events()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.start < to && e.end > from)
+            .cloned()
+            .collect()
+    }
+
+    /// Událost aktivního účtu podle id (z kalendáře na 14 dní nebo z načtených týdnů).
+    fn find_event(&self, id: &str) -> Option<&CalendarEvent> {
+        let account = self.active_account()?;
+        let in_weeks = self
+            .week_cache
+            .iter()
+            .filter(|((a, _), _)| a == account)
+            .flat_map(|(_, evs)| evs.iter());
+        self.active_events()
+            .unwrap_or_default()
+            .iter()
+            .chain(in_weeks)
+            .find(|e| e.id == id)
     }
 
     /// Události aktivního účtu (pokud je kalendář načtený).
@@ -1869,12 +1983,7 @@ impl App {
 
     /// Otevřená událost; bez výběru probíhající nebo nejbližší příští.
     fn selected_event(&self) -> Option<&CalendarEvent> {
-        let events = self.active_events()?;
-        let now = Utc::now();
-        match &self.calendar.selected {
-            Some(id) => events.iter().find(|e| &e.id == id),
-            None => events.iter().find(|e| e.end > now && !e.cancelled),
-        }
+        self.find_event(self.calendar.selected.as_deref()?)
     }
 
     /// Nepřečtené konverzace ve všech neaktivních účtech.
@@ -2542,17 +2651,17 @@ impl App {
                 }
                 // ladění: `TYMY_OPEN_TAB=calendar` otevře po startu záložku Kalendář
                 // (`meeting` navíc otevře formulář nové schůzky, nic neukládá)
-                match std::env::var("TYMY_OPEN_TAB").as_deref() {
-                    Ok("calendar") => self.tab = Tab::Calendar,
+                let debug_tab = match std::env::var("TYMY_OPEN_TAB").as_deref() {
+                    Ok("calendar") => Task::done(Msg::SetTab(Tab::Calendar)),
                     Ok("meeting") => {
-                        self.tab = Tab::Calendar;
-                        let _ = self.update(Msg::NewMeeting);
+                        Task::done(Msg::SetTab(Tab::Calendar)).chain(Task::done(Msg::NewMeeting))
                     }
-                    _ => {}
-                }
+                    _ => Task::none(),
+                };
                 Task::batch([
                     self.fetch_conversations(),
                     Task::done(Msg::CalendarTick),
+                    debug_tab,
                     // nepřečtené ostatních účtů až po rozběhnutí aktivního
                     Task::perform(tokio::time::sleep(Duration::from_secs(3)), |_| {
                         Msg::PollOthers
@@ -2756,7 +2865,12 @@ impl App {
             Msg::CalendarTick => {
                 let refresh =
                     self.refresh_calendar(chrono::Duration::minutes(CALENDAR_REFRESH_MINUTES));
-                Task::batch([refresh, self.check_reminders()])
+                let week = if self.tab == Tab::Calendar {
+                    self.fetch_week(chrono::Duration::minutes(CALENDAR_REFRESH_MINUTES))
+                } else {
+                    Task::none()
+                };
+                Task::batch([refresh, week, self.check_reminders()])
             }
             Msg::CalendarLoaded(id, r) => {
                 self.calendar.loading.remove(&id);
@@ -2794,8 +2908,16 @@ impl App {
                 if let Some(account) = self.active_account().cloned() {
                     self.ack_meeting(&account, &id);
                 }
+                let start = self.find_event(&id).map(|e| (cal::start_day(e), e.start));
                 self.calendar.selected = Some(id);
-                Task::none()
+                match start {
+                    Some((day, at)) => {
+                        self.week = cal::week_start(day);
+                        let fetch = self.fetch_week(chrono::Duration::minutes(1));
+                        Task::batch([fetch, self.scroll_week(Some(at))])
+                    }
+                    None => Task::none(),
+                }
             }
             Msg::JoinMeeting(id, url) => {
                 if let Some(account) = self.active_account().cloned() {
@@ -3733,13 +3855,24 @@ impl App {
                 match tab {
                     Tab::Teams => self.want_all_chats(),
                     Tab::Calendar => {
-                        if let (Some(account), Some(id)) = (
-                            self.active_account().cloned(),
-                            self.selected_event().map(|e| e.id.clone()),
-                        ) {
-                            self.ack_meeting(&account, &id);
+                        // otevřený kalendář = připomenuté schůzky účtu viděné
+                        if let Some(account) = self.active_account().cloned() {
+                            let ids: Vec<String> = self
+                                .calendar
+                                .alerts
+                                .iter()
+                                .filter(|(a, _)| *a == account)
+                                .map(|(_, e)| e.id.clone())
+                                .collect();
+                            for id in ids {
+                                self.ack_meeting(&account, &id);
+                            }
                         }
-                        self.refresh_calendar(chrono::Duration::minutes(1))
+                        Task::batch([
+                            self.refresh_calendar(chrono::Duration::minutes(1)),
+                            self.fetch_week(chrono::Duration::minutes(1)),
+                            self.scroll_week(None),
+                        ])
                     }
                     Tab::Chats => Task::none(),
                 }
@@ -3774,6 +3907,42 @@ impl App {
             Msg::Compose(action) => {
                 self.composer.perform(action);
                 self.refresh_mention()
+            }
+            Msg::WeekShift(delta) => {
+                self.week = if delta == 0 {
+                    cal::week_start(Local::now().date_naive())
+                } else {
+                    self.week + chrono::Duration::weeks(delta)
+                };
+                let fetch = self.fetch_week(chrono::Duration::minutes(1));
+                Task::batch([fetch, self.scroll_week(None)])
+            }
+            Msg::WeekLoaded(account, week, r) => {
+                let key = (account, week);
+                self.week_loading.remove(&key);
+                self.week_fetched.insert(key.clone(), Utc::now());
+                match r {
+                    Ok(events) => {
+                        self.week_cache.insert(key, events);
+                    }
+                    Err(e) => tracing::warn!(error = %e.text, "týden kalendáře nelze načíst"),
+                }
+                Task::none()
+            }
+            Msg::CloseEvent => {
+                self.calendar.selected = None;
+                self.confirm_cancel_event = None;
+                Task::none()
+            }
+            Msg::Escape => {
+                if self.tab == Tab::Calendar
+                    && self.meeting_form.is_none()
+                    && self.calendar.selected.is_some()
+                {
+                    self.calendar.selected = None;
+                    self.confirm_cancel_event = None;
+                }
+                Task::none()
             }
             Msg::NewMeeting => {
                 let (day, start, end) = cal::default_slot(Utc::now());
@@ -3920,7 +4089,10 @@ impl App {
                         self.meeting_form = None;
                         self.calendar.selected = Some(id);
                         self.calendar.fetched.remove(&account);
-                        let refresh = self.refresh_calendar(chrono::Duration::zero());
+                        let refresh = Task::batch([
+                            self.refresh_calendar(chrono::Duration::zero()),
+                            self.fetch_week(chrono::Duration::zero()),
+                        ]);
                         Task::batch([refresh, self.show_toast("Schůzka naplánována")])
                     }
                     Err(e) => {
@@ -3970,7 +4142,10 @@ impl App {
                         if let Some(account) = self.active_account().cloned() {
                             self.calendar.fetched.remove(&account);
                         }
-                        let refresh = self.refresh_calendar(chrono::Duration::zero());
+                        let refresh = Task::batch([
+                            self.refresh_calendar(chrono::Duration::zero()),
+                            self.fetch_week(chrono::Duration::zero()),
+                        ]);
                         Task::batch([refresh, self.show_toast("Schůzka zrušena")])
                     }
                     Err(e) => self.fail(e),
@@ -4992,8 +5167,8 @@ impl App {
                     .style(style::search_input);
                 let plus = match self.tab {
                     Tab::Chats => Some((Msg::NewGroup, "Nový skupinový chat")),
-                    Tab::Calendar => Some((Msg::NewMeeting, "Nová schůzka")),
-                    Tab::Teams => None,
+                    // nová schůzka je jen vpravo nahoře nad týdenní mřížkou
+                    Tab::Calendar | Tab::Teams => None,
                 };
                 let new_group = plus.map(|(msg, tip)| {
                     iced::widget::tooltip(
@@ -5089,21 +5264,46 @@ impl App {
     }
 
     /// Detail události (místo vlákna zpráv).
+    /// Záložka Kalendář vpravo: formulář nové schůzky, jinak týdenní mřížka a nad ní
+    /// karta vybrané události.
     fn calendar_pane(&self) -> Element<'_, Msg> {
         if let Some(f) = &self.meeting_form {
             return meeting_form_view(f);
         }
+        let week = self.week_view();
         let Some(e) = self.selected_event() else {
-            let msg = match self.active_events() {
-                Some(_) => "Žádné nadcházející události",
-                None => "Načítám kalendář…",
-            };
-            return centered(
-                column![logo(56.0), text(msg).size(15).style(muted)]
-                    .spacing(14)
-                    .align_x(iced::Alignment::Center),
-            );
+            return week;
         };
+        let dim = mouse_area(
+            container(space())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_: &Theme| container::Style {
+                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.35).into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Msg::CloseEvent);
+        // klik do karty nesmí projít na ztmavené pozadí (to kartu zavře)
+        let card = mouse_area(
+            container(self.event_detail(e))
+                .max_width(620)
+                .style(style::card),
+        )
+        .on_press(Msg::Noop);
+        stack![
+            week,
+            dim,
+            container(card)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .padding(24),
+        ]
+        .into()
+    }
+
+    /// Detail události (obsah karty nad týdenní mřížkou).
+    fn event_detail<'a>(&'a self, e: &'a CalendarEvent) -> Element<'a, Msg> {
         let now = Utc::now();
         let today = now.with_timezone(&Local).date_naive();
         let day = cal::start_day(e);
@@ -5120,16 +5320,17 @@ impl App {
                     .size(12)
                     .style(muted),
                 ]
-                .spacing(1),
+                .spacing(1)
+                .width(Length::Fill),
+                icon_button("✕", Some(Msg::CloseEvent), "Zavřít (Esc)"),
             ]
             .spacing(12)
             .align_y(iced::Alignment::Center),
         )
         .padding([12, 20])
-        .width(Length::Fill)
-        .style(style::header);
+        .width(Length::Fill);
 
-        let mut body = Column::new().spacing(14).padding([20, 24]).max_width(720);
+        let mut body = Column::new().spacing(14).padding([4, 24]);
         let mut status: Vec<Element<'_, Msg>> = vec![];
         if e.cancelled {
             status.push(
@@ -5264,14 +5465,216 @@ impl App {
             format!("Připomenu {m} min před začátkem.")
         };
         body = body.push(text(reminder).size(12).style(muted));
-        column![
-            header,
-            scrollable(body)
-                .direction(style::scrollbar())
-                .style(style::thin_scrollbar)
-                .height(Length::Fill),
-        ]
-        .into()
+        column![header, body, space().height(16)].into()
+    }
+
+    /// Týdenní mřížka: hlavička s přepínáním týdnů, dny, celodenní události, hodiny s bloky.
+    fn week_view(&self) -> Element<'_, Msg> {
+        let now = Utc::now();
+        let today = now.with_timezone(&Local).date_naive();
+        let monday = self.week;
+        let events = self.week_events();
+        let (all_day, blocks) = cal::week_layout(&events, monday);
+        let selected = self.calendar.selected.as_deref();
+        let pane = self.window_width - SIDEBAR_WIDTH - 1.0;
+        let col_w = ((pane - 2.0 * WEEK_PAD - WEEK_SCROLLBAR - WEEK_GUTTER) / 7.0 - 1.0).max(40.0);
+        let loading = self
+            .active_account()
+            .is_some_and(|a| self.week_loading.contains(&(a.clone(), monday)));
+
+        let nav = |label: &'static str, tip: &'static str, delta: i64| {
+            iced::widget::tooltip(
+                button(text(label).size(13))
+                    .padding([5, 10])
+                    .style(style::secondary)
+                    .on_press(Msg::WeekShift(delta)),
+                container(text(tip).size(11))
+                    .padding([3, 8])
+                    .style(style::tooltip),
+                iced::widget::tooltip::Position::Bottom,
+            )
+        };
+        let header = container(
+            row![
+                nav("‹", "Předchozí týden", -1),
+                nav("Dnes", "Tento týden", 0),
+                nav("›", "Další týden", 1),
+                text(cal::week_label(monday)).size(16).font(BOLD),
+                text(if loading { "Načítám…" } else { "" })
+                    .size(12)
+                    .style(muted),
+                space::horizontal(),
+                button(text("＋ Nová schůzka").size(13))
+                    .padding([6, 12])
+                    .style(style::primary)
+                    .on_press(Msg::NewMeeting),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([10, 16])
+        .width(Length::Fill)
+        .style(style::header);
+
+        let day_of = |d: usize| monday + chrono::Duration::days(d as i64);
+        let mut days = row![space().width(WEEK_GUTTER)];
+        for d in 0..7 {
+            let date = day_of(d);
+            let is_today = date == today;
+            // v hlavičce jen mezera (svislá čára s výškou Fill by roztáhla řádek)
+            days = days.push(space().width(1)).push(
+                container(
+                    column![
+                        text(cal::weekday_short(d)).size(11).style(if is_today {
+                            accent
+                        } else {
+                            muted
+                        }),
+                        text(date.day().to_string())
+                            .size(17)
+                            .font(if is_today { BOLD } else { Font::DEFAULT })
+                            .style(move |t: &Theme| if is_today {
+                                accent(t)
+                            } else {
+                                text::Style::default()
+                            }),
+                    ]
+                    .align_x(iced::Alignment::Center),
+                )
+                .width(col_w)
+                .padding([6, 0])
+                .center_x(col_w),
+            );
+        }
+
+        let mut top = column![header, container(days).padding([0, WEEK_PAD as u16])];
+        if !all_day.is_empty() {
+            let mut cells = row![
+                container(text("celý den").size(10).style(muted))
+                    .width(WEEK_GUTTER)
+                    .padding([4, 4])
+            ];
+            for d in 0..7 {
+                let chips = all_day
+                    .iter()
+                    .filter(|(_, first, last)| *first <= d && d <= *last)
+                    .map(|(i, _, _)| {
+                        let e = &events[*i];
+                        event_block(
+                            e,
+                            col_w - 4.0,
+                            22.0,
+                            selected == Some(e.id.as_str()),
+                            now,
+                            true,
+                        )
+                    });
+                cells = cells.push(space().width(1)).push(
+                    container(Column::with_children(chips).spacing(2))
+                        .width(col_w)
+                        .padding([2, 2]),
+                );
+            }
+            top = top.push(container(cells).padding([0, WEEK_PAD as u16]));
+        }
+        top = top.push(hline());
+
+        let hours = Column::with_children((0..24).map(|h| {
+            container(text(format!("{h}:00")).size(10).style(muted))
+                .height(WEEK_HOUR)
+                .width(WEEK_GUTTER)
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 6.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .align_right(WEEK_GUTTER)
+                .into()
+        }));
+        let mut grid = row![hours];
+        for d in 0..7 {
+            let is_today = day_of(d) == today;
+            let lines = Column::with_children(
+                (0..24).map(|_| column![hline(), space().height(WEEK_HOUR - 1.0)].into()),
+            );
+            let base = container(lines)
+                .width(col_w)
+                .height(WEEK_HOUR * 24.0)
+                .style(move |t: &Theme| container::Style {
+                    background: is_today.then(|| {
+                        let c = style::colors(t);
+                        Color {
+                            a: 0.35,
+                            ..c.primary_soft
+                        }
+                        .into()
+                    }),
+                    ..Default::default()
+                });
+            let mut layers: Vec<Element<'_, Msg>> = vec![base.into()];
+            for b in blocks.iter().filter(|b| b.day == d) {
+                let e = &events[b.event];
+                let y = b.from as f32 / 60.0 * WEEK_HOUR;
+                let h = ((b.to - b.from) as f32 / 60.0 * WEEK_HOUR - 2.0).max(14.0);
+                let lane_w = (col_w - 4.0) / b.lanes as f32;
+                let x = 2.0 + lane_w * b.lane as f32;
+                layers.push(
+                    container(event_block(
+                        e,
+                        lane_w - 2.0,
+                        h,
+                        selected == Some(e.id.as_str()),
+                        now,
+                        false,
+                    ))
+                    .padding(iced::Padding {
+                        top: y + 1.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: x,
+                    })
+                    .into(),
+                );
+            }
+            if is_today {
+                let local = now.with_timezone(&Local);
+                let y = (local.hour() * 60 + local.minute()) as f32 / 60.0 * WEEK_HOUR;
+                layers.push(
+                    container(container(space()).width(Length::Fill).height(2).style(
+                        |t: &Theme| container::Style {
+                            background: Some(style::colors(t).danger.into()),
+                            ..Default::default()
+                        },
+                    ))
+                    .padding(iced::Padding {
+                        top: y,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 0.0,
+                    })
+                    .into(),
+                );
+            }
+            grid = grid
+                .push(vline())
+                .push(iced::widget::Stack::with_children(layers));
+        }
+        let body = scrollable(container(grid).padding(iced::Padding {
+            top: 6.0,
+            right: WEEK_PAD,
+            bottom: 12.0,
+            left: WEEK_PAD,
+        }))
+        .id(WEEK_GRID)
+        .direction(style::scrollbar())
+        .style(style::thin_scrollbar)
+        .height(Length::Fill);
+        let mut content = top.push(body);
+        if events.is_empty() && !loading {
+            content = content.push(space().height(0));
+        }
+        content.into()
     }
 
     /// Záložka Chaty: připnuté v ručním pořadí, ostatní podle poslední komunikace, pak lidé.
@@ -6766,6 +7169,55 @@ fn event_item<'a>(e: &CalendarEvent, now: DateTime<Utc>, selected: bool) -> Elem
     .width(Length::Fill)
     .padding([7, 8])
     .style(move |t: &Theme, status| style::list_item(t, status, selected))
+    .on_press(Msg::SelectEvent(e.id.clone()))
+    .into()
+}
+
+/// Blok události v týdenní mřížce (`all_day` = řádek celodenních událostí).
+fn event_block<'a>(
+    e: &CalendarEvent,
+    width: f32,
+    height: f32,
+    selected: bool,
+    now: DateTime<Utc>,
+    all_day: bool,
+) -> Element<'a, Msg> {
+    let kind = if e.cancelled || e.response == EventResponse::Declined {
+        style::EventKind::Dim
+    } else if matches!(
+        e.response,
+        EventResponse::Tentative | EventResponse::NotResponded
+    ) {
+        style::EventKind::Tentative
+    } else {
+        style::EventKind::Normal
+    };
+    let past = e.end <= now;
+    let subject = if e.cancelled {
+        format!("Zrušeno: {}", e.subject)
+    } else {
+        e.subject.clone()
+    };
+    let title = text(subject).size(11).font(SEMIBOLD);
+    let content: Element<'a, Msg> = if all_day || height < 34.0 {
+        title.wrapping(Wrapping::None).into()
+    } else {
+        let start = e.start.with_timezone(&Local).format("%H:%M");
+        let end = e.end.with_timezone(&Local).format("%H:%M");
+        column![title, text(format!("{start}–{end}")).size(10).style(muted)]
+            .spacing(1)
+            .into()
+    };
+    button(
+        container(content)
+            .clip(true)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(width)
+    .height(height)
+    .padding([2, 5])
+    .style(move |t: &Theme, st| style::event_block(t, st, kind, selected, past))
     .on_press(Msg::SelectEvent(e.id.clone()))
     .into()
 }

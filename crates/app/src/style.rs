@@ -580,6 +580,55 @@ pub fn danger(t: &Theme) -> text::Style {
 // ---------- tlačítka ----------
 
 /// Položka seznamu (chat, kanál, osoba, záložka).
+/// Druh bloku události v týdenní mřížce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    /// Přijatá nebo vlastní.
+    Normal,
+    /// Předběžná nebo bez odpovědi (obrys).
+    Tentative,
+    /// Zrušená nebo odmítnutá.
+    Dim,
+}
+
+/// Blok události v týdenní mřížce; uplynulé události jsou tlumené.
+pub fn event_block(
+    t: &Theme,
+    status: button::Status,
+    kind: EventKind,
+    selected: bool,
+    past: bool,
+) -> button::Style {
+    let c = colors(t);
+    let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    let (bg, fg) = match kind {
+        EventKind::Normal => (
+            mix(c.primary_soft, c.primary, if hover { 0.35 } else { 0.18 }),
+            c.text,
+        ),
+        EventKind::Tentative => (if hover { c.surface_alt } else { c.surface }, c.text),
+        EventKind::Dim => (c.surface_alt, c.muted),
+    };
+    let alpha = if past { 0.6 } else { 1.0 };
+    button::Style {
+        background: Some(Color { a: alpha, ..bg }.into()),
+        text_color: Color { a: alpha, ..fg },
+        border: Border {
+            color: if selected || kind == EventKind::Tentative {
+                c.primary
+            } else {
+                Color {
+                    a: 0.0,
+                    ..c.primary
+                }
+            },
+            width: if selected { 2.0 } else { 1.0 },
+            radius: 5.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 pub fn list_item(t: &Theme, status: button::Status, selected: bool) -> button::Style {
     let c = colors(t);
     let background = if selected {
