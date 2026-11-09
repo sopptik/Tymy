@@ -10,6 +10,6 @@ mod model;
 pub mod text;
 
 pub use backend::{ChatBackend, ConversationPage, MessagePage};
-pub use calendar::{CalendarEvent, EventResponse, ShowAs};
+pub use calendar::{CalendarEvent, EventReply, EventResponse, MeetingAttendee, NewMeeting, ShowAs};
 pub use error::{Error, Result};
 pub use model::*;

@@ -255,7 +255,7 @@ samostatného commitu“)
 4. Skupinové hovory a schůzky až po úspěšném 1:1.
 
 ### Fáze 3: kalendář a připomínky
-Priorita uživatele 2026-11-09 (předběhla HAR a hovory); bez odchytu provozu, stačil middle tier.
+Priorita uživatele 2026-11-09 (předběhla HAR a hovory); čtení bez odchytu provozu přes middle tier.
 1. ✅ Načtení událostí (pracovní účet): middle tier Teams
    `v2.1/me/calendars/default/calendarView` se stejným přihlášením jako chat (žádný Graph).
    Osobní účet: neověřeno (Outlook.com).
@@ -272,7 +272,13 @@ Priorita uživatele 2026-11-09 (předběhla HAR a hovory); bez odchytu provozu, 
    Ikona v liště: oranžové hodiny + popisek a položka menu „Schůzka: …“, dokud si uživatel
    schůzku neotevře (klik na notifikaci, menu ikony, výběr v agendě, záložka Kalendář,
    „Připojit“) nebo dokud neskončí.
-4. Volitelně přijetí/odmítnutí pozvánky, týdenní mřížka, barvy kategorií.
+4. 🟡 **Plánování schůzek** (2026-11-09, uživatel dodal HAR vytvoření a smazání schůzky
+   z web klienta): „＋“ v záložce Kalendář otevře formulář (název, datum, od–do, účastníci
+   z adresáře, Teams schůzka, místo, popis); u vlastní schůzky „Zrušit schůzku…“ (potvrzení),
+   u pozvánky Přijmout / Předběžně / Odmítnout. Zápis přes Microsoft Graph (stejné přihlášení,
+   `Calendars.ReadWrite`); web klient jde přes Outlook (OWA + GraphQL), viz protokol.
+   Formulář ověřen v okně, zápis na server čeká na test. Ladění: `TYMY_OPEN_TAB=meeting`.
+5. Volitelně týdenní mřížka, barvy kategorií, opakované schůzky, úprava schůzky.
 
 ## 5. Moje doporučení k pořadí
 Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu

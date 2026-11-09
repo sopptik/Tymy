@@ -27,6 +27,8 @@ pub struct TeamsBackend {
     http: Http,
     credentials: Arc<dyn CredentialStore>,
     session: Mutex<Option<SkypeSession>>,
+    /// Access token pro Microsoft Graph (plánování schůzek) a jeho platnost.
+    graph_token: Mutex<Option<auth::TokenSet>>,
     /// Oddělený zámek: long-poll ho drží desítky sekund a nesmí blokovat ostatní volání.
     poll: Mutex<Option<PollRegistration>>,
 }
@@ -44,6 +46,7 @@ impl TeamsBackend {
             http,
             credentials,
             session: Mutex::new(None),
+            graph_token: Mutex::new(None),
             poll: Mutex::new(None),
         }
     }
@@ -81,6 +84,68 @@ impl TeamsBackend {
         tracing::debug!(?session, "nová relace");
         *guard = Some(session.clone());
         Ok(session)
+    }
+
+    /// Access token pro jiný rozsah (např. Outlook) ze stejného přihlášení.
+    pub async fn access_token(&self, scope: &str) -> Result<String> {
+        Ok(self.token_set(scope).await?.access_token)
+    }
+
+    async fn token_set(&self, scope: &str) -> Result<auth::TokenSet> {
+        let account = &self.profile.account_id;
+        let refresh_token = self.credentials.load(account).await?.ok_or_else(|| {
+            Error::ReauthRequired(format!("pro účet {account} chybí uložené přihlášení"))
+        })?;
+        let tokens = auth::refresh(&self.http, &self.endpoints, &refresh_token, scope).await?;
+        if let Some(new_rt) = tokens
+            .refresh_token
+            .as_deref()
+            .filter(|t| *t != refresh_token)
+        {
+            self.credentials.save(account, new_rt).await?;
+        }
+        Ok(tokens)
+    }
+
+    /// Požadavek na Microsoft Graph (token v mezipaměti, při 401 jednou nový).
+    pub async fn graph(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        for attempt in 0..2 {
+            let token = {
+                let mut guard = self.graph_token.lock().await;
+                let fresh = guard.as_ref().filter(|t| {
+                    t.expires_at - Duration::minutes(REFRESH_MARGIN_MINUTES) > chrono::Utc::now()
+                });
+                match fresh {
+                    Some(t) => t.access_token.clone(),
+                    None => {
+                        let t = self.token_set(crate::graph::GRAPH_SCOPE).await?;
+                        let access = t.access_token.clone();
+                        *guard = Some(t);
+                        access
+                    }
+                }
+            };
+            match crate::graph::request(&self.http, &token, method.clone(), path, body).await {
+                Err(Error::Auth(msg)) if attempt == 0 => {
+                    tracing::info!(%msg, "Graph odmítl token, obnovuji");
+                    *self.graph_token.lock().await = None;
+                }
+                r => return r,
+            }
+        }
+        Err(Error::Other(
+            "Graph: přihlášení se nepodařilo obnovit".into(),
+        ))
+    }
+
+    /// Ladění: GET na Graph.
+    pub async fn graph_get(&self, path: &str) -> Result<serde_json::Value> {
+        self.graph(reqwest::Method::GET, path, None).await
     }
 
     async fn invalidate_session(&self) {
@@ -265,6 +330,41 @@ impl ChatBackend for TeamsBackend {
     async fn find_external(&self, email: &str) -> Result<Vec<Person>> {
         self.call(|s| async move { crate::people::search_external(&self.http, &s, email).await })
             .await
+    }
+
+    async fn create_meeting(&self, meeting: &tymy_core::NewMeeting) -> Result<String> {
+        let body = crate::graph::event_body(meeting);
+        let v = self
+            .graph(reqwest::Method::POST, "/v1.0/me/events", Some(&body))
+            .await?;
+        crate::graph::created_id(&v)
+    }
+
+    async fn cancel_meeting(&self, event_id: &str, comment: &str) -> Result<()> {
+        let body = serde_json::json!({ "comment": comment });
+        self.graph(
+            reqwest::Method::POST,
+            &crate::graph::event_path(event_id, "/cancel"),
+            Some(&body),
+        )
+        .await
+        .map(drop)
+    }
+
+    async fn reply_to_event(&self, event_id: &str, reply: tymy_core::EventReply) -> Result<()> {
+        let action = match reply {
+            tymy_core::EventReply::Accept => "/accept",
+            tymy_core::EventReply::Tentative => "/tentativelyAccept",
+            tymy_core::EventReply::Decline => "/decline",
+        };
+        let body = serde_json::json!({ "sendResponse": true });
+        self.graph(
+            reqwest::Method::POST,
+            &crate::graph::event_path(event_id, action),
+            Some(&body),
+        )
+        .await
+        .map(drop)
     }
 
     async fn calendar(

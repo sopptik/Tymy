@@ -38,6 +38,35 @@ impl CalendarEvent {
     }
 }
 
+/// Nová schůzka k naplánování.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMeeting {
+    pub subject: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub attendees: Vec<MeetingAttendee>,
+    /// Teams schůzka (odkaz „Připojit“).
+    pub online: bool,
+    pub body: Option<String>,
+    pub location: Option<String>,
+    pub reminder_minutes: i64,
+}
+
+/// Pozvaný účastník (e-mail je nutný pro pozvánku).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingAttendee {
+    pub email: String,
+    pub name: String,
+}
+
+/// Odpověď na pozvánku.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventReply {
+    Accept,
+    Tentative,
+    Decline,
+}
+
 /// Moje odpověď na pozvánku.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EventResponse {

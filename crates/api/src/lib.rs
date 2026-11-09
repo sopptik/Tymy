@@ -8,6 +8,7 @@ mod backend;
 pub mod calendar;
 pub mod chat;
 mod endpoints;
+pub mod graph;
 mod http;
 pub mod media;
 pub mod people;

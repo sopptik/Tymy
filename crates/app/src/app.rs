@@ -20,9 +20,9 @@ use tymy_core::text::{
 };
 use tymy_core::{
     AccountId, AccountKind, CalendarEvent, ChatBackend, Conversation, ConversationId,
-    ConversationKind, ConversationPage, Error, EventResponse, MentionRef, Message, MessageId,
-    MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile, ReplyRef, one_on_one_id,
-    one_on_one_peer,
+    ConversationKind, ConversationPage, Error, EventReply, EventResponse, MentionRef, Message,
+    MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile, ReplyRef,
+    one_on_one_id, one_on_one_peer,
 };
 
 use tymy_store::{HIT_END, HIT_START, SearchHit, Store};
@@ -112,6 +112,36 @@ pub struct GroupBuilder {
     searching: bool,
     results: Vec<Person>,
     members: Vec<Person>,
+}
+
+/// Rozpracovaná nová schůzka (formulář místo detailu události).
+pub struct MeetingForm {
+    subject: String,
+    date: String,
+    start: String,
+    end: String,
+    location: String,
+    body: String,
+    online: bool,
+    attendees: Vec<Person>,
+    query: String,
+    seq: u64,
+    searching: bool,
+    results: Vec<Person>,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// Pole formuláře nové schůzky.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingField {
+    Subject,
+    Date,
+    Start,
+    End,
+    Location,
+    Body,
+    Query,
 }
 
 /// Otevřené nastavení skupinového chatu: název, členové, přidání lidí, opuštění.
@@ -343,6 +373,24 @@ pub enum Msg {
     MovePin(ConversationId, isize),
     /// Úprava textu v psacím poli.
     Compose(text_editor::Action),
+    /// Nová schůzka: otevřít formulář, pole, Teams schůzka, hledání a výběr lidí, uložení.
+    NewMeeting,
+    MeetingInput(MeetingField, String),
+    MeetingOnline(bool),
+    MeetingSearchFire(u64),
+    MeetingPeople(u64, Result<Vec<Person>, Failure>),
+    MeetingAdd(Person),
+    MeetingRemove(tymy_core::UserId),
+    MeetingClose,
+    MeetingCreate,
+    MeetingCreated(AccountId, Result<String, Failure>),
+    /// Zrušení vlastní schůzky (s potvrzením) a odpověď na pozvánku.
+    AskCancelEvent(String),
+    KeepEvent,
+    CancelEvent(String),
+    EventCancelled(String, Result<(), Failure>),
+    ReplyEvent(String, EventReply),
+    EventReplied(String, EventReply, Result<(), Failure>),
     /// Nastavení skupinového chatu: otevřít/zavřít, název, hledání lidí, přidání, odebrání,
     /// opuštění.
     ToggleChatPanel,
@@ -425,6 +473,30 @@ impl Msg {
             Msg::MentionMove(d) => trace!(d, "update: MentionMove"),
             Msg::ToggleEmoji => debug!("update: ToggleEmoji"),
             Msg::ToggleChatPanel => debug!("update: ToggleChatPanel"),
+            Msg::NewMeeting => debug!("update: NewMeeting"),
+            Msg::MeetingInput(..) => trace!("update: MeetingInput"),
+            Msg::MeetingOnline(on) => debug!(on, "update: MeetingOnline"),
+            Msg::MeetingSearchFire(seq) => debug!(seq, "update: MeetingSearchFire"),
+            Msg::MeetingPeople(seq, r) => debug!(
+                seq,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: MeetingPeople"
+            ),
+            Msg::MeetingAdd(p) => debug!(mri = %p.mri, "update: MeetingAdd"),
+            Msg::MeetingRemove(mri) => debug!(%mri, "update: MeetingRemove"),
+            Msg::MeetingClose => debug!("update: MeetingClose"),
+            Msg::MeetingCreate => debug!("update: MeetingCreate"),
+            Msg::MeetingCreated(account, r) => {
+                debug!(%account, result = ok(r.is_ok()), "update: MeetingCreated")
+            }
+            Msg::AskCancelEvent(_) | Msg::KeepEvent => debug!("update: AskCancelEvent"),
+            Msg::CancelEvent(_) => debug!("update: CancelEvent"),
+            Msg::EventCancelled(_, r) => debug!(result = ok(r.is_ok()), "update: EventCancelled"),
+            Msg::ReplyEvent(_, reply) => debug!(?reply, "update: ReplyEvent"),
+            Msg::EventReplied(_, reply, r) => {
+                debug!(?reply, result = ok(r.is_ok()), "update: EventReplied")
+            }
             Msg::PanelTopic(_) | Msg::PanelQuery(_) => trace!("update: PanelInput"),
             Msg::SaveTopic => debug!("update: SaveTopic"),
             Msg::TopicSaved(id, _, r) => debug!(%id, result = ok(r.is_ok()), "update: TopicSaved"),
@@ -823,6 +895,10 @@ pub struct App {
     group_builder: Option<GroupBuilder>,
     /// Otevřené nastavení skupinového chatu.
     chat_panel: Option<ChatPanel>,
+    /// Formulář nové schůzky; událost čekající na potvrzení zrušení; běží změna události.
+    meeting_form: Option<MeetingForm>,
+    confirm_cancel_event: Option<String>,
+    event_busy: bool,
     /// Obrázky ze zpráv podle URL.
     media: HashMap<String, Media>,
     tab: Tab,
@@ -1007,6 +1083,9 @@ impl App {
             draft_seq: 0,
             group_builder: None,
             chat_panel: None,
+            meeting_form: None,
+            confirm_cancel_event: None,
+            event_busy: false,
             originals: HashMap::new(),
             calendar: CalendarState::load(),
         }
@@ -1766,6 +1845,21 @@ impl App {
         }
     }
 
+    /// Upraví událost aktivního účtu v paměti (do další obnovy kalendáře).
+    fn update_active_event(&mut self, id: &str, f: impl FnOnce(&mut CalendarEvent)) {
+        let Some(account) = self.active_account().cloned() else {
+            return;
+        };
+        if let Some(e) = self
+            .calendar
+            .events
+            .get_mut(&account)
+            .and_then(|evs| evs.iter_mut().find(|e| e.id == id))
+        {
+            f(e);
+        }
+    }
+
     /// Události aktivního účtu (pokud je kalendář načtený).
     fn active_events(&self) -> Option<&[CalendarEvent]> {
         self.active_account()
@@ -2447,8 +2541,14 @@ impl App {
                     self.calendar.selected = Some(event);
                 }
                 // ladění: `TYMY_OPEN_TAB=calendar` otevře po startu záložku Kalendář
-                if std::env::var("TYMY_OPEN_TAB").is_ok_and(|t| t == "calendar") {
-                    self.tab = Tab::Calendar;
+                // (`meeting` navíc otevře formulář nové schůzky, nic neukládá)
+                match std::env::var("TYMY_OPEN_TAB").as_deref() {
+                    Ok("calendar") => self.tab = Tab::Calendar,
+                    Ok("meeting") => {
+                        self.tab = Tab::Calendar;
+                        let _ = self.update(Msg::NewMeeting);
+                    }
+                    _ => {}
                 }
                 Task::batch([
                     self.fetch_conversations(),
@@ -2689,6 +2789,8 @@ impl App {
                 ReminderChoice::Dismissed => Task::none(),
             },
             Msg::SelectEvent(id) => {
+                self.meeting_form = None;
+                self.confirm_cancel_event = None;
                 if let Some(account) = self.active_account().cloned() {
                     self.ack_meeting(&account, &id);
                 }
@@ -3673,6 +3775,248 @@ impl App {
                 self.composer.perform(action);
                 self.refresh_mention()
             }
+            Msg::NewMeeting => {
+                let (day, start, end) = cal::default_slot(Utc::now());
+                self.meeting_form = Some(MeetingForm {
+                    subject: String::new(),
+                    date: day.format("%-d. %-m. %Y").to_string(),
+                    start: start.format("%H:%M").to_string(),
+                    end: end.format("%H:%M").to_string(),
+                    location: String::new(),
+                    body: String::new(),
+                    online: true,
+                    attendees: vec![],
+                    query: String::new(),
+                    seq: 0,
+                    searching: false,
+                    results: vec![],
+                    busy: false,
+                    error: None,
+                });
+                Task::none()
+            }
+            Msg::MeetingInput(field, value) => {
+                let Some(f) = &mut self.meeting_form else {
+                    return Task::none();
+                };
+                f.error = None;
+                match field {
+                    MeetingField::Subject => f.subject = value,
+                    MeetingField::Date => f.date = value,
+                    MeetingField::Start => f.start = value,
+                    MeetingField::End => f.end = value,
+                    MeetingField::Location => f.location = value,
+                    MeetingField::Body => f.body = value,
+                    MeetingField::Query => {
+                        f.query = value;
+                        f.seq += 1;
+                        if f.query.trim().chars().count() < MIN_PEOPLE_QUERY {
+                            f.results.clear();
+                            f.searching = false;
+                            return Task::none();
+                        }
+                        let seq = f.seq;
+                        return Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
+                            Msg::MeetingSearchFire(seq)
+                        });
+                    }
+                }
+                Task::none()
+            }
+            Msg::MeetingOnline(on) => {
+                if let Some(f) = &mut self.meeting_form {
+                    f.online = on;
+                }
+                Task::none()
+            }
+            Msg::MeetingSearchFire(seq) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(f), Some(backend)) = (&mut self.meeting_form, backend) else {
+                    return Task::none();
+                };
+                if seq != f.seq {
+                    return Task::none();
+                }
+                f.searching = true;
+                let query = f.query.trim().to_owned();
+                Task::perform(
+                    async move { backend.search_people(&query).await.map_err(Failure::from) },
+                    move |r| Msg::MeetingPeople(seq, r),
+                )
+            }
+            Msg::MeetingPeople(seq, r) => {
+                let Some(f) = &mut self.meeting_form else {
+                    return Task::none();
+                };
+                if seq != f.seq {
+                    return Task::none();
+                }
+                f.searching = false;
+                match r {
+                    Ok(found) => {
+                        f.results = found;
+                        Task::none()
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::MeetingAdd(person) => {
+                if let Some(f) = &mut self.meeting_form
+                    && !f.attendees.iter().any(|a| a.mri == person.mri)
+                {
+                    f.attendees.push(person);
+                    f.query.clear();
+                    f.results.clear();
+                }
+                Task::none()
+            }
+            Msg::MeetingRemove(mri) => {
+                if let Some(f) = &mut self.meeting_form {
+                    f.attendees.retain(|a| a.mri != mri);
+                }
+                Task::none()
+            }
+            Msg::MeetingClose => {
+                self.meeting_form = None;
+                Task::none()
+            }
+            Msg::MeetingCreate => {
+                let (Some(s), Some(f)) = (self.session().cloned(), &mut self.meeting_form) else {
+                    return Task::none();
+                };
+                if f.busy {
+                    return Task::none();
+                }
+                let meeting = match meeting_from_form(f) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        f.error = Some(e);
+                        return Task::none();
+                    }
+                };
+                f.busy = true;
+                let account = s.profile.account_id.clone();
+                tracing::info!(
+                    attendees = meeting.attendees.len(),
+                    online = meeting.online,
+                    "plánuji schůzku"
+                );
+                Task::perform(
+                    async move {
+                        s.backend
+                            .create_meeting(&meeting)
+                            .await
+                            .map_err(Failure::from)
+                    },
+                    move |r| Msg::MeetingCreated(account.clone(), r),
+                )
+            }
+            Msg::MeetingCreated(account, r) => {
+                if let Some(f) = &mut self.meeting_form {
+                    f.busy = false;
+                }
+                match r {
+                    Ok(id) => {
+                        self.meeting_form = None;
+                        self.calendar.selected = Some(id);
+                        self.calendar.fetched.remove(&account);
+                        let refresh = self.refresh_calendar(chrono::Duration::zero());
+                        Task::batch([refresh, self.show_toast("Schůzka naplánována")])
+                    }
+                    Err(e) => {
+                        if let Some(f) = &mut self.meeting_form {
+                            f.error = Some(e.text.clone());
+                        }
+                        tracing::warn!(error = %e.text, "plánování schůzky");
+                        Task::none()
+                    }
+                }
+            }
+            Msg::AskCancelEvent(id) => {
+                self.confirm_cancel_event = Some(id);
+                Task::none()
+            }
+            Msg::KeepEvent => {
+                self.confirm_cancel_event = None;
+                Task::none()
+            }
+            Msg::CancelEvent(id) => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                if self.event_busy {
+                    return Task::none();
+                }
+                self.event_busy = true;
+                self.confirm_cancel_event = None;
+                Task::perform(
+                    {
+                        let id = id.clone();
+                        async move {
+                            backend
+                                .cancel_meeting(&id, "Schůzka je zrušena.")
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::EventCancelled(id.clone(), r),
+                )
+            }
+            Msg::EventCancelled(id, r) => {
+                self.event_busy = false;
+                match r {
+                    Ok(()) => {
+                        self.update_active_event(&id, |e| e.cancelled = true);
+                        if let Some(account) = self.active_account().cloned() {
+                            self.calendar.fetched.remove(&account);
+                        }
+                        let refresh = self.refresh_calendar(chrono::Duration::zero());
+                        Task::batch([refresh, self.show_toast("Schůzka zrušena")])
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::ReplyEvent(id, reply) => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                if self.event_busy {
+                    return Task::none();
+                }
+                self.event_busy = true;
+                Task::perform(
+                    {
+                        let id = id.clone();
+                        async move {
+                            backend
+                                .reply_to_event(&id, reply)
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::EventReplied(id.clone(), reply, r),
+                )
+            }
+            Msg::EventReplied(id, reply, r) => {
+                self.event_busy = false;
+                match r {
+                    Ok(()) => {
+                        self.update_active_event(&id, |e| {
+                            e.response = match reply {
+                                EventReply::Accept => EventResponse::Accepted,
+                                EventReply::Tentative => EventResponse::Tentative,
+                                EventReply::Decline => EventResponse::Declined,
+                            }
+                        });
+                        self.show_toast(match reply {
+                            EventReply::Accept => "Pozvánka přijata",
+                            EventReply::Tentative => "Předběžně přijato",
+                            EventReply::Decline => "Pozvánka odmítnuta",
+                        })
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             Msg::ToggleChatPanel => {
                 if self.chat_panel.take().is_some() {
                     return Task::none();
@@ -4646,14 +4990,19 @@ impl App {
                     .padding([8, 12])
                     .size(13)
                     .style(style::search_input);
-                let new_group = (self.tab == Tab::Chats).then(|| {
+                let plus = match self.tab {
+                    Tab::Chats => Some((Msg::NewGroup, "Nový skupinový chat")),
+                    Tab::Calendar => Some((Msg::NewMeeting, "Nová schůzka")),
+                    Tab::Teams => None,
+                };
+                let new_group = plus.map(|(msg, tip)| {
                     iced::widget::tooltip(
                         button(text("＋").size(18).center().width(Length::Fill))
                             .width(34)
                             .padding([2, 0])
                             .style(style::ghost)
-                            .on_press(Msg::NewGroup),
-                        container(text("Nový skupinový chat").size(11))
+                            .on_press(msg),
+                        container(text(tip).size(11))
                             .padding([3, 8])
                             .style(style::tooltip),
                         iced::widget::tooltip::Position::Bottom,
@@ -4737,6 +5086,9 @@ impl App {
 
     /// Detail události (místo vlákna zpráv).
     fn calendar_pane(&self) -> Element<'_, Msg> {
+        if let Some(f) = &self.meeting_form {
+            return meeting_form_view(f);
+        }
         let Some(e) = self.selected_event() else {
             let msg = match self.active_events() {
                 Some(_) => "Žádné nadcházející události",
@@ -4829,6 +5181,66 @@ impl App {
             );
         }
         body = body.push(actions);
+        let upcoming = !e.cancelled && e.end > now;
+        let busy = self.event_busy;
+        if upcoming && e.is_organizer {
+            let cancel: Element<'_, Msg> = if self.confirm_cancel_event.as_deref() == Some(&e.id) {
+                row![
+                    text("Zrušit schůzku? Účastníci dostanou zrušení.")
+                        .size(13)
+                        .style(style::danger),
+                    button(text("Zrušit schůzku").size(13).font(SEMIBOLD))
+                        .padding([6, 14])
+                        .style(style::danger_button)
+                        .on_press_maybe((!busy).then(|| Msg::CancelEvent(e.id.clone()))),
+                    button(text("Ponechat").size(13))
+                        .padding([6, 14])
+                        .style(style::ghost)
+                        .on_press(Msg::KeepEvent),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+                .into()
+            } else {
+                button(text("Zrušit schůzku…").size(13))
+                    .padding([6, 14])
+                    .style(style::secondary)
+                    .on_press(Msg::AskCancelEvent(e.id.clone()))
+                    .into()
+            };
+            body = body.push(cancel);
+        } else if upcoming && e.response != EventResponse::None {
+            let reply = |label: &'static str, r: EventReply, current: bool| {
+                button(
+                    text(label)
+                        .size(13)
+                        .font(if current { SEMIBOLD } else { Font::DEFAULT }),
+                )
+                .padding([6, 14])
+                .style(move |t: &Theme, st| style::segment(t, st, current))
+                .on_press_maybe((!busy).then(|| Msg::ReplyEvent(e.id.clone(), r)))
+            };
+            body = body.push(
+                row![
+                    reply(
+                        "Přijmout",
+                        EventReply::Accept,
+                        e.response == EventResponse::Accepted
+                    ),
+                    reply(
+                        "Předběžně",
+                        EventReply::Tentative,
+                        e.response == EventResponse::Tentative
+                    ),
+                    reply(
+                        "Odmítnout",
+                        EventReply::Decline,
+                        e.response == EventResponse::Declined
+                    ),
+                ]
+                .spacing(6),
+            );
+        }
         if let Some(p) = &e.preview {
             body = body.push(
                 container(text(p.clone()).size(13))
@@ -6070,6 +6482,205 @@ fn section_label<'a>(label: &'a str) -> Element<'a, Msg> {
             left: 10.0,
         })
         .into()
+}
+
+/// Schůzka z formuláře, nebo popis chyby pro uživatele.
+fn meeting_from_form(f: &MeetingForm) -> Result<tymy_core::NewMeeting, String> {
+    let today = Local::now().date_naive();
+    if f.subject.trim().is_empty() {
+        return Err("Zadejte název schůzky.".into());
+    }
+    let day = cal::parse_date(&f.date, today).ok_or("Datum zadejte jako 10. 11. 2026.")?;
+    let start = cal::parse_time(&f.start).ok_or("Začátek zadejte jako 9:30.")?;
+    let end = cal::parse_time(&f.end).ok_or("Konec zadejte jako 10:00.")?;
+    let start = cal::local_to_utc(day, start).ok_or("Neplatný čas začátku.")?;
+    let end = cal::local_to_utc(day, end).ok_or("Neplatný čas konce.")?;
+    if end <= start {
+        return Err("Konec musí být po začátku.".into());
+    }
+    let mut attendees = vec![];
+    for p in &f.attendees {
+        let email = p
+            .email
+            .clone()
+            .filter(|e| e.contains('@'))
+            .ok_or_else(|| format!("{} nemá e-mail, pozvánku nelze poslat.", p.display_name))?;
+        attendees.push(tymy_core::MeetingAttendee {
+            email,
+            name: p.display_name.clone(),
+        });
+    }
+    Ok(tymy_core::NewMeeting {
+        subject: f.subject.trim().to_owned(),
+        start,
+        end,
+        attendees,
+        online: f.online,
+        body: Some(f.body.clone()),
+        location: Some(f.location.clone()),
+        reminder_minutes: 15,
+    })
+}
+
+/// Formulář nové schůzky (místo detailu události).
+fn meeting_form_view(f: &MeetingForm) -> Element<'_, Msg> {
+    let header = container(
+        column![
+            text("Nová schůzka").size(16).font(BOLD),
+            text(if f.attendees.is_empty() {
+                "Bez účastníků se uloží jen do vašeho kalendáře."
+            } else {
+                "Účastníci dostanou pozvánku e-mailem a v Teams."
+            })
+            .size(12)
+            .style(muted),
+        ]
+        .spacing(1),
+    )
+    .padding([12, 20])
+    .width(Length::Fill)
+    .style(style::header);
+    let field =
+        |label: &'static str, placeholder: &'static str, value: &str, kind: MeetingField| {
+            column![
+                text(label).size(12).style(muted),
+                text_input(placeholder, value)
+                    .on_input(move |v| Msg::MeetingInput(kind, v))
+                    .on_submit(Msg::MeetingCreate)
+                    .padding([8, 12])
+                    .size(13)
+                    .style(style::search_input),
+            ]
+            .spacing(4)
+        };
+    let chips = iced::widget::Row::with_children(f.attendees.iter().map(|p| {
+        button(
+            row![
+                avatar(&p.display_name, 20.0),
+                text(truncate(&p.display_name, 24)).size(12),
+                text("✕").size(11).style(muted),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([3, 8])
+        .style(style::secondary)
+        .on_press(Msg::MeetingRemove(p.mri.clone()))
+        .into()
+    }))
+    .spacing(6)
+    .wrap();
+    let mut results = Column::new().spacing(2);
+    if f.searching {
+        results = results.push(note("Hledám…"));
+    } else if f.query.trim().chars().count() >= MIN_PEOPLE_QUERY && f.results.is_empty() {
+        results = results.push(note("Nikdo nenalezen"));
+    }
+    for p in f
+        .results
+        .iter()
+        .filter(|p| !f.attendees.iter().any(|a| a.mri == p.mri))
+    {
+        results = results.push(
+            button(
+                row![
+                    avatar(&p.display_name, 28.0),
+                    column![
+                        text(truncate(&p.display_name, 32)).size(13).font(SEMIBOLD),
+                        text(truncate(&p.subtitle(), 48)).size(11).style(muted),
+                    ]
+                    .spacing(1),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 8])
+            .style(|t: &Theme, st| style::list_item(t, st, false))
+            .on_press(Msg::MeetingAdd(p.clone())),
+        );
+    }
+    let online = button(
+        row![
+            text(if f.online { "☑" } else { "☐" }).size(16),
+            text("Teams schůzka (odkaz Připojit)").size(13),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([4, 6])
+    .style(style::ghost)
+    .on_press(Msg::MeetingOnline(!f.online));
+    let send_label = if f.busy {
+        "Ukládám…"
+    } else if f.attendees.is_empty() {
+        "Uložit"
+    } else {
+        "Odeslat pozvánky"
+    };
+    let body = column![
+        field(
+            "Název",
+            "Např. Porada týmu",
+            &f.subject,
+            MeetingField::Subject
+        ),
+        row![
+            field("Datum", "10. 11. 2026", &f.date, MeetingField::Date)
+                .width(Length::FillPortion(2)),
+            field("Od", "9:30", &f.start, MeetingField::Start).width(Length::FillPortion(1)),
+            field("Do", "10:00", &f.end, MeetingField::End).width(Length::FillPortion(1)),
+        ]
+        .spacing(10),
+        text(format!("Účastníci ({})", f.attendees.len()))
+            .size(12)
+            .style(muted),
+        chips,
+        text_input("Pozvat: jméno nebo e-mail…", &f.query)
+            .on_input(|v| Msg::MeetingInput(MeetingField::Query, v))
+            .padding([8, 12])
+            .size(13)
+            .style(style::search_input),
+        results,
+        online,
+        field(
+            "Místo (nepovinné)",
+            "Např. zasedačka",
+            &f.location,
+            MeetingField::Location
+        ),
+        field(
+            "Popis (nepovinný)",
+            "Program schůzky…",
+            &f.body,
+            MeetingField::Body
+        ),
+        text(f.error.clone().unwrap_or_default())
+            .size(13)
+            .style(style::danger),
+        row![
+            button(text("Zrušit").size(13))
+                .padding([7, 14])
+                .style(style::ghost)
+                .on_press(Msg::MeetingClose),
+            button(text(send_label).size(13).font(SEMIBOLD))
+                .padding([7, 16])
+                .style(style::primary)
+                .on_press_maybe((!f.busy).then_some(Msg::MeetingCreate)),
+        ]
+        .spacing(10),
+    ]
+    .spacing(10)
+    .padding([16, 24])
+    .max_width(640);
+    column![
+        header,
+        scrollable(body)
+            .direction(style::scrollbar())
+            .style(style::thin_scrollbar)
+            .height(Length::Fill),
+    ]
+    .into()
 }
 
 /// Nadpis sekce s vlastním textem (např. den v agendě).

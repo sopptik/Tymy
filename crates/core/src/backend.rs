@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::{
-    AccountKind, CalendarEvent, Conversation, ConversationId, Event, Message, MessageId, Outgoing,
-    Person, Profile, Result, SentMessage,
+    AccountKind, CalendarEvent, Conversation, ConversationId, Event, EventReply, Message,
+    MessageId, NewMeeting, Outgoing, Person, Profile, Result, SentMessage,
 };
 
 /// Jedna stránka historie zpráv (od nejnovější po nejstarší).
@@ -167,5 +167,25 @@ pub trait ChatBackend: Send + Sync {
     async fn calendar(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
         let _ = (from, to);
         Ok(vec![])
+    }
+
+    /// Naplánuje schůzku a rozešle pozvánky; vrátí id události.
+    async fn create_meeting(&self, meeting: &NewMeeting) -> Result<String> {
+        let _ = meeting;
+        Err(crate::Error::Other("účet neumí plánovat schůzky".into()))
+    }
+
+    /// Zruší schůzku, kterou organizuji (účastníci dostanou zrušení s `comment`).
+    async fn cancel_meeting(&self, event_id: &str, comment: &str) -> Result<()> {
+        let _ = (event_id, comment);
+        Err(crate::Error::Other("účet neumí rušit schůzky".into()))
+    }
+
+    /// Odpoví na pozvánku (organizátor dostane odpověď).
+    async fn reply_to_event(&self, event_id: &str, reply: EventReply) -> Result<()> {
+        let _ = (event_id, reply);
+        Err(crate::Error::Other(
+            "účet neumí odpovídat na pozvánky".into(),
+        ))
     }
 }

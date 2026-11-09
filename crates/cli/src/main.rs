@@ -72,11 +72,24 @@ enum Command {
     },
     /// Sleduje události v reálném čase (Ctrl+C ukončí).
     Watch,
+    /// Ladění: získá access token pro rozsah a vypíše jen jeho nároky (aud, scp, appid).
+    Token {
+        /// Rozsah, např. `https://outlook.office.com/.default`.
+        scope: String,
+    },
+    /// Ladění: GET na Microsoft Graph (`/v1.0/...`), vypíše jen klíče a typy odpovědi.
+    Graph {
+        /// Cesta včetně query, např. `/v1.0/me/events?$top=1&$select=id`.
+        path: String,
+    },
     /// Vypíše události kalendáře na příštích N dní.
     Calendar {
         /// Kolik dní dopředu (od dnešní půlnoci UTC).
         #[arg(short, long, default_value_t = 7)]
         days: i64,
+        /// Ladění: ověří (jen čtením), že Graph zná id událostí z kalendáře Teams.
+        #[arg(long)]
+        check_graph: bool,
     },
     /// Ladění: surový GET na chat službu, např. `/v1/users/ME/conversations?pageSize=1`.
     Raw {
@@ -219,7 +232,22 @@ async fn main() -> Result<()> {
             println!("Nahráno: {id}");
             Ok(())
         }
-        Command::Calendar { days } => {
+        Command::Graph { path } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let v = backend.graph_get(&path).await?;
+            println!("{}", serde_json::to_string_pretty(&shape(&v))?);
+            Ok(())
+        }
+        Command::Token { scope } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let token = backend.access_token(&scope).await?;
+            let c = tymy_api::auth::Claims::decode(&token)?;
+            println!("aud:   {}", c.aud.as_deref().unwrap_or("-"));
+            println!("appid: {}", c.appid.as_deref().unwrap_or("-"));
+            println!("scp:   {}", c.scp.as_deref().unwrap_or("-"));
+            Ok(())
+        }
+        Command::Calendar { days, check_graph } => {
             let backend = backend(&config, cli.account.as_deref()).await?;
             let from = chrono::Utc::now()
                 .date_naive()
@@ -230,6 +258,20 @@ async fn main() -> Result<()> {
                 .calendar(from, from + chrono::Duration::days(days))
                 .await?;
             for e in events {
+                if check_graph {
+                    let path = tymy_api::graph::event_path(&e.id, "?$select=id");
+                    match backend.graph_get(&path).await {
+                        Ok(v) => println!(
+                            "Graph zná událost: {}",
+                            if v.get("id").and_then(|i| i.as_str()) == Some(e.id.as_str()) {
+                                "ano, stejné id"
+                            } else {
+                                "ano, jiné id"
+                            }
+                        ),
+                        Err(err) => println!("Graph událost nenašel: {err}"),
+                    }
+                }
                 let start = e.start.with_timezone(&chrono::Local);
                 let end = e.end.with_timezone(&chrono::Local);
                 let flags = [
@@ -476,5 +518,16 @@ fn print_event(e: &Event) {
         Event::Unknown { resource_type, .. } => {
             tracing::debug!(%resource_type, "neznámá událost");
         }
+    }
+}
+
+/// Tvar JSON odpovědi bez hodnot (ladění bez osobních údajů): klíče, typy, délky řetězců.
+fn shape(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), shape(v))).collect()),
+        Value::Array(a) => Value::Array(a.iter().take(2).map(shape).collect()),
+        Value::String(s) => Value::String(format!("<{} zn.>", s.chars().count())),
+        other => other.clone(),
     }
 }

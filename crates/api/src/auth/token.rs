@@ -62,6 +62,10 @@ pub struct Claims {
     pub name: Option<String>,
     pub preferred_username: Option<String>,
     pub upn: Option<String>,
+    /// Pro koho token je (ladění rozsahů pro další služby).
+    pub aud: Option<String>,
+    pub scp: Option<String>,
+    pub appid: Option<String>,
 }
 
 impl Claims {

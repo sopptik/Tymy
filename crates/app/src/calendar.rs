@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use tymy_core::{AccountId, CalendarEvent, EventResponse};
 
@@ -292,6 +292,53 @@ pub fn reminder_body(e: &CalendarEvent, now: DateTime<Utc>) -> String {
     lines.join("\n")
 }
 
+/// Datum z formuláře: „10. 11. 2026“, „10.11.2026“, „10. 11.“ (letos) nebo „2026-11-10“.
+pub fn parse_date(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d);
+    }
+    let parts: Vec<&str> = s
+        .split('.')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let num = |i: usize| parts.get(i).and_then(|p| p.parse::<u32>().ok());
+    match parts.len() {
+        2 => NaiveDate::from_ymd_opt(today.year(), num(1)?, num(0)?),
+        3 => NaiveDate::from_ymd_opt(num(2)? as i32, num(1)?, num(0)?),
+        _ => None,
+    }
+}
+
+/// Čas z formuláře: „9:30“, „09:30“, „9.30“ nebo „9“.
+pub fn parse_time(s: &str) -> Option<NaiveTime> {
+    let s = s.trim().replace('.', ":");
+    let (h, m) = match s.split_once(':') {
+        Some((h, m)) => (h.trim().parse().ok()?, m.trim().parse().ok()?),
+        None => (s.parse().ok()?, 0),
+    };
+    NaiveTime::from_hms_opt(h, m, 0)
+}
+
+/// Místní datum a čas → UTC (při přechodu na letní čas první platný okamžik).
+pub fn local_to_utc(day: NaiveDate, time: NaiveTime) -> Option<DateTime<Utc>> {
+    Local
+        .from_local_datetime(&day.and_time(time))
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// Výchozí čas nové schůzky: nejbližší celá půlhodina od `now`, na 30 minut.
+pub fn default_slot(now: DateTime<Utc>) -> (NaiveDate, NaiveTime, NaiveTime) {
+    let local = now.with_timezone(&Local);
+    let mins = local.hour() * 60 + local.minute();
+    let start = (mins / 30 + 1) * 30;
+    let start_dt = local.date_naive().and_time(NaiveTime::MIN) + Duration::minutes(start as i64);
+    let end_dt = start_dt + Duration::minutes(30);
+    (start_dt.date(), start_dt.time(), end_dt.time())
+}
+
 /// Moje odpověď lidsky.
 pub fn response_label(e: &CalendarEvent) -> Option<&'static str> {
     Some(match e.response {
@@ -452,6 +499,47 @@ mod tests {
         let start = e.start.with_timezone(&Local).format("%H:%M").to_string();
         assert_eq!(when_label(&e, at(9, 48)), format!("v {start} (za 12 min)"));
         assert_eq!(when_label(&e, at(10, 1)), format!("probíhá od {start}"));
+    }
+
+    #[test]
+    fn parses_form_date_and_time() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let d = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd);
+        assert_eq!(parse_date("10. 11. 2026", today), d(2026, 11, 10));
+        assert_eq!(parse_date("10.11.2026", today), d(2026, 11, 10));
+        assert_eq!(parse_date("3. 1.", today), d(2026, 1, 3));
+        assert_eq!(parse_date("2026-12-24", today), d(2026, 12, 24));
+        assert_eq!(parse_date("31. 2. 2026", today), None);
+        assert_eq!(parse_date("zítra", today), None);
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0);
+        assert_eq!(parse_time("9:30"), t(9, 30));
+        assert_eq!(parse_time(" 09.05 "), t(9, 5));
+        assert_eq!(parse_time("14"), t(14, 0));
+        assert_eq!(parse_time("25:00"), None);
+        assert_eq!(parse_time("x"), None);
+    }
+
+    #[test]
+    fn default_slot_is_next_half_hour() {
+        let now = local_to_utc(
+            NaiveDate::from_ymd_opt(2026, 11, 9).unwrap(),
+            NaiveTime::from_hms_opt(9, 10, 0).unwrap(),
+        )
+        .unwrap();
+        let (day, start, end) = default_slot(now);
+        assert_eq!(day, NaiveDate::from_ymd_opt(2026, 11, 9).unwrap());
+        assert_eq!(start, NaiveTime::from_hms_opt(9, 30, 0).unwrap());
+        assert_eq!(end, NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        // před půlnocí přejde na další den
+        let late = local_to_utc(
+            NaiveDate::from_ymd_opt(2026, 11, 9).unwrap(),
+            NaiveTime::from_hms_opt(23, 40, 0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            default_slot(late).0,
+            NaiveDate::from_ymd_opt(2026, 11, 10).unwrap()
+        );
     }
 
     #[test]

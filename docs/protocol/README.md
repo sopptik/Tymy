@@ -206,6 +206,39 @@ vyměňuje za skypetoken); posíláme i `X-Skypetoken`. Ladění: `tymy-cli mt <
 | Hledání mimo organizaci | `GET beta/users/<email>/externalsearchv3?includeTFLUsers=true` → interně `userdiscovery.teams.microsoft.com/v4/discovery/…` | ❌ `400 BadRequest` (chybí hlavička/token, potřeba HAR) |
 | Kalendář | `GET v2.1/me/calendars/default/calendarView?StartDate=2026-11-09T00:00:00.000Z&EndDate=…&shouldDecryptData=true` → `{count, value: [událost…]}` | ✅ 2026-11-09, oba pracovní účty |
 
+Plánování schůzek (HAR web klienta 2026-11-09, vytvoření a zrušení schůzky; export
+„sanitized“, tedy bez hlaviček `Authorization`): kalendář web klienta je vložený Outlook
+(`x-owa-host-app: teams_desktop`, `x-owa-hosted-ux: true`).
+1. `POST outlook.office.com/outlookgatewayb2/graphql` mutace `createOnlineMeeting`
+   (`mailboxId` = e-mail, `calendarId` = id složky kalendáře, `providerType: TeamsForBusiness`,
+   `providerAdditionalProperties: [{key: "meetingType", value: "Scheduled"}]`) → `joinUrl`
+   a `providerProperties` (`links.options`, `links.update`, `links.shortJoinUrl`);
+2. `POST outlook.office.com/owa/service.svc?action=CreateCalendarEvent&app=Calendar`
+   (hlavička `action`), tělo `CreateItemJsonRequest:#Exchange` (`RequestServerVersion:
+   V2018_01_08`, `TimeZoneContext` „Central Europe Standard Time“), položka
+   `CalendarItem:#Exchange`: `Subject`, `Start`/`End` místní čas + `StartTimeZoneId`,
+   `RequiredAttendees[].Mailbox{EmailAddress, Name, MailboxType, RoutingType: SMTP,
+   AADObjectId}`, `IsOnlineMeeting`, `OnlineMeeting{joinUrl, providerProperties}`,
+   `OnlineMeetingProvider: TeamsForBusiness`, `ExtendedProperty` (sada
+   `00020329-0000-0000-C000-000000000046`, `SchedulingServiceUpdateUrl`,
+   `SchedulingServiceMeetingOptionsUrl`), `ReminderMinutesBeforeStart: 15`,
+   `ItemId`/`ClientSeriesId` = `localevent:<uuid>` → `Success`/`NoError`, `ItemId` události;
+3. zrušení: `…/service.svc?action=CancelCalendarEvent`, tělo v hlavičce `x-owa-urlpostdata`
+   (`CancelCalendarEventJsonRequest`: `EventId`, `EventScope: 1`) → `NoError`.
+
+Tymy místo toho používá **Microsoft Graph** (zdokumentovaný, jedno volání): stejné
+přihlášení (Teams desktop client id) dostane token pro `https://graph.microsoft.com/.default`
+s `Calendars.ReadWrite` ✅ a pro `https://outlook.office.com/.default` s `Calendars.ReadWrite`,
+`OWA.AccessAsUser.All` ✅ (2026-11-09, `tymy-cli token <scope>` vypíše jen nároky). Id událostí
+z middle tieru (`objectId`) Graph zná přímo ✅ (`tymy-cli calendar --check-graph`, jen čtení).
+- vytvoření: `POST /v1.0/me/events` `{subject, start/end {dateTime, timeZone: UTC}, attendees
+  [{type: required, emailAddress}], isOnlineMeeting: true, onlineMeetingProvider:
+  teamsForBusiness, isReminderOn, reminderMinutesBeforeStart, body, location}`;
+- zrušení (organizátor): `POST /v1.0/me/events/{id}/cancel` `{comment}`;
+- odpověď: `POST /v1.0/me/events/{id}/accept|tentativelyAccept|decline` `{sendResponse: true}`.
+Zápis zatím neověřen (čeká na souhlas/test uživatele). Ladění: `tymy-cli graph <cesta>` (jen GET,
+vypíše tvar odpovědi bez hodnot).
+
 Kalendář (`tymy-cli calendar`): opakované schůzky přijdou jako jednotlivé výskyty
 (`eventType: Occurrence`, `seriesMasterId`), časy `startTime`/`endTime` v UTC s posunem
 (`2026-11-09T09:00:00+00:00`), `eventTimeZone` je název pásma Windows. Použitá pole:
@@ -273,8 +306,8 @@ WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a
    - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
    - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
      organizace a otevřít s ním chat (nic neposílat);
-   - ~~kalendář~~ není potřeba: načtení událostí funguje přes middle tier (2026-11-09);
-     případně jen přijetí/odmítnutí pozvánky.
+   - ~~kalendář~~ hotovo: čtení přes middle tier, vytvoření/zrušení schůzky zachyceno
+     (HAR 2026-11-09), zápis přes Graph.
 4. Network → ⤓ → *Export HAR (with sensitive data)* → uložit **mimo repozitář**, např.
    `~/teams.har`. (Volbu je třeba povolit: DevTools ⚙ → Preferences → Network → *Allow to
    generate HAR with sensitive data*.) Očištěný HAR by vynechal hlavičky `Authorization`
