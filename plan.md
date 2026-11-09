@@ -152,7 +152,9 @@ samostatného commitu“)
    `[text](url)` a holé adresy jako `<a>`. Úprava zprávy převede HTML zpět na Markdown,
    takže formátování přežije (zmínky zůstanou jako text „@Jméno“). Nápověda v psacím poli.
    Odeslání čeká na test uživatelem (jak to zobrazí oficiální Teams, hlavně `<pre>`).
-4. **Výběr emoji.**
+4. ✅ **Výběr emoji:** tlačítko ☺ vedle odeslání, záložky kategorií (smajlíci, gesta, srdce
+   a symboly, příroda a jídlo, věci) a naposledy použité (v paměti), vloží na místo kurzoru,
+   Esc zavře. Barevný font Noto Color Emoji (jinak část emoji černobíle). Ladění: `TYMY_EMOJI=1`.
 5. **Správa skupinových chatů** (přejmenovat, přidat/odebrat lidi, opustit).
 
 ## 4. Plán dalších kroků

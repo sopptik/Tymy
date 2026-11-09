@@ -11,6 +11,10 @@ pub const BOLD: Font = Font {
     weight: font::Weight::Bold,
     ..Font::DEFAULT
 };
+/// Barevná emoji (Noto Color Emoji). Bez něj by nouzový výběr písma vzal u části emoji
+/// černobílé glyfy z jiného fontu; když font chybí, iced použije běžný výběr.
+pub const EMOJI: Font = Font::with_name("Noto Color Emoji");
+
 pub const SEMIBOLD: Font = Font {
     weight: font::Weight::Semibold,
     ..Font::DEFAULT

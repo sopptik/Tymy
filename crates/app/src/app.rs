@@ -31,6 +31,7 @@ use iced::widget::text::Wrapping;
 
 use crate::calendar::{self as cal, Reminders};
 use crate::clipboard::{self, Clip};
+use crate::emoji;
 use crate::mention;
 use crate::notify::{self, ReminderChoice};
 use crate::state::{
@@ -327,6 +328,10 @@ pub enum Msg {
     MovePin(ConversationId, isize),
     /// Úprava textu v psacím poli.
     Compose(text_editor::Action),
+    /// Otevřít/zavřít výběr emoji, přepnout jeho záložku, vložit emoji do psacího pole.
+    ToggleEmoji,
+    EmojiTab(Option<usize>),
+    InsertEmoji(&'static str),
     /// Nabídka @zmínek: posun výběru, výběr (`None` = vybraná položka), zavření.
     MentionMove(isize),
     MentionPick(Option<usize>),
@@ -386,6 +391,9 @@ impl Msg {
             }
             Msg::Tick => trace!("update: Tick"),
             Msg::MentionMove(d) => trace!(d, "update: MentionMove"),
+            Msg::ToggleEmoji => debug!("update: ToggleEmoji"),
+            Msg::EmojiTab(t) => trace!(?t, "update: EmojiTab"),
+            Msg::InsertEmoji(_) => debug!("update: InsertEmoji"),
             Msg::MentionPick(i) => debug!(?i, "update: MentionPick"),
             Msg::MentionClose => debug!("update: MentionClose"),
             Msg::Roster(id, r) => debug!(
@@ -773,6 +781,10 @@ pub struct App {
     /// Lidé vybraní do zmínek v psacím poli; právě odesílané zmínky.
     composer_mentions: Vec<MentionRef>,
     in_flight_mentions: Vec<MentionRef>,
+    /// Otevřený výběr emoji: záložka (`None` = naposledy použité) a naposledy použité.
+    emoji_open: bool,
+    emoji_tab: Option<usize>,
+    recent_emoji: Vec<String>,
     /// Členové chatů pro nabídku zmínek (načtené při první „@“).
     rosters: HashMap<ConversationId, Vec<Person>>,
     roster_loading: HashSet<ConversationId>,
@@ -889,6 +901,9 @@ impl App {
             tab: Tab::Chats,
             pending_images: vec![],
             drafts: HashMap::new(),
+            emoji_open: false,
+            emoji_tab: Some(0),
+            recent_emoji: vec![],
             mention: None,
             mention_index: 0,
             mention_dismissed: None,
@@ -1900,6 +1915,7 @@ impl App {
             mentions: std::mem::take(&mut self.composer_mentions),
         };
         self.mention = None;
+        self.emoji_open = false;
         if let Some(from) = self.selected.clone() {
             if current.is_empty() {
                 self.drafts.remove(&from);
@@ -2022,6 +2038,87 @@ impl App {
         found.sort_by_key(|p| mention::fold(&p.name));
         found.truncate(MAX);
         found
+    }
+
+    /// Výběr emoji nad psacím polem: záložky kategorií a mřížka.
+    fn emoji_panel(&self) -> Element<'_, Msg> {
+        let tab = |label: &'static str, tip: &'static str, t: Option<usize>| {
+            let active = self.emoji_tab == t;
+            iced::widget::tooltip(
+                button(
+                    text(label)
+                        .size(16)
+                        .font(style::EMOJI)
+                        .center()
+                        .width(Length::Fill),
+                )
+                .width(36)
+                .padding([3, 0])
+                .style(move |th: &Theme, st| style::segment(th, st, active))
+                .on_press(Msg::EmojiTab(t)),
+                container(text(tip).size(11))
+                    .padding([3, 8])
+                    .style(style::tooltip),
+                iced::widget::tooltip::Position::Top,
+            )
+        };
+        let mut tabs = row![].spacing(2);
+        if !self.recent_emoji.is_empty() {
+            tabs = tabs.push(tab("🕘", "Naposledy použité", None));
+        }
+        for (i, (name, icon, _)) in emoji::CATEGORIES.iter().enumerate() {
+            tabs = tabs.push(tab(icon, name, Some(i)));
+        }
+        let list: Vec<&'static str> = match self.emoji_tab {
+            Some(i) => emoji::CATEGORIES
+                .get(i)
+                .map(|c| c.2.to_vec())
+                .unwrap_or_default(),
+            // naposledy použité: odkazy do tabulky (Msg nese &'static str)
+            None => self
+                .recent_emoji
+                .iter()
+                .filter_map(|r| {
+                    emoji::CATEGORIES
+                        .iter()
+                        .flat_map(|c| c.2.iter())
+                        .find(|e| **e == r.as_str())
+                        .copied()
+                })
+                .collect(),
+        };
+        let rows = list.chunks(emoji::PER_ROW).map(|chunk| {
+            row(chunk.iter().map(|e| {
+                button(
+                    text(*e)
+                        .size(20)
+                        .font(style::EMOJI)
+                        .center()
+                        .width(Length::Fill),
+                )
+                .width(36)
+                .height(36)
+                .padding(0)
+                .style(style::ghost)
+                .on_press(Msg::InsertEmoji(e))
+                .into()
+            }))
+            .spacing(2)
+            .into()
+        });
+        container(
+            column![
+                container(tabs).padding(3).style(style::segmented),
+                scrollable(Column::with_children(rows).spacing(2))
+                    .direction(style::scrollbar())
+                    .style(style::thin_scrollbar)
+                    .height(Length::Fixed(160.0)),
+            ]
+            .spacing(6),
+        )
+        .padding([6, 4])
+        .max_width(400)
+        .into()
     }
 
     /// Koncept chatu pro náhled v seznamu (první neprázdný řádek textu).
@@ -2657,6 +2754,10 @@ impl App {
                             tasks.push(Task::done(Msg::Select(c.id.clone())));
                             // ladění: `TYMY_COMPOSE=<text>` vloží text do psacího pole
                             // (nic neodesílá; např. zkouška nabídky zmínek)
+                            // ladění: `TYMY_EMOJI=1` otevře výběr emoji
+                            if std::env::var_os("TYMY_EMOJI").is_some() {
+                                tasks.push(Task::done(Msg::ToggleEmoji));
+                            }
                             if let Ok(t) = std::env::var("TYMY_COMPOSE") {
                                 tasks.push(Task::done(Msg::Compose(text_editor::Action::Edit(
                                     text_editor::Edit::Paste(Arc::new(t)),
@@ -3507,6 +3608,29 @@ impl App {
                 self.composer.perform(action);
                 self.refresh_mention()
             }
+            Msg::ToggleEmoji => {
+                self.emoji_open = !self.emoji_open;
+                if self.emoji_open {
+                    self.emoji_tab = if self.recent_emoji.is_empty() {
+                        Some(0)
+                    } else {
+                        None
+                    };
+                }
+                operation::focus(COMPOSER)
+            }
+            Msg::EmojiTab(tab) => {
+                self.emoji_tab = tab;
+                Task::none()
+            }
+            Msg::InsertEmoji(e) => {
+                self.composer
+                    .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                        Arc::new(e.to_owned()),
+                    )));
+                emoji::remember(&mut self.recent_emoji, e);
+                operation::focus(COMPOSER)
+            }
             Msg::MentionMove(delta) => {
                 let n = self.mention_candidates().len();
                 if n > 0 {
@@ -3579,6 +3703,7 @@ impl App {
                 self.in_flight_reply = self.replying.take();
                 let reply_to = self.in_flight_reply.clone();
                 self.mention = None;
+                self.emoji_open = false;
                 self.in_flight_mentions = std::mem::take(&mut self.composer_mentions);
                 let mentions: Vec<MentionRef> = self
                     .in_flight_mentions
@@ -5139,8 +5264,14 @@ impl App {
             .max_width(360)
             .into()
         };
+        let emoji_panel: Element<'a, Msg> = if self.emoji_open {
+            self.emoji_panel()
+        } else {
+            space().into()
+        };
         let composer = container(
             container(column![
+                emoji_panel,
                 mention_list,
                 banner,
                 attachments,
@@ -5157,6 +5288,7 @@ impl App {
                                     && !self.pending_images.is_empty();
                             let keys = ComposerKeys {
                                 mention: !mention_candidates.is_empty(),
+                                emoji: self.emoji_open,
                                 remove_last,
                                 cancel: if self.editing.is_some() {
                                     Some(Msg::CancelEdit)
@@ -5175,6 +5307,24 @@ impl App {
                         .max_height(160)
                         .padding([9, 6])
                         .style(style::composer_editor),
+                    iced::widget::tooltip(
+                        button(text("☺").size(18).center().width(Length::Fill))
+                            .width(34)
+                            .height(38)
+                            .padding(0)
+                            .style(move |t: &Theme, st| {
+                                if self.emoji_open {
+                                    style::segment(t, st, true)
+                                } else {
+                                    style::ghost(t, st)
+                                }
+                            })
+                            .on_press(Msg::ToggleEmoji),
+                        container(text("Emoji (Esc zavře)").size(11))
+                            .padding([3, 8])
+                            .style(style::tooltip),
+                        iced::widget::tooltip::Position::Top,
+                    ),
                     iced::widget::tooltip(
                         button(
                             text("➤")
@@ -5257,6 +5407,8 @@ impl App {
 
 /// Stav psacího pole pro klávesové zkratky.
 struct ComposerKeys {
+    /// Je otevřený výběr emoji (Esc ho zavře).
+    emoji: bool,
     /// Je otevřená nabídka zmínek (šipky, Enter/Tab, Esc patří jí).
     mention: bool,
     /// Pole je prázdné a jsou vložené obrázky → Backspace odebere poslední.
@@ -5331,6 +5483,9 @@ fn composer_keys(
         if let Some(msg) = msg {
             return Some(text_editor::Binding::Custom(msg));
         }
+    }
+    if keys.emoji && kp.key == Key::Named(Named::Escape) {
+        return Some(text_editor::Binding::Custom(Msg::ToggleEmoji));
     }
     if let Some(cancel) = &keys.cancel
         && kp.key == Key::Named(Named::Escape)

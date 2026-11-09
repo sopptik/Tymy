@@ -6,6 +6,7 @@
 mod app;
 mod calendar;
 mod clipboard;
+mod emoji;
 mod mention;
 mod notify;
 mod state;
