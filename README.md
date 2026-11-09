@@ -1,7 +1,8 @@
 # Tymy
 
 Lehký nativní klient Microsoft Teams pro Linux (Ubuntu a odvozené distribuce).
-Jen to podstatné, jako kdysi Skype: chat, soubory, hovory, kalendář s připomínkami.
+Jen to podstatné, jako kdysi Skype: chat, hovory, kalendář s připomínkami. Bez OneDrive
+a dalších integrací (jedinou výjimkou je kalendář).
 Žádné Teams aplikace ani integrace.
 
 > ⚠️ Tymy používá interní, nedokumentovaná API Teams. Mohou se kdykoli změnit
@@ -16,10 +17,10 @@ Použitelný chat: okno `tymy` a vývojářské CLI `tymy-cli`. Podrobný stav j
 |---|---|---|
 | 0 | Přihlášení, seznam chatů, historie, odesílání | ověřeno pro pracovní účet |
 | 1a | Chat: cache, formátování, odpovědi, reakce, úpravy, hledání, více účtů, skupinové chaty | hotovo |
-| 1b | Real-time (trouter), soubory, osobní účty | čeká na odchyt provozu; přihlášení v prohlížeči, hlášení přečtení a jména hotové |
+| 1b | Real-time (trouter), osobní účty | čeká na odchyt provozu; přihlášení v prohlížeči, hlášení přečtení a jména hotové |
 | 1c | Balíček `.deb`, spouštění po přihlášení | hotovo |
 | 2 | Hovory a videohovory (výzkum) | — |
-| 3 | Kalendář a připomínky schůzek | — |
+| 3 | Kalendář, připomínky a plánování schůzek | hotovo, čeká na test |
 
 ## Struktura
 
