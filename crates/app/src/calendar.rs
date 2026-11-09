@@ -78,6 +78,10 @@ struct Entry {
     /// Odloženo do; `None` = vyřízeno.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     snoozed_until: Option<DateTime<Utc>>,
+    /// Připomenuto, ale uživatel si událost ještě neotevřel (ikona v liště ji ukazuje
+    /// i po restartu aplikace).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pending: bool,
 }
 
 /// Které připomínky už byly zobrazené. Ukládá se na disk, aby se po restartu neopakovaly.
@@ -146,6 +150,7 @@ impl Reminders {
                     Entry {
                         expires: e.end,
                         snoozed_until: None,
+                        pending: true,
                     },
                 );
                 changed = true;
@@ -173,9 +178,32 @@ impl Reminders {
             Entry {
                 expires: e.end,
                 snoozed_until: Some(until),
+                pending: true,
             },
         );
         self.save();
+    }
+
+    /// Byla událost připomenuta a uživatel si ji ještě neotevřel?
+    pub fn is_pending(&self, account: &AccountId, e: &CalendarEvent) -> bool {
+        self.entries
+            .get(&key(account, e))
+            .is_some_and(|x| x.pending)
+    }
+
+    /// Uživatel si událost otevřel (všechny její výskyty se stejným id).
+    pub fn ack(&mut self, account: &AccountId, event_id: &str) {
+        let prefix = format!("{account}|{event_id}|");
+        let mut changed = false;
+        for (k, entry) in &mut self.entries {
+            if entry.pending && k.starts_with(&prefix) {
+                entry.pending = false;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save();
+        }
     }
 }
 
@@ -370,6 +398,26 @@ mod tests {
         // odklad přes konec události se nezapíše
         r.snooze(&acc, &e, at(10, 28));
         assert!(r.take_due([(&acc, &e)], at(10, 29), 15).is_empty());
+    }
+
+    #[test]
+    fn pending_until_acknowledged() {
+        let acc: AccountId = "a".into();
+        let e = event("1", at(10, 0), 30);
+        let mut r = reminders();
+        assert!(!r.is_pending(&acc, &e));
+        r.take_due([(&acc, &e)], at(9, 50), 15);
+        assert!(r.is_pending(&acc, &e));
+        r.ack(&acc, "1");
+        assert!(!r.is_pending(&acc, &e));
+        assert!(
+            r.take_due([(&acc, &e)], at(9, 55), 15).is_empty(),
+            "potvrzení není nová připomínka"
+        );
+        // starý záznam bez pole `pending` se načte jako vyřízený
+        let old: HashMap<String, Entry> =
+            serde_json::from_str(r#"{"k":{"expires":"2026-11-09T09:30:00Z"}}"#).unwrap();
+        assert!(!old["k"].pending);
     }
 
     #[test]

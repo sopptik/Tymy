@@ -1589,6 +1589,22 @@ impl App {
             alerts.retain(|(a, x)| !(a == account && x.id == e.id));
             alerts.push((account.clone(), e.clone()));
         }
+        // připomenuté a neotevřené z dřívějška (po restartu aplikace)
+        for (account, evs) in &self.calendar.events {
+            if !known.contains(account) {
+                continue;
+            }
+            for e in evs {
+                let shown = self
+                    .calendar
+                    .alerts
+                    .iter()
+                    .any(|(a, x)| a == account && x.id == e.id);
+                if !shown && e.end > now && self.calendar.reminders.is_pending(account, e) {
+                    self.calendar.alerts.push((account.clone(), e.clone()));
+                }
+            }
+        }
         let multi = self.accounts.len() > 1;
         let tasks: Vec<_> = due
             .into_iter()
@@ -1614,6 +1630,7 @@ impl App {
         self.calendar
             .alerts
             .retain(|(a, e)| !(a == account && e.id == event));
+        self.calendar.reminders.ack(account, event);
     }
 
     /// Popisky připomenutých schůzek pro lištu: „Porada v 10:00 (za 12 min)“.
