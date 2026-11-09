@@ -55,6 +55,9 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Souhrnný test (2026-11-05):** „bod 1 se zatím zdá že funguje vše jak má“ (reakce, úpravy,
   mazání, odpovědi, obrázky, nové chaty, hlášení přečtení, citace, účty, autostart, `.deb`).
 - **Obrázek ze schránky (2026-11-05):** „obrázek ze schránky už jde odeslat“ → bod 14 ✅.
+- **Kalendář (2026-11-09):** „přidej kalendář. chci aby notifikoval schůzky a jiné události
+  z kalendáře.“ a „tlačítko kalendáře bych přidal jako další menu pod Týmy a Chaty jako další
+  řádek“ → záložka Kalendář na druhém řádku pod Chaty/Týmy, připomínky notifikací (fáze 3).
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová
@@ -123,6 +126,8 @@ podmínek služby Microsoftu.
 | Real-time přes long-poll (Skype) | ❌ `410 Gone`, vypnuto Microsoftem |
 | Real-time náhrada | dočasně obnova seznamu chatů každých 5 s |
 | Osobní účty | ❓ hodnoty jsou hypotéza, neověřeno |
+| Kalendář: agenda 14 dní, detail, „Připojit“, chat schůzky | ✅ (middle tier, ověřeno na obou pracovních účtech) |
+| Připomínky událostí (všechny účty, Připojit / Odložit) | 🟡 hotovo, čeká na test uživatelem |
 
 ## 4. Plán dalších kroků
 
@@ -216,11 +221,21 @@ podmínek služby Microsoftu.
 4. Skupinové hovory a schůzky až po úspěšném 1:1.
 
 ### Fáze 3: kalendář a připomínky
-1. Načtení událostí (pracovní: kalendář Teams/Graph se stejným přihlášením; osobní: Outlook.com).
-2. Agenda den/týden, detail schůzky, tlačítko „Připojit“ (fáze 2 nebo prohlížeč).
-3. Připomínky: lokální plánovač běžící v liště, notifikace X minut předem s „Připojit / Odložit“,
-   přepočet po probuzení ze spánku.
-4. Volitelně přijetí/odmítnutí pozvánky.
+Priorita uživatele 2026-11-09 (předběhla HAR a hovory); bez odchytu provozu, stačil middle tier.
+1. ✅ Načtení událostí (pracovní účet): middle tier Teams
+   `v2.1/me/calendars/default/calendarView` se stejným přihlášením jako chat (žádný Graph).
+   Osobní účet: neověřeno (Outlook.com).
+2. ✅ Záložka **Kalendář** (druhý řádek pod Chaty/Týmy): agenda dnes + 14 dní po dnech,
+   hledání v názvu/místě/organizátorovi, detail (čas, místo, organizátor, moje odpověď,
+   text pozvánky), „Připojit“ (zatím v prohlížeči, fáze 2) a „Chat schůzky“.
+3. 🟡 Připomínky: kontrola každých 30 s, obnova kalendáře po 5 min podle hodin (po probuzení
+   ze spánku hned a připomínky počkají na čerstvá data). Notifikace X minut předem
+   (`settings.toml` → `[calendar] reminder_minutes`, výchozí 15; `reminders = false` vypne),
+   celodenní události v 8:00, zrušené a odmítnuté ne. Připomínky ze všech přihlášených účtů,
+   klik otevře událost (případně přepne účet), „Připojit“, „Odložit o 5 min“ (nejdéle do
+   začátku). Zobrazené připomínky v `~/.local/state/tymy/calendar-reminders.json`, aby se
+   po restartu neopakovaly; spuštění během schůzky ji ještě připomene.
+4. Volitelně přijetí/odmítnutí pozvánky, týdenní mřížka, barvy kategorií.
 
 ## 5. Moje doporučení k pořadí
 Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provozu
@@ -233,11 +248,11 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
 2. **Společný odchyt provozu (HAR)** z web klienta (Chrome; postup a scénáře
    v `docs/protocol/README.md`, očištění `tools/har-redact.py`), v tomto pořadí důležitosti:
    trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
-   případně osobní účet (teams.live.com) a kalendář.
+   případně osobní účet (teams.live.com). Kalendář HAR nepotřeboval (2026-11-09, fáze 3).
 3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů),
    pak **soubory**.
-4. Fáze 2 (hovory) až po trouteru; fáze 3 (kalendář) může jít paralelně, pokud HAR ukáže
-   endpoint kalendáře dostupný se stejným přihlášením.
+4. Fáze 2 (hovory) až po trouteru. Fáze 3 (kalendář) předběhla na přání uživatele
+   (2026-11-09): endpoint je dostupný se stejným přihlášením, hotovo bez HAR.
 
 8. ✅ **Posouvání vlákna:** vždy na nejnovější zprávu, overlay „Nové zprávy“ při čtení starších.
 9. ✅ **Logování:** `--log=debug|production`, `TYMY_LOG`, `settings.toml`; `~/.local/state/tymy/logs`.

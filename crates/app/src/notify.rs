@@ -1,6 +1,6 @@
 //! Desktopové notifikace (freedesktop D-Bus).
 
-use notify_rust::{Hint, Notification};
+use notify_rust::{Hint, Notification, Timeout};
 
 /// Zobrazí notifikaci a počká, co s ní uživatel udělá. `true` = klikl na ni (otevřít chat).
 pub async fn show(title: String, body: String) -> bool {
@@ -27,6 +27,60 @@ pub async fn show(title: String, body: String) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+/// Co uživatel udělal s připomínkou události.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderChoice {
+    /// Klik na připomínku: otevřít událost v okně.
+    Open,
+    /// Připojit se ke schůzce.
+    Join,
+    Snooze,
+    /// Zavřeno.
+    Dismissed,
+}
+
+/// Připomínka události: zůstane zobrazená, dokud ji uživatel nezavře; tlačítka Připojit
+/// (u online schůzky) a Odložit.
+pub async fn reminder(title: String, body: String, can_join: bool) -> ReminderChoice {
+    tokio::task::spawn_blocking(move || {
+        let mut n = Notification::new();
+        n.appname("Tymy")
+            .summary(&title)
+            .body(&escape_markup(&body))
+            .icon("appointment-soon")
+            .hint(Hint::Category("x-tymy.calendar".into()))
+            .timeout(Timeout::Never)
+            .action("default", "Otevřít");
+        if can_join {
+            n.action("join", "Připojit");
+        }
+        n.action(
+            "snooze",
+            &format!("Odložit o {} min", crate::calendar::SNOOZE_MINUTES),
+        );
+        match n.show() {
+            Ok(h) => {
+                let mut choice = ReminderChoice::Dismissed;
+                h.wait_for_action(|action| {
+                    choice = match action {
+                        "default" => ReminderChoice::Open,
+                        "join" => ReminderChoice::Join,
+                        "snooze" => ReminderChoice::Snooze,
+                        _ => ReminderChoice::Dismissed,
+                    }
+                });
+                choice
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "připomínku nelze zobrazit");
+                ReminderChoice::Dismissed
+            }
+        }
+    })
+    .await
+    .unwrap_or(ReminderChoice::Dismissed)
 }
 
 /// Notifikační servery interpretují v těle jednoduché HTML; text zprávy proto escapujeme.

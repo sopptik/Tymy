@@ -5,6 +5,7 @@
 
 pub mod auth;
 mod backend;
+pub mod calendar;
 pub mod chat;
 mod endpoints;
 mod http;

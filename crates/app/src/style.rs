@@ -313,7 +313,7 @@ pub fn code_block(t: &Theme, mine: bool) -> container::Style {
 }
 
 /// Smíchá dvě barvy (`t` = podíl `b`), výsledek je neprůhledný.
-fn mix(a: Color, b: Color, t: f32) -> Color {
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
     Color {
         r: a.r + (b.r - a.r) * t,
         g: a.g + (b.g - a.g) * t,

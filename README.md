@@ -45,11 +45,20 @@ cargo run -p tymy-cli -- chats
 cargo run -p tymy-cli -- messages 1         # pořadí z výpisu chats nebo id konverzace
 cargo run -p tymy-cli -- send 1 Ahoj
 cargo run -p tymy-cli -- watch
+cargo run -p tymy-cli -- calendar --days 7  # události kalendáře
 cargo run -p tymy-cli -- -vv chats          # ladění: zredigovaná těla odpovědí
 ```
 
 Konfigurace je v `~/.config/tymy/` (`accounts.toml`, `settings.toml`, volitelně
 `endpoints.toml`). Refresh tokeny jsou výhradně v Secret Service.
+
+Připomínky kalendáře se nastavují v `settings.toml`:
+
+```toml
+[calendar]
+reminders = true        # upozorňovat na události notifikací
+reminder_minutes = 15   # kolik minut před začátkem
+```
 
 ## Instalace (.deb)
 

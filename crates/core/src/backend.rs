@@ -1,8 +1,9 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use crate::{
-    AccountKind, Conversation, ConversationId, Event, Message, MessageId, Outgoing, Person,
-    Profile, Result, SentMessage,
+    AccountKind, CalendarEvent, Conversation, ConversationId, Event, Message, MessageId, Outgoing,
+    Person, Profile, Result, SentMessage,
 };
 
 /// Jedna stránka historie zpráv (od nejnovější po nejstarší).
@@ -140,4 +141,11 @@ pub trait ChatBackend: Send + Sync {
 
     /// Hledání lidí mimo organizaci podle přesné e-mailové adresy.
     async fn find_external(&self, email: &str) -> Result<Vec<Person>>;
+
+    /// Události kalendáře, které zasahují do intervalu `from..to` (včetně výskytů
+    /// opakovaných událostí), seřazené podle začátku. Výchozí = účet kalendář nemá.
+    async fn calendar(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
+        let _ = (from, to);
+        Ok(vec![])
+    }
 }

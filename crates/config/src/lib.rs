@@ -79,6 +79,28 @@ pub struct Settings {
     /// Naposledy použitý účet v okně (bez něj první v `accounts.toml`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<AccountId>,
+    /// Kalendář (`[calendar]`): připomínky událostí.
+    #[serde(default)]
+    pub calendar: CalendarSettings,
+}
+
+/// `[calendar]` v `settings.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CalendarSettings {
+    /// Upozorňovat na události notifikací.
+    pub reminders: bool,
+    /// Kolik minut před začátkem upozornit (když událost neurčuje vlastní připomenutí).
+    pub reminder_minutes: u32,
+}
+
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        Self {
+            reminders: true,
+            reminder_minutes: 15,
+        }
+    }
 }
 
 /// Volba vzhledu aplikace.
@@ -258,6 +280,15 @@ mod tests {
         let c = Config::load_from(&dir).unwrap();
         assert_eq!(c.settings.log, Some(logging::LogMode::Production));
         assert_eq!(c.settings.theme, ThemeMode::System);
+        assert_eq!(c.settings.calendar, CalendarSettings::default());
+        std::fs::write(
+            dir.join("settings.toml"),
+            "log = \"production\"\n[calendar]\nreminder_minutes = 5\n",
+        )
+        .unwrap();
+        let c = Config::load_from(&dir).unwrap();
+        assert_eq!(c.settings.calendar.reminder_minutes, 5);
+        assert!(c.settings.calendar.reminders, "chybějící klíč = výchozí");
         let mut c2 = Config::load_from(&dir).unwrap();
         c2.settings.theme = ThemeMode::Dark;
         c2.save_settings().unwrap();

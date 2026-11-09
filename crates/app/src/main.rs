@@ -4,6 +4,7 @@
 //! jen v liště bez okna (spouštění po přihlášení, viz `tymy_config::autostart`).
 
 mod app;
+mod calendar;
 mod clipboard;
 mod notify;
 mod state;

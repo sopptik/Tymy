@@ -196,6 +196,18 @@ vyměňuje za skypetoken); posíláme i `X-Skypetoken`. Ladění: `tymy-cli mt <
 | Profily podle MRI | `POST beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true`, tělo `["8:orgid:<oid>", …]` → `{value: [{mri, displayName, email, jobTitle, department, …}]}` | ✅ |
 | Hledání v adresáři | `POST beta/users/searchV2?includeDLs=false&includeBots=false&enableGuest=true&source=newChat&skypeTeamsInfo=true`, tělo = JSON řetězec dotazu → `{value: [...], bestMatchSuggestions: [...]}` | ✅ |
 | Hledání mimo organizaci | `GET beta/users/<email>/externalsearchv3?includeTFLUsers=true` → interně `userdiscovery.teams.microsoft.com/v4/discovery/…` | ❌ `400 BadRequest` (chybí hlavička/token, potřeba HAR) |
+| Kalendář | `GET v2.1/me/calendars/default/calendarView?StartDate=2026-11-09T00:00:00.000Z&EndDate=…&shouldDecryptData=true` → `{count, value: [událost…]}` | ✅ 2026-11-09, oba pracovní účty |
+
+Kalendář (`tymy-cli calendar`): opakované schůzky přijdou jako jednotlivé výskyty
+(`eventType: Occurrence`, `seriesMasterId`), časy `startTime`/`endTime` v UTC s posunem
+(`2026-11-09T09:00:00+00:00`), `eventTimeZone` je název pásma Windows. Použitá pole:
+`objectId` (id výskytu), `subject`, `isAllDayEvent` (začátek/konec = půlnoci v pásmu události),
+`location`, `organizerName`, `bodyPreview`, `isCancelled`, `isOrganizer`, `myResponseType`
+(`Accepted`, `NotResponded`, …), `showAs` (`Busy`, `Tentative`, …), `skypeTeamsMeetingUrl`
+(odkaz „Připojit“), `skypeTeamsDataObject.cid` (chat schůzky `19:meeting_…@thread.v2`).
+Odpověď **neobsahuje** čas připomenutí (`reminderMinutesBeforeStart` čteme, pokud by přišel);
+výchozí je proto z `settings.toml`. Další pole: `iCalUID`, `cleanGlobalObjectId`,
+`isPrivate`, `isResponseRequested`, `hasAttachments`, `categories`, `lastModifiedTime`.
 
 ## 7. Týmy a kanály ✅
 
@@ -249,7 +261,8 @@ WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a
    - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
    - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
      organizace a otevřít s ním chat (nic neposílat);
-   - volitelně **kalendář:** otevřít Kalendář, přepnout týden, otevřít detail schůzky.
+   - ~~kalendář~~ není potřeba: načtení událostí funguje přes middle tier (2026-11-09);
+     případně jen přijetí/odmítnutí pozvánky.
 4. Network → ⤓ → *Export HAR (with sensitive data)* → uložit **mimo repozitář**, např.
    `~/teams.har`. (Volbu je třeba povolit: DevTools ⚙ → Preferences → Network → *Allow to
    generate HAR with sensitive data*.) Očištěný HAR by vynechal hlavičky `Authorization`

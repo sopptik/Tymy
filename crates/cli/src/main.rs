@@ -72,6 +72,12 @@ enum Command {
     },
     /// Sleduje události v reálném čase (Ctrl+C ukončí).
     Watch,
+    /// Vypíše události kalendáře na příštích N dní.
+    Calendar {
+        /// Kolik dní dopředu (od dnešní půlnoci UTC).
+        #[arg(short, long, default_value_t = 7)]
+        days: i64,
+    },
     /// Ladění: surový GET na chat službu, např. `/v1/users/ME/conversations?pageSize=1`.
     Raw {
         /// Cesta včetně query, začíná `/`.
@@ -211,6 +217,41 @@ async fn main() -> Result<()> {
                 .upload_image(&conversation.as_str().into(), &bytes, &name)
                 .await?;
             println!("Nahráno: {id}");
+            Ok(())
+        }
+        Command::Calendar { days } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let from = chrono::Utc::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("platný čas")
+                .and_utc();
+            let events = backend
+                .calendar(from, from + chrono::Duration::days(days))
+                .await?;
+            for e in events {
+                let start = e.start.with_timezone(&chrono::Local);
+                let end = e.end.with_timezone(&chrono::Local);
+                let flags = [
+                    (e.all_day, "celý den"),
+                    (e.cancelled, "zrušeno"),
+                    (e.join_url.is_some(), "online"),
+                ]
+                .iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, f)| *f)
+                .collect::<Vec<_>>()
+                .join(", ");
+                println!(
+                    "{}–{}  {}  [{:?}{}{}]",
+                    start.format("%a %-d. %-m. %H:%M"),
+                    end.format("%H:%M"),
+                    e.subject,
+                    e.response,
+                    if flags.is_empty() { "" } else { "; " },
+                    flags
+                );
+            }
             Ok(())
         }
         Command::Watch => {

@@ -13,23 +13,25 @@ use iced::widget::{
 use iced::{Border, Color, Element, Font, Length, Subscription, Task, Theme};
 use tymy_api::auth::{self, BrowserLogin, CredentialStore, DeviceCode, SecretServiceStore};
 use tymy_api::{Http, TeamsBackend, complete_login};
-use tymy_config::{AccountRecord, Config, ThemeMode, autostart};
+use tymy_config::{AccountRecord, CalendarSettings, Config, ThemeMode, autostart};
 use tymy_core::text::rich::{self, Block, QuoteKind};
 use tymy_core::text::{
     InlineImage, Part, REPLY_PREVIEW_CHARS, edited_html, message_parts, truncate_chars,
 };
 use tymy_core::{
-    AccountId, AccountKind, ChatBackend, Conversation, ConversationId, ConversationKind,
-    ConversationPage, Error, Message, MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage,
-    Person, Profile, ReplyRef, one_on_one_id, one_on_one_peer,
+    AccountId, AccountKind, CalendarEvent, ChatBackend, Conversation, ConversationId,
+    ConversationKind, ConversationPage, Error, EventResponse, Message, MessageId, MessageKind,
+    MessagePage, Outgoing, OutgoingImage, Person, Profile, ReplyRef, one_on_one_id,
+    one_on_one_peer,
 };
 
 use tymy_store::{HIT_END, HIT_START, SearchHit, Store};
 
 use iced::widget::text::Wrapping;
 
+use crate::calendar::{self as cal, Reminders};
 use crate::clipboard::{self, Clip};
-use crate::notify;
+use crate::notify::{self, ReminderChoice};
 use crate::state::{
     PeerNames, channel_name, group_teams, is_me, is_unread, merge_messages, move_pin, my_mri,
     order_chats, toggle_reaction, unread_count,
@@ -141,6 +143,45 @@ struct OtherAccount {
 /// Jak často zjišťovat nepřečtené u neaktivních účtů.
 const OTHERS_REFRESH: Duration = Duration::from_secs(60);
 
+/// Jak často kontrolovat připomínky událostí.
+const CALENDAR_TICK: Duration = Duration::from_secs(30);
+/// Po kolika minutách kalendář znovu načíst (podle hodin, ne monotónního času: po uspání
+/// notebooku se tak načte hned).
+const CALENDAR_REFRESH_MINUTES: i64 = 5;
+
+/// Kalendáře všech účtů a stav připomínek. Na rozdíl od ostatního stavu přežije přepnutí
+/// účtu (připomínky chodí ze všech účtů).
+struct CalendarState {
+    events: HashMap<AccountId, Vec<CalendarEvent>>,
+    /// Kdy jsme naposledy načítali (i neúspěšně).
+    fetched: HashMap<AccountId, DateTime<Utc>>,
+    loading: HashSet<AccountId>,
+    errors: HashMap<AccountId, String>,
+    reminders: Reminders,
+    settings: CalendarSettings,
+    /// Událost otevřená v okně (id výskytu v aktivním účtu).
+    selected: Option<String>,
+    /// Událost k otevření po přepnutí účtu (klik na připomínku z jiného účtu).
+    open_after_switch: Option<String>,
+}
+
+impl CalendarState {
+    fn load() -> Self {
+        Self {
+            events: HashMap::new(),
+            fetched: HashMap::new(),
+            loading: HashSet::new(),
+            errors: HashMap::new(),
+            reminders: Reminders::load(),
+            settings: Config::load()
+                .map(|c| c.settings.calendar)
+                .unwrap_or_default(),
+            selected: None,
+            open_after_switch: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Msg {
     Booted(Result<Option<Session>, Failure>),
@@ -180,6 +221,15 @@ pub enum Msg {
     ),
     /// Klik na notifikaci z neaktivního účtu: přepnout na něj a otevřít chat.
     OtherNotificationClicked(AccountId, ConversationId),
+    /// Kontrola připomínek a obnova kalendářů.
+    CalendarTick,
+    CalendarLoaded(AccountId, Result<Vec<CalendarEvent>, Failure>),
+    /// Uživatel reagoval na připomínku události.
+    Reminder(AccountId, Box<CalendarEvent>, ReminderChoice),
+    /// Otevřít událost v záložce Kalendář (id výskytu).
+    SelectEvent(String),
+    /// Otevřít chat schůzky.
+    OpenMeetingChat(ConversationId),
     /// Výsledek úlohy spuštěné v daném „období“ (při přepnutí účtu se staré zahodí).
     Scoped(u64, Box<Msg>),
     OpenUrl(String),
@@ -316,6 +366,16 @@ impl Msg {
                 trace!(event = ?std::mem::discriminant(self), "update")
             }
             Msg::Tick => trace!("update: Tick"),
+            Msg::CalendarTick => trace!("update: CalendarTick"),
+            Msg::CalendarLoaded(account, r) => debug!(
+                %account,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: CalendarLoaded"
+            ),
+            Msg::Reminder(account, _, choice) => debug!(%account, ?choice, "update: Reminder"),
+            Msg::SelectEvent(_) => debug!("update: SelectEvent"),
+            Msg::OpenMeetingChat(id) => debug!(%id, "update: OpenMeetingChat"),
             Msg::Booted(r) => debug!(
                 result = ok(r.is_ok()),
                 account = matches!(r, Ok(Some(_))),
@@ -562,6 +622,7 @@ pub struct Selecting {
 pub enum Tab {
     Chats,
     Teams,
+    Calendar,
 }
 
 enum Phase {
@@ -708,6 +769,8 @@ pub struct App {
     hovered: Option<ConversationId>,
     /// Originály obrázků uložené na disk (URL originálu → soubor).
     originals: HashMap<String, std::path::PathBuf>,
+    /// Kalendáře a připomínky (všechny účty).
+    calendar: CalendarState,
 }
 
 impl App {
@@ -804,6 +867,7 @@ impl App {
             draft_seq: 0,
             group_builder: None,
             originals: HashMap::new(),
+            calendar: CalendarState::load(),
         }
     }
 
@@ -819,6 +883,8 @@ impl App {
         fresh.hidden = self.hidden;
         fresh.tray = self.tray.take();
         fresh.tray_unread = self.tray_unread;
+        std::mem::swap(&mut fresh.calendar, &mut self.calendar);
+        fresh.calendar.selected = None;
         *self = fresh;
     }
 
@@ -967,6 +1033,7 @@ impl App {
         match self.phase {
             Phase::Ready(_) => Subscription::batch(always.into_iter().chain([
                 iced::time::every(REFRESH).map(|_| Msg::Tick),
+                iced::time::every(CALENDAR_TICK).map(|_| Msg::CalendarTick),
                 if self.accounts.len() > 1 {
                     iced::time::every(OTHERS_REFRESH).map(|_| Msg::PollOthers)
                 } else {
@@ -1423,6 +1490,108 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Účty, jejichž kalendář umíme načíst: aktivní a neaktivní s navázaným spojením.
+    fn calendar_backends(&self) -> Vec<(AccountId, Arc<TeamsBackend>)> {
+        let active = self
+            .session()
+            .map(|s| (s.profile.account_id.clone(), s.backend.clone()));
+        let others = self.others.iter().filter_map(|(id, o)| {
+            let b = o.backend.clone()?;
+            (Some(id) != self.active_account()).then(|| (id.clone(), b))
+        });
+        active.into_iter().chain(others).collect()
+    }
+
+    /// Načte kalendáře účtů, které jsou starší než `max_age` a právě se nenačítají.
+    fn refresh_calendar(&mut self, max_age: chrono::Duration) -> Task<Msg> {
+        let now = Utc::now();
+        let (from, to) = cal::fetch_range(now);
+        let mut tasks = vec![];
+        for (id, backend) in self.calendar_backends() {
+            let fresh = self
+                .calendar
+                .fetched
+                .get(&id)
+                .is_some_and(|t| now - *t < max_age);
+            if fresh || !self.calendar.loading.insert(id.clone()) {
+                continue;
+            }
+            tasks.push(Task::perform(
+                async move { backend.calendar(from, to).await.map_err(Failure::from) },
+                move |r| Msg::CalendarLoaded(id.clone(), r),
+            ));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Zobrazí připomínky událostí, na které je čas (ze všech účtů). Účty, jejichž kalendář
+    /// se právě načítá, počkají na čerstvá data (např. po probuzení ze spánku).
+    fn check_reminders(&mut self) -> Task<Msg> {
+        if !self.calendar.settings.reminders {
+            return Task::none();
+        }
+        let now = Utc::now();
+        let minutes = i64::from(self.calendar.settings.reminder_minutes);
+        let known: HashSet<&AccountId> = self.accounts.iter().map(|a| &a.id).collect();
+        let loading = &self.calendar.loading;
+        let events = self
+            .calendar
+            .events
+            .iter()
+            .filter(|(id, _)| known.contains(id) && !loading.contains(*id))
+            .flat_map(|(id, evs)| evs.iter().map(move |e| (id, e)));
+        let due = self.calendar.reminders.take_due(events, now, minutes);
+        let multi = self.accounts.len() > 1;
+        let tasks: Vec<_> = due
+            .into_iter()
+            .map(|(account, e)| {
+                tracing::info!(%account, "připomínka události");
+                let mut body = cal::reminder_body(&e, now);
+                if multi && let Some(a) = self.accounts.iter().find(|a| a.id == account) {
+                    body.push_str(&format!("\nÚčet: {}", a.label()));
+                }
+                let can_join = e.join_url.is_some() && !e.cancelled;
+                let title = e.subject.clone();
+                let event = Box::new(e);
+                Task::perform(notify::reminder(title, body, can_join), move |choice| {
+                    Msg::Reminder(account.clone(), event.clone(), choice)
+                })
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    /// Otevře událost v záložce Kalendář (u jiného účtu po přepnutí na něj).
+    fn open_event(&mut self, account: AccountId, event: String) -> Task<Msg> {
+        if self.active_account() == Some(&account) {
+            let tab = self.update(Msg::SetTab(Tab::Calendar));
+            self.calendar.selected = Some(event);
+            Task::batch([tab, self.show_window()])
+        } else {
+            tracing::info!(%account, "připomínka z jiného účtu: přepínám");
+            let switch = self.load_account(Some(account));
+            self.calendar.open_after_switch = Some(event);
+            Task::batch([switch, self.show_window()])
+        }
+    }
+
+    /// Události aktivního účtu (pokud je kalendář načtený).
+    fn active_events(&self) -> Option<&[CalendarEvent]> {
+        self.active_account()
+            .and_then(|id| self.calendar.events.get(id))
+            .map(Vec::as_slice)
+    }
+
+    /// Otevřená událost; bez výběru probíhající nebo nejbližší příští.
+    fn selected_event(&self) -> Option<&CalendarEvent> {
+        let events = self.active_events()?;
+        let now = Utc::now();
+        match &self.calendar.selected {
+            Some(id) => events.iter().find(|e| &e.id == id),
+            None => events.iter().find(|e| e.end > now && !e.cancelled),
+        }
+    }
+
     /// Nepřečtené konverzace ve všech neaktivních účtech.
     fn others_unread(&self) -> usize {
         self.others.values().filter_map(|o| o.unread).sum()
@@ -1853,8 +2022,18 @@ impl App {
                 tracing::info!(account = %session.profile.account_id, "účet načten");
                 self.load_cached(&session);
                 self.phase = Phase::Ready(session);
+                // po přepnutí z připomínky jiného účtu otevřít její událost
+                if let Some(event) = self.calendar.open_after_switch.take() {
+                    self.tab = Tab::Calendar;
+                    self.calendar.selected = Some(event);
+                }
+                // ladění: `TYMY_OPEN_TAB=calendar` otevře po startu záložku Kalendář
+                if std::env::var("TYMY_OPEN_TAB").is_ok_and(|t| t == "calendar") {
+                    self.tab = Tab::Calendar;
+                }
                 Task::batch([
                     self.fetch_conversations(),
+                    Task::done(Msg::CalendarTick),
                     // nepřečtené ostatních účtů až po rozběhnutí aktivního
                     Task::perform(tokio::time::sleep(Duration::from_secs(3)), |_| {
                         Msg::PollOthers
@@ -2055,6 +2234,49 @@ impl App {
                 Task::none()
             }
 
+            Msg::CalendarTick => {
+                let refresh =
+                    self.refresh_calendar(chrono::Duration::minutes(CALENDAR_REFRESH_MINUTES));
+                Task::batch([refresh, self.check_reminders()])
+            }
+            Msg::CalendarLoaded(id, r) => {
+                self.calendar.loading.remove(&id);
+                self.calendar.fetched.insert(id.clone(), Utc::now());
+                match r {
+                    Ok(events) => {
+                        self.calendar.errors.remove(&id);
+                        self.calendar.events.insert(id, events);
+                    }
+                    Err(e) => {
+                        tracing::warn!(account = %id, error = %e.text, "kalendář nelze načíst");
+                        self.calendar.errors.insert(id, e.text);
+                    }
+                }
+                self.check_reminders()
+            }
+            Msg::Reminder(account, event, choice) => match choice {
+                ReminderChoice::Open => self.open_event(account, event.id),
+                ReminderChoice::Join => {
+                    if let Some(url) = &event.join_url {
+                        open_url(url);
+                    }
+                    Task::none()
+                }
+                ReminderChoice::Snooze => {
+                    self.calendar.reminders.snooze(&account, &event, Utc::now());
+                    Task::none()
+                }
+                ReminderChoice::Dismissed => Task::none(),
+            },
+            Msg::SelectEvent(id) => {
+                self.calendar.selected = Some(id);
+                Task::none()
+            }
+            Msg::OpenMeetingChat(id) => {
+                let tab = self.update(Msg::SetTab(Tab::Chats));
+                Task::batch([tab, self.update(Msg::Select(id))])
+            }
+
             Msg::Tick => {
                 if self.refreshing {
                     Task::none()
@@ -2180,7 +2402,7 @@ impl App {
             Msg::LoadOlderChats => self.load_older_chats(),
             Msg::ChatListScrolled(viewport) => {
                 let rel = viewport.relative_offset().y;
-                if rel.is_finite() && rel >= 0.9 {
+                if self.tab != Tab::Calendar && rel.is_finite() && rel >= 0.9 {
                     self.load_older_chats()
                 } else {
                     Task::none()
@@ -2410,6 +2632,10 @@ impl App {
                 }
             }
 
+            Msg::Search(s) if self.tab == Tab::Calendar => {
+                self.search = s;
+                Task::none()
+            }
             Msg::Search(s) => {
                 self.search = s;
                 self.search_seq += 1;
@@ -2950,10 +3176,10 @@ impl App {
                 self.people_note = None;
                 self.search_seq += 1;
                 // kanály s dávnou aktivitou jsou až na dalších stránkách seznamu
-                if tab == Tab::Teams {
-                    self.want_all_chats()
-                } else {
-                    Task::none()
+                match tab {
+                    Tab::Teams => self.want_all_chats(),
+                    Tab::Calendar => self.refresh_calendar(chrono::Duration::minutes(1)),
+                    Tab::Chats => Task::none(),
                 }
             }
             Msg::Hover(id) => {
@@ -3217,7 +3443,12 @@ impl App {
                 self.login_view(code.as_ref(), *busy, back.as_ref())
             }
             Phase::Ready(session) => {
-                row![self.sidebar(session), vline(), self.chat_pane(session),].into()
+                let pane = if self.tab == Tab::Calendar {
+                    self.calendar_pane()
+                } else {
+                    self.chat_pane(session)
+                };
+                row![self.sidebar(session), vline(), pane].into()
             }
         };
         let body = match &self.error {
@@ -3556,19 +3787,23 @@ impl App {
         .spacing(6)
         .align_y(iced::Alignment::Center);
         let tabs = container(
-            row![
-                tab_button(
-                    "Chaty",
-                    unread_in(Conversation::is_chat),
-                    self.tab == Tab::Chats,
-                    Tab::Chats
-                ),
-                tab_button(
-                    "Týmy",
-                    unread_in(|c| c.kind == ConversationKind::Channel),
-                    self.tab == Tab::Teams,
-                    Tab::Teams
-                ),
+            column![
+                row![
+                    tab_button(
+                        "Chaty",
+                        unread_in(Conversation::is_chat),
+                        self.tab == Tab::Chats,
+                        Tab::Chats
+                    ),
+                    tab_button(
+                        "Týmy",
+                        unread_in(|c| c.kind == ConversationKind::Channel),
+                        self.tab == Tab::Teams,
+                        Tab::Teams
+                    ),
+                ]
+                .spacing(2),
+                tab_button("Kalendář", 0, self.tab == Tab::Calendar, Tab::Calendar),
             ]
             .spacing(2),
         )
@@ -3577,6 +3812,7 @@ impl App {
         let (items, placeholder) = match self.tab {
             Tab::Chats => (self.chat_list(session, &query), "Hledat chat nebo osobu…"),
             Tab::Teams => (self.team_list(&query), "Hledat tým nebo kanál…"),
+            Tab::Calendar => (self.calendar_list(&query), "Hledat v kalendáři…"),
         };
         container(column![
             container(profile).padding(iced::Padding {
@@ -3630,6 +3866,178 @@ impl App {
         .width(SIDEBAR_WIDTH)
         .height(Length::Fill)
         .style(style::sidebar)
+        .into()
+    }
+
+    /// Záložka Kalendář: agenda aktivního účtu po dnech (dnes + `cal::DAYS_AHEAD`).
+    fn calendar_list<'a>(&'a self, query: &str) -> Vec<Element<'a, Msg>> {
+        let mut items: Vec<Element<'a, Msg>> = vec![];
+        let Some(account) = self.active_account() else {
+            return items;
+        };
+        if self.calendar.errors.contains_key(account) {
+            items.push(note("Kalendář se nepodařilo načíst, zkusím to znovu."));
+        }
+        let Some(events) = self.active_events() else {
+            items.push(note(if self.calendar.loading.contains(account) {
+                "Načítám kalendář…"
+            } else {
+                "Kalendář zatím není načtený"
+            }));
+            return items;
+        };
+        let now = Utc::now();
+        let today = now.with_timezone(&Local).date_naive();
+        let matches = |e: &&CalendarEvent| {
+            query.is_empty()
+                || [Some(&e.subject), e.location.as_ref(), e.organizer.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|s| s.to_lowercase().contains(query))
+        };
+        let selected = self.selected_event().map(|e| e.id.as_str());
+        let mut day = None;
+        let mut any = false;
+        for e in events.iter().filter(matches) {
+            // vícedenní události, které začaly dřív, patří pod dnešek
+            let d = cal::start_day(e).max(today);
+            if day != Some(d) {
+                items.push(section_title(cal::day_label(d, today).to_uppercase()));
+                day = Some(d);
+            }
+            items.push(event_item(e, now, selected == Some(e.id.as_str())));
+            any = true;
+        }
+        if !any {
+            items.push(note(if query.is_empty() {
+                "Žádné události v příštích 14 dnech"
+            } else {
+                "Nic nenalezeno"
+            }));
+        }
+        items
+    }
+
+    /// Detail události (místo vlákna zpráv).
+    fn calendar_pane(&self) -> Element<'_, Msg> {
+        let Some(e) = self.selected_event() else {
+            let msg = match self.active_events() {
+                Some(_) => "Žádné nadcházející události",
+                None => "Načítám kalendář…",
+            };
+            return centered(
+                column![logo(56.0), text(msg).size(15).style(muted)]
+                    .spacing(14)
+                    .align_x(iced::Alignment::Center),
+            );
+        };
+        let now = Utc::now();
+        let today = now.with_timezone(&Local).date_naive();
+        let day = cal::start_day(e);
+        let header = container(
+            row![
+                date_badge(day),
+                column![
+                    text(e.subject.clone()).size(16).font(BOLD),
+                    text(format!(
+                        "{} · {}",
+                        cal::day_label(day, today),
+                        cal::time_label(e)
+                    ))
+                    .size(12)
+                    .style(muted),
+                ]
+                .spacing(1),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([12, 20])
+        .width(Length::Fill)
+        .style(style::header);
+
+        let mut body = Column::new().spacing(14).padding([20, 24]).max_width(720);
+        let mut status: Vec<Element<'_, Msg>> = vec![];
+        if e.cancelled {
+            status.push(
+                text("Událost byla zrušena")
+                    .size(13)
+                    .font(SEMIBOLD)
+                    .style(style::danger)
+                    .into(),
+            );
+        } else if e.start <= now && now < e.end {
+            status.push(text("Probíhá").size(13).font(SEMIBOLD).style(accent).into());
+        } else if e.end <= now {
+            status.push(text("Skončila").size(13).style(muted).into());
+        }
+        if let Some(r) = cal::response_label(e) {
+            status.push(text(r).size(13).style(muted).into());
+        }
+        if !status.is_empty() {
+            body = body.push(row(status).spacing(14));
+        }
+        let field = |label: &'static str, value: &str| {
+            row![
+                text(label).size(13).style(muted).width(100),
+                text(value.to_owned()).size(13),
+            ]
+            .spacing(10)
+        };
+        if let Some(l) = &e.location {
+            body = body.push(field("Místo", l));
+        }
+        if let Some(o) = &e.organizer {
+            body = body.push(field("Organizátor", o));
+        }
+        let mut actions = row![].spacing(10);
+        if let Some(url) = e.join_url.as_ref().filter(|_| !e.cancelled && e.end > now) {
+            actions = actions.push(
+                button(text("Připojit").size(13).font(SEMIBOLD))
+                    .padding([7, 16])
+                    .style(style::primary)
+                    .on_press(Msg::OpenUrl(url.clone())),
+            );
+        }
+        if let Some(chat) = e
+            .chat
+            .as_ref()
+            .filter(|id| self.conversations.iter().any(|c| &c.id == *id))
+        {
+            actions = actions.push(
+                button(text("Chat schůzky").size(13))
+                    .padding([7, 16])
+                    .style(style::secondary)
+                    .on_press(Msg::OpenMeetingChat(chat.clone())),
+            );
+        }
+        body = body.push(actions);
+        if let Some(p) = &e.preview {
+            body = body.push(
+                container(text(p.clone()).size(13))
+                    .padding([12, 14])
+                    .width(Length::Fill)
+                    .style(style::card),
+            );
+        }
+        let reminder = if !self.calendar.settings.reminders {
+            "Připomínky jsou vypnuté (settings.toml → [calendar] reminders).".to_owned()
+        } else if e.all_day {
+            "Připomenu v 8:00 v den události.".to_owned()
+        } else {
+            let m = e
+                .reminder_minutes
+                .unwrap_or(i64::from(self.calendar.settings.reminder_minutes));
+            format!("Připomenu {m} min před začátkem.")
+        };
+        body = body.push(text(reminder).size(12).style(muted));
+        column![
+            header,
+            scrollable(body)
+                .direction(style::scrollbar())
+                .style(style::thin_scrollbar)
+                .height(Length::Fill),
+        ]
         .into()
     }
 
@@ -4576,6 +4984,114 @@ fn section_label<'a>(label: &'a str) -> Element<'a, Msg> {
             left: 10.0,
         })
         .into()
+}
+
+/// Nadpis sekce s vlastním textem (např. den v agendě).
+fn section_title<'a>(label: String) -> Element<'a, Msg> {
+    container(text(label).size(10).font(BOLD).style(muted))
+        .padding(iced::Padding {
+            top: 12.0,
+            right: 10.0,
+            bottom: 4.0,
+            left: 10.0,
+        })
+        .into()
+}
+
+/// Položka agendy: barevný proužek, název a čas · místo.
+fn event_item<'a>(e: &CalendarEvent, now: DateTime<Utc>, selected: bool) -> Element<'a, Msg> {
+    let ongoing = e.start <= now && now < e.end;
+    let dim = e.end <= now || e.cancelled || e.response == EventResponse::Declined;
+    let subject = if e.cancelled {
+        format!("Zrušeno: {}", e.subject)
+    } else {
+        e.subject.clone()
+    };
+    let mut detail = cal::time_label(e);
+    if let Some(place) = e.location.as_ref().or(e.organizer.as_ref()) {
+        detail.push_str(" · ");
+        detail.push_str(place);
+    }
+    let bar = container(space())
+        .width(3)
+        .height(34)
+        .style(move |t: &Theme| {
+            let c = style::colors(t);
+            container::Style {
+                background: Some(
+                    if dim {
+                        c.border
+                    } else if ongoing {
+                        c.primary
+                    } else {
+                        style::mix(c.primary, c.surface, 0.45)
+                    }
+                    .into(),
+                ),
+                border: Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        });
+    button(
+        row![
+            bar,
+            column![
+                text(truncate(&subject, 30))
+                    .wrapping(Wrapping::None)
+                    .size(13)
+                    .font(SEMIBOLD)
+                    .style(move |t: &Theme| if dim {
+                        muted(t)
+                    } else {
+                        text::Style::default()
+                    }),
+                text(truncate(&detail, 36))
+                    .wrapping(Wrapping::None)
+                    .size(11)
+                    .style(if ongoing && !dim { accent } else { muted }),
+            ]
+            .spacing(3),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([7, 8])
+    .style(move |t: &Theme, status| style::list_item(t, status, selected))
+    .on_press(Msg::SelectEvent(e.id.clone()))
+    .into()
+}
+
+/// „Kalendářní list“ s dnem v týdnu a číslem dne (hlavička detailu události).
+fn date_badge<'a>(day: chrono::NaiveDate) -> Element<'a, Msg> {
+    use chrono::Datelike;
+    const DAYS: [&str; 7] = ["PO", "ÚT", "ST", "ČT", "PÁ", "SO", "NE"];
+    container(
+        column![
+            text(DAYS[day.weekday().num_days_from_monday() as usize])
+                .size(9)
+                .font(BOLD)
+                .style(accent),
+            text(day.day().to_string()).size(16).font(BOLD),
+        ]
+        .align_x(iced::Alignment::Center),
+    )
+    .width(38)
+    .height(38)
+    .center_x(38)
+    .center_y(38)
+    .style(|t: &Theme| container::Style {
+        background: Some(style::colors(t).primary_soft.into()),
+        border: Border {
+            radius: 9.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn note<'a>(t: &str) -> Element<'a, Msg> {

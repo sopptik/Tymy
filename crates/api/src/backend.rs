@@ -234,6 +234,15 @@ impl ChatBackend for TeamsBackend {
             .await
     }
 
+    async fn calendar(
+        &self,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<tymy_core::CalendarEvent>> {
+        self.call(|s| async move { crate::calendar::calendar_view(&self.http, &s, from, to).await })
+            .await
+    }
+
     async fn send(
         &self,
         conversation: &ConversationId,
