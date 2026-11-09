@@ -10,15 +10,19 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
 - **Cíl:** nativní klient Microsoft Teams pro Linux, obdoba předchůdce Teams, Skype.
 - **Platforma:** první iterace jen Ubuntu a odvozené distribuce (Kubuntu, Xubuntu, Mint, Pop!_OS…).
 - **Rozsah a pořadí funkcí:**
-  1. základní chat + posílání souborů (u pracovních účtů zrušeno, viz níže),
+  1. základní chat + posílání souborů,
   2. hlasové hovory a videohovory,
   3. kalendář a připomínky schůzek.
 - **Mimo rozsah:** žádné Teams aplikace ani další integrace Microsoft aplikací.
-  Upřesnění (2026-11-09): „nechci onedrive ani jiné integrace, výjimkou je kalendář“ →
-  žádný OneDrive/SharePoint (tím odpadá odesílání souborů z pracovního účtu, Teams je ukládá
-  právě tam), jediná povolená integrace je kalendář (čtení přes middle tier, zápis přes Graph).
-  Obrázky ze schránky zůstávají, jdou přes vlastní úložiště Teams (AMS), ne přes OneDrive.
-  Přijaté soubory se dál jen otevírají odkazem v prohlížeči.
+  Upřesnění (2026-11-09): „nechci onedrive ani jiné integrace, výjimkou je kalendář“, pak
+  po vysvětlení, že Teams soubory z pracovního účtu ukládá jen do OneDrive: „povol OneDrive
+  jen pro odesílání souborů“. Povolené integrace jsou tedy jen dvě:
+  - kalendář (čtení přes middle tier, zápis přes Graph);
+  - OneDrive výhradně pro odeslání souboru do chatu, stejně jako oficiální klient: nahrát do
+    „Microsoft Teams Chat Files“, nasdílet účastníkům, poslat odkaz. Žádné procházení
+    OneDrive, synchronizace ani jiné funkce.
+  Obrázky ze schránky jdou dál přes vlastní úložiště Teams (AMS). Přijaté soubory se
+  otevírají odkazem v prohlížeči.
 - **Typy účtů:** pracovní/školní (M365) **i** osobní (Teams free).
 - **Backend:** interní (nedokumentovaná) API Teams web klienta, ne Microsoft Graph.
 - **Hovory:** pokus o nativní implementaci (výzkum), ne vložený web.
@@ -227,9 +231,9 @@ samostatného commitu“)
    u 1:1 podle id chatu, u skupin podle členů vlákna (ověřeno), pak `fetchShortProfile`;
    i u chatů, které přibudou za běhu. Lidé z jiných organizací profil nevrátí, pro ně
    zůstává záloha z historie zpráv.
-4. ~~**Odesílání souborů**~~ **zrušeno** (2026-11-09, „nechci onedrive ani jiné integrace,
-   výjimkou je kalendář“): pracovní účet by vyžadoval OneDrive „Microsoft Teams Chat Files“.
-   Případně jen osobní účet přes AMS (stejné úložiště jako obrázky), až se budou řešit osobní účty.
+4. **Odesílání souborů:** pracovní účet = OneDrive „Microsoft Teams Chat Files“ + `properties.files`
+   (OneDrive povolen jen na tohle, 2026-11-09); osobní = AMS upload. Výběr souboru a
+   drag & drop do okna, průběh nahrávání. Potřeba HAR s odesláním souboru (chat i kanál).
 5. **Osobní účty:** ověřit autoritu, client id, scope, authz a chat host.
 6. ✅ **Přihlášení s PKCE** pro organizace, které blokují device code. Uživatel narazil (2026-11-04)
    u druhého pracovního účtu na chybu 53003 (blokováno podmíněným přístupem, zařízení
@@ -322,10 +326,10 @@ Stav 2026-11-05: fáze 1a a 1c hotové, z 1b vše, co nepotřebuje odchyt provoz
    instalace `.deb`. Obrázek ze schránky po opravě podle HAR ověřen zvlášť (bod 14).
 2. **Společný odchyt provozu (HAR)** z web klienta (Chrome; postup a scénáře
    v `docs/protocol/README.md`, očištění `tools/har-redact.py`), v tomto pořadí důležitosti:
-   trouter (WebSocket rámce), hledání lidí mimo organizaci,
+   trouter (WebSocket rámce), odeslání souboru, hledání lidí mimo organizaci,
    případně osobní účet (teams.live.com). Kalendář HAR nepotřeboval (2026-11-09, fáze 3).
-3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů).
-   Soubory přes OneDrive zrušeny (2026-11-09).
+3. Podle HAR: **trouter** (okamžité zprávy, „píše…“, přítomnost; předpoklad hovorů),
+   pak **soubory** (OneDrive jen pro odeslání).
 4. Fáze 2 (hovory) až po trouteru. Fáze 3 (kalendář) předběhla na přání uživatele
    (2026-11-09): endpoint je dostupný se stejným přihlášením, hotovo bez HAR.
 

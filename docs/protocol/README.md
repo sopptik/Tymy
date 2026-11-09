@@ -308,6 +308,7 @@ WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a
      účtem) poslat do chatu zprávu, začít psát („píše…“), přidat reakci; změnit vlastní stav
      (dostupný → nerušit → dostupný);
    - **obrázek:** do chatu vložit obrázek ze schránky (Ctrl+V) a odeslat (✅ zachyceno 2026-11-05, není třeba opakovat);
+   - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
    - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
      organizace a otevřít s ním chat (nic neposílat);
    - ~~kalendář~~ hotovo: čtení přes middle tier, vytvoření/zrušení schůzky zachyceno
@@ -330,6 +331,8 @@ Zajímá nás hlavně:
   a sled rámců (handshake, autentizace, `ping`, příchozí `3:::{…}` a odpovědi na ně);
 - obrázek: host a hlavičky nahrání (`POST …/v1/objects`, `User-Agent`, `x-ms-*`), tělo
   a následné `PUT` s obsahem;
+- soubor: nahrání do OneDrive/SharePointu (hostitel, token pro koho), sdílení a tělo odeslané
+  zprávy s `properties.files`;
 - hledání mimo organizaci: hlavičky a token požadavku na `externalsearchv3` / `userdiscovery`.
 
 Ladicí výstup Tymy: `tymy-cli -vv chats` vypíše těla odpovědí se zredigovanými tokeny.
@@ -348,5 +351,5 @@ Ladicí výstup Tymy: `tymy-cli -vv chats` vypíše těla odpovědí se zredigov
 - [x] Líné načítání starších stránek seznamu (kurzor `backwardLink` z předchozí části) (2026-11-05)
 - [x] Zobrazení vložených obrázků (AMS náhled + originál)
 - [x] Odesílání obrázků ze schránky (AMS přes `asyncgw`, `amsreferences`) (2026-11-05)
-- [-] Odesílání souborů: zrušeno (2026-11-09), pracovní účet by vyžadoval OneDrive, který uživatel nechce;
-  případně jen osobní účet přes AMS
+- [ ] Odesílání souborů: work = OneDrive „Microsoft Teams Chat Files“ + `properties.files`
+  (OneDrive povolen jen pro odeslání souboru, 2026-11-09); personal = AMS
