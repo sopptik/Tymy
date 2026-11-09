@@ -224,6 +224,39 @@ impl ChatBackend for TeamsBackend {
             .await
     }
 
+    async fn set_topic(&self, conversation: &ConversationId, topic: &str) -> Result<()> {
+        self.call(|s| async move { chat::set_topic(&self.http, &s, conversation, topic).await })
+            .await
+    }
+
+    async fn add_members(
+        &self,
+        conversation: &ConversationId,
+        members: &[tymy_core::UserId],
+    ) -> Result<()> {
+        for m in members {
+            self.call(|s| async move { chat::add_member(&self.http, &s, conversation, m).await })
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn remove_member(
+        &self,
+        conversation: &ConversationId,
+        member: &tymy_core::UserId,
+    ) -> Result<()> {
+        self.call(
+            |s| async move { chat::remove_member(&self.http, &s, conversation, member).await },
+        )
+        .await
+    }
+
+    async fn leave(&self, conversation: &ConversationId) -> Result<()> {
+        let me = tymy_core::UserId(format!("8:orgid:{}", self.profile.account_id));
+        self.remove_member(conversation, &me).await
+    }
+
     async fn search_people(&self, query: &str) -> Result<Vec<Person>> {
         self.call(|s| async move { crate::people::search_directory(&self.http, &s, query).await })
             .await

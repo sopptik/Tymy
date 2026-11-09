@@ -463,6 +463,78 @@ pub async fn thread_members(
         .unwrap_or_default())
 }
 
+/// Přejmenuje chat: `PUT /v1/threads/{id}/properties?name=topic`, tělo `{"topic": "…"}`
+/// (prázdný název = chat bez názvu, pojmenovaný podle členů).
+pub async fn set_topic(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    topic: &str,
+) -> Result<()> {
+    let mut url = api_url(
+        session,
+        &["v1", "threads", conversation.as_str(), "properties"],
+    );
+    url.query_pairs_mut().append_pair("name", "topic");
+    let resp = authed(http.client.put(url), session)
+        .json(&json!({ "topic": topic.trim() }))
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(drop)
+}
+
+/// Přidá člena do skupinového chatu: `PUT /v1/threads/{id}/members/{mri}`, tělo
+/// `{"role": "Admin"}` (ve skupinových chatech jsou všichni správci, jako při založení).
+pub async fn add_member(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    member: &UserId,
+) -> Result<()> {
+    let url = api_url(
+        session,
+        &[
+            "v1",
+            "threads",
+            conversation.as_str(),
+            "members",
+            member.as_str(),
+        ],
+    );
+    let resp = authed(http.client.put(url), session)
+        .json(&json!({ "role": "Admin" }))
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(drop)
+}
+
+/// Odebere člena ze skupinového chatu (sebe = opustit chat):
+/// `DELETE /v1/threads/{id}/members/{mri}`.
+pub async fn remove_member(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+    member: &UserId,
+) -> Result<()> {
+    let url = api_url(
+        session,
+        &[
+            "v1",
+            "threads",
+            conversation.as_str(),
+            "members",
+            member.as_str(),
+        ],
+    );
+    let resp = authed(http.client.delete(url), session)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await.map(drop)
+}
+
 /// Ladění: GET na libovolnou cestu chat služby (`/v1/...?...`), vrátí surový JSON.
 pub async fn raw_get(http: &Http, session: &SkypeSession, path_and_query: &str) -> Result<Value> {
     if !path_and_query.starts_with('/') {
@@ -821,6 +893,44 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(sent.arrived_at.unwrap().timestamp_millis(), 1700000000000);
+    }
+
+    #[tokio::test]
+    async fn manages_group_chat() {
+        let server = MockServer::start().await;
+        let conv: ConversationId = "19:abc@thread.v2".into();
+        Mock::given(method("PUT"))
+            .and(path("/v1/threads/19:abc@thread.v2/properties"))
+            .and(query_param("name", "topic"))
+            .and(header("Authentication", "skypetoken=st"))
+            .and(wiremock::matchers::body_json(
+                json!({"topic": "Nový název"}),
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/threads/19:abc@thread.v2/members/8:orgid:x"))
+            .and(wiremock::matchers::body_json(json!({"role": "Admin"})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/threads/19:abc@thread.v2/members/8:orgid:y"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (http, s) = (Http::new().unwrap(), session(&server.uri()));
+        set_topic(&http, &s, &conv, "  Nový název ").await.unwrap();
+        add_member(&http, &s, &conv, &"8:orgid:x".into())
+            .await
+            .unwrap();
+        remove_member(&http, &s, &conv, &"8:orgid:y".into())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

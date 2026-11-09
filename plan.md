@@ -155,7 +155,13 @@ samostatného commitu“)
 4. ✅ **Výběr emoji:** tlačítko ☺ vedle odeslání, záložky kategorií (smajlíci, gesta, srdce
    a symboly, příroda a jídlo, věci) a naposledy použité (v paměti), vloží na místo kurzoru,
    Esc zavře. Barevný font Noto Color Emoji (jinak část emoji černobíle). Ladění: `TYMY_EMOJI=1`.
-5. **Správa skupinových chatů** (přejmenovat, přidat/odebrat lidi, opustit).
+5. 🟡 **Správa skupinových chatů:** tlačítko „⚙ Členové“ v hlavičce skupinového chatu otevře
+   nastavení místo vlákna: přejmenování, členové s profily (načtení ověřeno: 21 členů),
+   přidání lidí hledáním v adresáři, odebrání (potvrzení druhým klikem), opuštění chatu
+   (potvrzení). Chat služba: `PUT /v1/threads/{id}/properties?name=topic` `{"topic"}`,
+   `PUT /v1/threads/{id}/members/{mri}` `{"role": "Admin"}`, `DELETE …/members/{mri}`
+   (opuštění = vlastní MRI). Endpointy podle Skype/Teams API bez HAR, změny na serveru čekají
+   na test uživatelem. Ladění: `TYMY_OPEN_CHAT=<id> TYMY_CHAT_PANEL=1`.
 
 ## 4. Plán dalších kroků
 

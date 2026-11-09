@@ -114,6 +114,21 @@ pub struct GroupBuilder {
     members: Vec<Person>,
 }
 
+/// Otevřené nastavení skupinového chatu: název, členové, přidání lidí, opuštění.
+pub struct ChatPanel {
+    conv: ConversationId,
+    topic: String,
+    query: String,
+    seq: u64,
+    searching: bool,
+    results: Vec<Person>,
+    /// Běží změna na serveru (tlačítka jsou neaktivní).
+    busy: bool,
+    confirm_leave: bool,
+    /// Člen, u kterého se čeká na potvrzení odebrání (druhý klik).
+    confirm_remove: Option<tymy_core::UserId>,
+}
+
 /// Skupinový chat připravený v okně; na serveru vznikne první zprávou.
 #[derive(Clone)]
 struct DraftGroup {
@@ -328,6 +343,23 @@ pub enum Msg {
     MovePin(ConversationId, isize),
     /// Úprava textu v psacím poli.
     Compose(text_editor::Action),
+    /// Nastavení skupinového chatu: otevřít/zavřít, název, hledání lidí, přidání, odebrání,
+    /// opuštění.
+    ToggleChatPanel,
+    PanelTopic(String),
+    SaveTopic,
+    TopicSaved(ConversationId, String, Result<(), Failure>),
+    PanelQuery(String),
+    PanelSearchFire(u64),
+    PanelPeople(u64, Result<Vec<Person>, Failure>),
+    AddMember(Person),
+    MemberAdded(ConversationId, Person, Result<(), Failure>),
+    RemoveMember(tymy_core::UserId),
+    MemberRemoved(ConversationId, tymy_core::UserId, Result<(), Failure>),
+    AskLeave,
+    CancelLeave,
+    Leave,
+    Left(ConversationId, Result<(), Failure>),
     /// Otevřít/zavřít výběr emoji, přepnout jeho záložku, vložit emoji do psacího pole.
     ToggleEmoji,
     EmojiTab(Option<usize>),
@@ -392,6 +424,29 @@ impl Msg {
             Msg::Tick => trace!("update: Tick"),
             Msg::MentionMove(d) => trace!(d, "update: MentionMove"),
             Msg::ToggleEmoji => debug!("update: ToggleEmoji"),
+            Msg::ToggleChatPanel => debug!("update: ToggleChatPanel"),
+            Msg::PanelTopic(_) | Msg::PanelQuery(_) => trace!("update: PanelInput"),
+            Msg::SaveTopic => debug!("update: SaveTopic"),
+            Msg::TopicSaved(id, _, r) => debug!(%id, result = ok(r.is_ok()), "update: TopicSaved"),
+            Msg::PanelSearchFire(seq) => debug!(seq, "update: PanelSearchFire"),
+            Msg::PanelPeople(seq, r) => debug!(
+                seq,
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: PanelPeople"
+            ),
+            Msg::AddMember(p) => debug!(mri = %p.mri, "update: AddMember"),
+            Msg::MemberAdded(id, p, r) => {
+                debug!(%id, mri = %p.mri, result = ok(r.is_ok()), "update: MemberAdded")
+            }
+            Msg::RemoveMember(mri) => debug!(%mri, "update: RemoveMember"),
+            Msg::MemberRemoved(id, mri, r) => {
+                debug!(%id, %mri, result = ok(r.is_ok()), "update: MemberRemoved")
+            }
+            Msg::AskLeave => debug!("update: AskLeave"),
+            Msg::CancelLeave => debug!("update: CancelLeave"),
+            Msg::Leave => debug!("update: Leave"),
+            Msg::Left(id, r) => debug!(%id, result = ok(r.is_ok()), "update: Left"),
             Msg::EmojiTab(t) => trace!(?t, "update: EmojiTab"),
             Msg::InsertEmoji(_) => debug!("update: InsertEmoji"),
             Msg::MentionPick(i) => debug!(?i, "update: MentionPick"),
@@ -766,6 +821,8 @@ pub struct App {
     draft_seq: u64,
     /// Otevřený výběr lidí pro nový skupinový chat.
     group_builder: Option<GroupBuilder>,
+    /// Otevřené nastavení skupinového chatu.
+    chat_panel: Option<ChatPanel>,
     /// Obrázky ze zpráv podle URL.
     media: HashMap<String, Media>,
     tab: Tab,
@@ -949,6 +1006,7 @@ impl App {
             draft_groups: HashMap::new(),
             draft_seq: 0,
             group_builder: None,
+            chat_panel: None,
             originals: HashMap::new(),
             calendar: CalendarState::load(),
         }
@@ -2754,6 +2812,10 @@ impl App {
                             tasks.push(Task::done(Msg::Select(c.id.clone())));
                             // ladění: `TYMY_COMPOSE=<text>` vloží text do psacího pole
                             // (nic neodesílá; např. zkouška nabídky zmínek)
+                            // ladění: `TYMY_CHAT_PANEL=1` otevře nastavení skupinového chatu
+                            if std::env::var_os("TYMY_CHAT_PANEL").is_some() {
+                                tasks.push(Task::done(Msg::ToggleChatPanel));
+                            }
                             // ladění: `TYMY_EMOJI=1` otevře výběr emoji
                             if std::env::var_os("TYMY_EMOJI").is_some() {
                                 tasks.push(Task::done(Msg::ToggleEmoji));
@@ -2883,6 +2945,9 @@ impl App {
 
             Msg::Select(id) => {
                 self.group_builder = None;
+                if self.chat_panel.as_ref().is_some_and(|p| p.conv != id) {
+                    self.chat_panel = None;
+                }
                 if self.selected.as_ref() != Some(&id) {
                     self.cancel_edit();
                     self.switch_draft(&id);
@@ -3607,6 +3672,259 @@ impl App {
             Msg::Compose(action) => {
                 self.composer.perform(action);
                 self.refresh_mention()
+            }
+            Msg::ToggleChatPanel => {
+                if self.chat_panel.take().is_some() {
+                    return Task::none();
+                }
+                let Some(id) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let topic = self
+                    .conversations
+                    .iter()
+                    .find(|c| c.id == id)
+                    .and_then(|c| c.topic.clone())
+                    .unwrap_or_default();
+                self.chat_panel = Some(ChatPanel {
+                    conv: id.clone(),
+                    topic,
+                    query: String::new(),
+                    seq: 0,
+                    searching: false,
+                    results: vec![],
+                    busy: false,
+                    confirm_leave: false,
+                    confirm_remove: None,
+                });
+                // členové vždy čerstvě
+                self.rosters.remove(&id);
+                self.fetch_roster()
+            }
+            Msg::PanelTopic(t) => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.topic = t;
+                }
+                Task::none()
+            }
+            Msg::SaveTopic => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(p), Some(backend)) = (&mut self.chat_panel, backend) else {
+                    return Task::none();
+                };
+                if p.busy {
+                    return Task::none();
+                }
+                p.busy = true;
+                let (conv, topic) = (p.conv.clone(), p.topic.trim().to_owned());
+                Task::perform(
+                    {
+                        let (conv, topic) = (conv.clone(), topic.clone());
+                        async move {
+                            backend
+                                .set_topic(&conv, &topic)
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::TopicSaved(conv.clone(), topic.clone(), r),
+                )
+            }
+            Msg::TopicSaved(conv, topic, r) => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.busy = false;
+                }
+                match r {
+                    Ok(()) => {
+                        if let Some(c) = self.conversations.iter_mut().find(|c| c.id == conv) {
+                            c.topic = (!topic.is_empty()).then_some(topic);
+                        }
+                        self.show_toast("Chat přejmenován")
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::PanelQuery(q) => {
+                let Some(p) = &mut self.chat_panel else {
+                    return Task::none();
+                };
+                p.query = q;
+                p.seq += 1;
+                if p.query.trim().chars().count() < MIN_PEOPLE_QUERY {
+                    p.results.clear();
+                    p.searching = false;
+                    return Task::none();
+                }
+                let seq = p.seq;
+                Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
+                    Msg::PanelSearchFire(seq)
+                })
+            }
+            Msg::PanelSearchFire(seq) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(p), Some(backend)) = (&mut self.chat_panel, backend) else {
+                    return Task::none();
+                };
+                if seq != p.seq {
+                    return Task::none();
+                }
+                p.searching = true;
+                let query = p.query.trim().to_owned();
+                Task::perform(
+                    async move { backend.search_people(&query).await.map_err(Failure::from) },
+                    move |r| Msg::PanelPeople(seq, r),
+                )
+            }
+            Msg::PanelPeople(seq, r) => {
+                let Some(p) = &mut self.chat_panel else {
+                    return Task::none();
+                };
+                if seq != p.seq {
+                    return Task::none();
+                }
+                p.searching = false;
+                match r {
+                    Ok(found) => {
+                        p.results = found;
+                        Task::none()
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::AddMember(person) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(p), Some(backend)) = (&mut self.chat_panel, backend) else {
+                    return Task::none();
+                };
+                if p.busy {
+                    return Task::none();
+                }
+                p.busy = true;
+                let conv = p.conv.clone();
+                Task::perform(
+                    {
+                        let (conv, mri) = (conv.clone(), person.mri.clone());
+                        async move {
+                            backend
+                                .add_members(&conv, &[mri])
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::MemberAdded(conv.clone(), person.clone(), r),
+                )
+            }
+            Msg::MemberAdded(conv, person, r) => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.busy = false;
+                    if r.is_ok() {
+                        p.query.clear();
+                        p.results.clear();
+                    }
+                }
+                match r {
+                    Ok(()) => {
+                        let toast = format!("{} přidán(a) do chatu", person.display_name);
+                        let roster = self.rosters.entry(conv).or_default();
+                        if !roster.iter().any(|x| x.mri == person.mri) {
+                            roster.push(person);
+                        }
+                        self.show_toast(&toast)
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::RemoveMember(mri) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(p), Some(backend)) = (&mut self.chat_panel, backend) else {
+                    return Task::none();
+                };
+                if p.busy {
+                    return Task::none();
+                }
+                // první klik jen požádá o potvrzení
+                if p.confirm_remove.as_ref() != Some(&mri) {
+                    p.confirm_remove = Some(mri);
+                    return Task::none();
+                }
+                p.confirm_remove = None;
+                p.busy = true;
+                let conv = p.conv.clone();
+                Task::perform(
+                    {
+                        let (conv, mri) = (conv.clone(), mri.clone());
+                        async move {
+                            backend
+                                .remove_member(&conv, &mri)
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::MemberRemoved(conv.clone(), mri.clone(), r),
+                )
+            }
+            Msg::MemberRemoved(conv, mri, r) => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.busy = false;
+                }
+                match r {
+                    Ok(()) => {
+                        if let Some(roster) = self.rosters.get_mut(&conv) {
+                            roster.retain(|x| x.mri != mri);
+                        }
+                        self.show_toast("Odebráno z chatu")
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::AskLeave => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.confirm_leave = true;
+                }
+                Task::none()
+            }
+            Msg::CancelLeave => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.confirm_leave = false;
+                }
+                Task::none()
+            }
+            Msg::Leave => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(p), Some(backend)) = (&mut self.chat_panel, backend) else {
+                    return Task::none();
+                };
+                if p.busy {
+                    return Task::none();
+                }
+                p.busy = true;
+                let conv = p.conv.clone();
+                Task::perform(
+                    {
+                        let conv = conv.clone();
+                        async move { backend.leave(&conv).await.map_err(Failure::from) }
+                    },
+                    move |r| Msg::Left(conv.clone(), r),
+                )
+            }
+            Msg::Left(conv, r) => {
+                if let Some(p) = &mut self.chat_panel {
+                    p.busy = false;
+                    p.confirm_leave = false;
+                }
+                match r {
+                    Ok(()) => {
+                        tracing::info!(%conv, "chat opuštěn");
+                        self.chat_panel = None;
+                        // v seznamu už neukazovat (server ho může ještě chvíli vracet)
+                        self.forbidden.insert(conv.clone());
+                        if self.selected.as_ref() == Some(&conv) {
+                            self.selected = None;
+                        }
+                        self.show_toast("Opustili jste chat")
+                    }
+                    Err(e) => self.fail(e),
+                }
             }
             Msg::ToggleEmoji => {
                 self.emoji_open = !self.emoji_open;
@@ -4883,6 +5201,163 @@ impl App {
         .into()
     }
 
+    /// Nastavení skupinového chatu (místo vlákna): název, členové, přidání, opuštění.
+    fn chat_panel_view<'a>(&'a self, p: &'a ChatPanel, session: &'a Session) -> Element<'a, Msg> {
+        let busy = p.busy;
+        let roster = self.rosters.get(&p.conv);
+        let mut members = Column::new().spacing(2);
+        let me = session.profile.display_name.as_deref().unwrap_or("Já");
+        members = members.push(
+            row![avatar(me, 28.0), text(format!("{me} (vy)")).size(13),]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+                .padding([4, 8]),
+        );
+        match roster {
+            None => members = members.push(note("Načítám členy…")),
+            Some(list) => {
+                for m in list {
+                    members = members.push(
+                        row![
+                            avatar(&m.display_name, 28.0),
+                            column![
+                                text(m.display_name.clone()).size(13),
+                                text(truncate(&m.subtitle(), 48)).size(11).style(muted),
+                            ]
+                            .spacing(1),
+                            space::horizontal(),
+                            iced::widget::tooltip(
+                                if p.confirm_remove.as_ref() == Some(&m.mri) {
+                                    button(text("Opravdu odebrat?").size(12).font(SEMIBOLD))
+                                        .padding([3, 10])
+                                        .style(style::danger_button)
+                                } else {
+                                    button(text("Odebrat").size(12))
+                                        .padding([3, 10])
+                                        .style(style::ghost)
+                                }
+                                .on_press_maybe((!busy).then(|| Msg::RemoveMember(m.mri.clone()))),
+                                container(
+                                    text("Odebrat z chatu (potvrďte druhým klikem)").size(11)
+                                )
+                                .padding([3, 8])
+                                .style(style::tooltip),
+                                iced::widget::tooltip::Position::Left,
+                            ),
+                        ]
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center)
+                        .padding([4, 8]),
+                    );
+                }
+            }
+        }
+
+        let mut results = Column::new().spacing(2);
+        if p.searching {
+            results = results.push(note("Hledám…"));
+        } else if p.query.trim().chars().count() >= MIN_PEOPLE_QUERY && p.results.is_empty() {
+            results = results.push(note("Nikdo nenalezen"));
+        }
+        let me_mri = my_mri(&session.profile);
+        let is_member = |mri: &tymy_core::UserId| {
+            *mri == me_mri || roster.is_some_and(|r| r.iter().any(|x| x.mri == *mri))
+        };
+        for person in p.results.iter().filter(|x| !is_member(&x.mri)) {
+            results = results.push(
+                button(
+                    row![
+                        avatar(&person.display_name, 28.0),
+                        column![
+                            text(truncate(&person.display_name, 32))
+                                .size(13)
+                                .font(SEMIBOLD),
+                            text(truncate(&person.subtitle(), 48)).size(11).style(muted),
+                        ]
+                        .spacing(1),
+                        space::horizontal(),
+                        text("Přidat").size(12).style(accent),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([6, 8])
+                .style(|t: &Theme, st| style::list_item(t, st, false))
+                .on_press_maybe((!busy).then(|| Msg::AddMember(person.clone()))),
+            );
+        }
+
+        let leave: Element<'a, Msg> = if p.confirm_leave {
+            row![
+                text("Opravdu opustit chat? Zpět se dostanete jen pozváním.")
+                    .size(13)
+                    .style(style::danger),
+                button(text("Opustit").size(13).font(SEMIBOLD))
+                    .padding([6, 14])
+                    .style(style::danger_button)
+                    .on_press_maybe((!busy).then_some(Msg::Leave)),
+                button(text("Zrušit").size(13))
+                    .padding([6, 14])
+                    .style(style::ghost)
+                    .on_press(Msg::CancelLeave),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            button(text("Opustit chat").size(13))
+                .padding([6, 14])
+                .style(style::secondary)
+                .on_press(Msg::AskLeave)
+                .into()
+        };
+
+        let body = column![
+            text("Název chatu").size(12).style(muted),
+            row![
+                text_input("Bez názvu (podle členů)", &p.topic)
+                    .on_input(Msg::PanelTopic)
+                    .on_submit(Msg::SaveTopic)
+                    .padding([8, 12])
+                    .size(13)
+                    .style(style::search_input),
+                button(text("Uložit").size(13).font(SEMIBOLD))
+                    .padding([7, 16])
+                    .style(style::primary)
+                    .on_press_maybe((!busy).then_some(Msg::SaveTopic)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            space().height(8),
+            text(match roster {
+                Some(r) => format!("Členové ({})", r.len() + 1),
+                None => "Členové".into(),
+            })
+            .size(12)
+            .style(muted),
+            members,
+            space().height(8),
+            text("Přidat lidi").size(12).style(muted),
+            text_input("Jméno nebo e-mail…", &p.query)
+                .on_input(Msg::PanelQuery)
+                .padding([8, 12])
+                .size(13)
+                .style(style::search_input),
+            results,
+            space().height(12),
+            leave,
+        ]
+        .spacing(6)
+        .padding([16, 24])
+        .max_width(640);
+        scrollable(body)
+            .direction(style::scrollbar())
+            .style(style::thin_scrollbar)
+            .height(Length::Fill)
+            .into()
+    }
+
     /// Výběr lidí a názvu pro nový skupinový chat (místo vlákna).
     fn group_builder_view<'a>(&'a self, g: &'a GroupBuilder) -> Element<'a, Msg> {
         let header = container(
@@ -5028,6 +5503,30 @@ impl App {
         } else {
             avatar(&title, 38.0)
         };
+        let manage: Element<'a, Msg> =
+            if conv.kind == ConversationKind::Group && !self.is_draft(&conv.id) {
+                let open = self.chat_panel.is_some();
+                iced::widget::tooltip(
+                    button(
+                        text(if open {
+                            "Zpět k chatu"
+                        } else {
+                            "⚙ Členové"
+                        })
+                        .size(13),
+                    )
+                    .padding([6, 12])
+                    .style(style::secondary)
+                    .on_press(Msg::ToggleChatPanel),
+                    container(text("Název, členové, opuštění chatu").size(11))
+                        .padding([3, 8])
+                        .style(style::tooltip),
+                    iced::widget::tooltip::Position::Bottom,
+                )
+                .into()
+            } else {
+                space().into()
+            };
         let header = container(
             row![
                 header_avatar,
@@ -5036,6 +5535,8 @@ impl App {
                     text(subtitle).size(12).style(muted),
                 ]
                 .spacing(1),
+                space::horizontal(),
+                manage,
             ]
             .spacing(12)
             .align_y(iced::Alignment::Center),
@@ -5043,6 +5544,10 @@ impl App {
         .padding([12, 20])
         .width(Length::Fill)
         .style(style::header);
+
+        if let Some(p) = self.chat_panel.as_ref().filter(|p| p.conv == conv.id) {
+            return column![header, hline(), self.chat_panel_view(p, session)].into();
+        }
 
         if self.forbidden.contains(&conv.id) {
             let notice = centered(

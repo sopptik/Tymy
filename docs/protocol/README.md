@@ -245,6 +245,10 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
 - Skupinový chat: stejné `POST /v1/threads` se všemi členy, `fixedRoster: "false"`,
   `uniquerosterthread: "false"` a volitelně `topic` v `properties` ✅ (uživatel 2026-11-05). Tymy ho
   zakládá až s první zprávou, do té doby je jen v okně (dočasné id `draft:group:<n>`).
+- Správa skupinového chatu (2026-11-09, neověřeno, bez HAR): přejmenování
+  `PUT /v1/threads/{id}/properties?name=topic` `{"topic": "…"}`, přidání člena
+  `PUT /v1/threads/{id}/members/{mri}` `{"role": "Admin"}`, odebrání a opuštění (vlastní MRI)
+  `DELETE /v1/threads/{id}/members/{mri}`.
 - Členové chatu: `GET /v1/threads/{id}?view=msnp24Equivalent` → `{id, members: [{id: "8:orgid:…",
   role, …}], properties, …}` ✅ (2026-11-04, skupinový chat, 12 členů).
 - Jména pro seznam chatů bez názvu: 1:1 = druhé object id přímo z id chatu, skupina = členové

@@ -136,6 +136,26 @@ pub trait ChatBackend: Send + Sync {
     /// Členové chatu (MRI), včetně mě.
     async fn members(&self, conversation: &ConversationId) -> Result<Vec<crate::UserId>>;
 
+    /// Přejmenuje skupinový chat (prázdný název = bez názvu).
+    async fn set_topic(&self, conversation: &ConversationId, topic: &str) -> Result<()>;
+
+    /// Přidá lidi do skupinového chatu.
+    async fn add_members(
+        &self,
+        conversation: &ConversationId,
+        members: &[crate::UserId],
+    ) -> Result<()>;
+
+    /// Odebere člověka ze skupinového chatu.
+    async fn remove_member(
+        &self,
+        conversation: &ConversationId,
+        member: &crate::UserId,
+    ) -> Result<()>;
+
+    /// Opustí skupinový chat.
+    async fn leave(&self, conversation: &ConversationId) -> Result<()>;
+
     /// Hledání lidí ve vlastní organizaci (adresář).
     async fn search_people(&self, query: &str) -> Result<Vec<Person>>;
 
