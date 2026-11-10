@@ -64,6 +64,8 @@ pub struct Failure {
     not_found: bool,
     /// Server odpověděl 403 (např. konverzace, jejímž členem už uživatel není).
     forbidden: bool,
+    /// Přechodná chyba (síť, přetížení, 5xx): další pokus může uspět.
+    transient: bool,
 }
 
 impl From<Error> for Failure {
@@ -72,6 +74,7 @@ impl From<Error> for Failure {
             reauth: matches!(e, Error::ReauthRequired(_)),
             not_found: matches!(e, Error::Http { status: 404, .. }),
             forbidden: matches!(e, Error::Http { status: 403, .. }),
+            transient: e.is_transient(),
             text: e.to_string(),
         }
     }
@@ -80,6 +83,9 @@ impl From<Error> for Failure {
 impl From<anyhow::Error> for Failure {
     fn from(e: anyhow::Error) -> Self {
         Self {
+            transient: e
+                .chain()
+                .any(|c| c.downcast_ref::<Error>().is_some_and(Error::is_transient)),
             text: format!("{e:#}"),
             reauth: false,
             not_found: false,
@@ -931,6 +937,9 @@ pub struct App {
     /// Konverzace, jejichž nejnovější stránku jsme v tomto běhu už stáhli ze sítě.
     fresh: std::collections::HashSet<ConversationId>,
     error: Option<String>,
+    /// Zobrazená chyba vznikla na pozadí a je přechodná (výpadek sítě): zmizí sama,
+    /// jakmile se další obnova ze serveru povede.
+    error_heals: bool,
     /// Pořadí posledního dotazu na hledání lidí (starší odpovědi se zahodí).
     search_seq: u64,
     /// Výsledky hledání lidí (adresář + externí).
@@ -1143,6 +1152,7 @@ impl App {
             hidden: false,
             pins: vec![],
             hovered: None,
+            error_heals: false,
             search_seq: 0,
             people: vec![],
             searching_people: false,
@@ -1271,6 +1281,7 @@ impl App {
             Err(e) => {
                 tracing::warn!(error = %e, "přihlášení v prohlížeči");
                 self.error = Some(e.to_string());
+                self.error_heals = false;
                 Task::none()
             }
         }
@@ -1389,7 +1400,27 @@ impl App {
             };
         }
         self.error = Some(f.text);
+        self.error_heals = false;
         Task::none()
+    }
+
+    /// Chyba při činnosti na pozadí (obnova seznamu, načítání zpráv, hledání). Přechodná
+    /// zmizí sama po další úspěšné odpovědi serveru ([`Self::healed`]); chyby akcí
+    /// uživatele (odeslání, úprava…) zůstanou, dokud je nezavře.
+    fn fail_background(&mut self, f: Failure) -> Task<Msg> {
+        let heals = f.transient && !f.reauth;
+        let task = self.fail(f);
+        self.error_heals = heals;
+        task
+    }
+
+    /// Server zase odpovídá: skrýt přechodnou chybu z pozadí.
+    fn healed(&mut self) {
+        if self.error_heals {
+            tracing::info!("spojení obnoveno, skrývám přechodnou chybu");
+            self.error = None;
+            self.error_heals = false;
+        }
     }
 
     fn unread(&self, c: &Conversation) -> bool {
@@ -1533,6 +1564,7 @@ impl App {
                 "Chat s {} zatím neumím založit (účet mimo Microsoft 365).",
                 person.display_name
             ));
+            self.error_heals = false;
             return Task::none();
         };
         let id = one_on_one_id(me.as_str(), other);
@@ -2851,6 +2883,7 @@ impl App {
             Msg::SignedOut(r) => {
                 if let Err(e) = r {
                     self.error = Some(e.text.clone());
+                    self.error_heals = false;
                     tracing::error!(error = %e.text, "odhlášení");
                 }
                 self.load_account(None)
@@ -3019,6 +3052,7 @@ impl App {
             }
             Msg::Conversations(Ok(page), full) => {
                 self.refreshing = false;
+                self.healed();
                 let Some(session) = self.session().cloned() else {
                     return Task::none();
                 };
@@ -3157,6 +3191,7 @@ impl App {
                 }
             }
             Msg::OlderChats(Ok(page), pages) => {
+                self.healed();
                 self.loading_chats = false;
                 let Some(session) = self.session().cloned() else {
                     return Task::none();
@@ -3218,7 +3253,7 @@ impl App {
             }
             Msg::OlderChats(Err(e), _) => {
                 self.loading_chats = false;
-                self.fail(e)
+                self.fail_background(e)
             }
             Msg::Conversations(Err(e), full) => {
                 if full {
@@ -3226,7 +3261,7 @@ impl App {
                     self.last_full_refresh = None;
                 }
                 self.refreshing = false;
-                self.fail(e)
+                self.fail_background(e)
             }
             Msg::NamesResolved(resolved, unresolved) => {
                 for (id, names) in resolved {
@@ -3277,6 +3312,7 @@ impl App {
                 ])
             }
             Msg::Messages(id, Ok(page), older) => {
+                self.healed();
                 if older {
                     self.loading_older = false;
                 }
@@ -3341,7 +3377,7 @@ impl App {
                     self.mark_forbidden(id, &e);
                     return Task::none();
                 }
-                self.fail(e)
+                self.fail_background(e)
             }
             Msg::LoadOlder => {
                 let Some(id) = self.selected.clone() else {
@@ -3471,7 +3507,7 @@ impl App {
             }
             Msg::People(_, Err(e)) => {
                 self.searching_people = false;
-                self.fail(e)
+                self.fail_background(e)
             }
             Msg::External(_, Err(e)) => {
                 tracing::warn!(error = %e.text, "hledání mimo organizaci");
@@ -3541,7 +3577,7 @@ impl App {
                             .collect();
                         Task::none()
                     }
-                    Err(e) => self.fail(e),
+                    Err(e) => self.fail_background(e),
                 }
             }
             Msg::GroupAdd(person) => {
@@ -4178,7 +4214,7 @@ impl App {
                         f.results = found;
                         Task::none()
                     }
-                    Err(e) => self.fail(e),
+                    Err(e) => self.fail_background(e),
                 }
             }
             Msg::MeetingAdd(person) => {
@@ -4459,7 +4495,7 @@ impl App {
                         p.results = found;
                         Task::none()
                     }
-                    Err(e) => self.fail(e),
+                    Err(e) => self.fail_background(e),
                 }
             }
             Msg::AddMember(person) => {
@@ -4844,6 +4880,7 @@ impl App {
             }
             Msg::DismissError => {
                 self.error = None;
+                self.error_heals = false;
                 Task::none()
             }
             Msg::MediaLoaded(url, Ok(bytes)) => {
@@ -8735,6 +8772,25 @@ mod tests {
         assert_eq!(message_plain(&m), "Ahoj světe\ndruhý\n\nsoubor.pdf");
         assert_eq!(estimate_text_width("ok", 500.0), 80.0);
         assert_eq!(estimate_text_width(&"x".repeat(500), 500.0), 500.0);
+    }
+
+    #[test]
+    fn failures_know_if_they_heal() {
+        let f = |e: Error| Failure::from(e).transient;
+        assert!(f(Error::Network("spojení odmítnuto".into())));
+        assert!(f(Error::Http {
+            status: 503,
+            body: String::new()
+        }));
+        assert!(f(Error::RateLimited { retry_after: None }));
+        assert!(!f(Error::Http {
+            status: 400,
+            body: String::new()
+        }));
+        assert!(!f(Error::ReauthRequired("x".into())));
+        let wrapped = anyhow::Error::from(Error::Network("x".into())).context("načtení");
+        assert!(Failure::from(wrapped).transient);
+        assert!(!Failure::from(anyhow::anyhow!("jiná chyba")).transient);
     }
 
     #[test]

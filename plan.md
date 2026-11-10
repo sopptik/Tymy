@@ -79,6 +79,13 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   citace, náhledy v seznamu, reakce, výsledky hledání, psací pole) se kreslí fontem Noto Color
   Emoji; jinak je iced bral z prvního fontu s glyfem, který byl černobílý. V psacím poli přes
   highlighter `text_editor`.
+- **Samozhojitelné chyby (2026-11-10):** „mohla by chyba která je způsobená chybějícím
+  připojením k síti zmizet po opětovném navázání připojení? resp všechny chyby které se opraví
+  samy aby zmizely“ → přechodné chyby (síť, 429, 5xx) z činností na pozadí (obnova seznamu
+  chatů, načítání zpráv a starších chatů, hledání lidí) zmizí samy po další úspěšné odpovědi
+  serveru (obnova běží každých 5 s). Chyby akcí uživatele (odeslání, úprava, reakce, správa
+  chatu, schůzky) zůstávají, dokud je nezavře: samy se neopraví. Chyby kalendáře už mizely
+  po úspěšném načtení dřív.
 
 - **Hledání (2026-11-04):** „hledání vyřeš pomocí indexace nebo nějakého fulltext enginu
   na způsob OpenSearch, pokud to má smysl“. Rozhodnutí: OpenSearch/Elasticsearch je serverová
