@@ -271,6 +271,15 @@ samostatného commitu“)
 ### Fáze 2: hovory a videohovory (výzkum s rozhodovacím bodem)
 1. Výzkum (časově omezený, cca 2–4 týdny): odchyt signalizace 1:1 hovoru z web klienta.
    Média jsou standardní WebRTC (DTLS-SRTP, Opus, H.264/VP8); neznámá je proprietární signalizace.
+   🔬 **První HAR (2026-11-10, testovací hovor s echo botem):** signalizace přes flightproxy
+   (`epconv` se SDP nabídkou, `conv/…/add`, `leave`, broker `subscribe`), rozbor
+   v `docs/protocol/README.md` § 9. Zjištění: i 1:1 hovor je ad hoc schůzka na mediálním
+   serveru Microsoftu; SDP je WebRTC s rozšířeními MS (13 m-řádků v BUNDLE, `x-data` přes
+   SCTP, `RTP/SAVP` + DTLS). **Odpověď protistrany (SDP) a události hovoru chodí přes
+   trouter**, takže trouter je nutný i pro odchozí hovory → trouter je další krok.
+   Záznam neobsahoval WebSocket (bez F5) ani tokeny (sanitized); potřeba nový záznam:
+   F5 + testovací hovor, export „with sensitive data“. Echo bot je ideální protistrana
+   pro prototyp (nikoho neruší).
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

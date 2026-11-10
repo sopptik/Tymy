@@ -293,6 +293,62 @@ Kanály jsou v seznamu konverzací (`@thread.tacv2`). `threadProperties`:
   vlákna; obojí pak `fetchShortProfile` (viz 6.). Pro lidi z jiných organizací vrací
   `fetchShortProfile` prázdné `value` ✅; pak záloha z odesílatelů v historii.
 
+## 9. Hovory (signalizace) 🔬
+
+Zdroj: HAR testovacího hovoru z web klienta (2026-11-10, „Uskutečnit testovací hovor“, echo bot).
+Záznam byl pořízen bez obnovení stránky a jako „sanitized“, takže v něm **chybí WebSocket
+trouteru** (0 rámců) a tokeny (nevíme, jaký `aud` flightproxy chce).
+
+Všechna volání jdou přes **flightproxy** (`api[-emea].flightproxy.teams.microsoft.com/api/v2/…`),
+které předává požadavky interním službám Skype (`conv`, `cc`, `broker`):
+
+| Krok | Volání | Poznámka |
+|---|---|---|
+| založení | `POST api-emea.flightproxy…/api/v2/epconv` → 201 | tělo ~40 KB, viz níže; odpověď: `conversationController`, `links` (leave, addParticipant, mute, unmute, subscribe, …), `state` |
+| odběr událostí | `GET …/ep/broker-…/api/v1/subscribe/{uuid}/0` | long-poll po 30 s (`nextSubscribeUrl`, `expirationTimeInSec`), hlavička `x-usebatching: 1`; v záznamu prázdný |
+| pozvání protistrany | `POST …/conv/{id}/add` → 202 | `participants.from` (já: `8:orgid:…`, `endpointId`, `participantId`, `languageId`), `to` (MRI protistrany), `groupChat.threadId` (1:1 chat), `links.addParticipantSuccess/Failure` |
+| metadata | `PUT …/conv/{id}/updateEndpointMetadata` → 200 | odpověď obsahuje `activeModalities.call.links.participants` (call hub `cc`) |
+| parametry médií | `POST …/cc/v1/mcProxy/…/applyChannelParameters` → 202 | limity videa (rozlišení, fps, počet streamů) |
+| zavěšení | `POST …/conv/{id}/leave` → 204 | `conversationTransactionEnd`, `callTransactionEnd` (`CallEndReasonLocalUserInitiated`) |
+
+Hlavičky: `x-microsoft-skype-client: SkypeSpaces/1415/<verze>/os=linux; …`,
+`x-microsoft-skype-chain-id` (UUID na celý hovor), `x-microsoft-skype-message-id` (UUID na
+požadavek), `ms-teams-region/partition/ring`, `x-ms-migration: True`.
+
+Tělo `epconv`:
+- `conversationRequest`: `roster.rosterUpdate` a `links.*` (conversationEnd, conversationUpdate,
+  localParticipantUpdate, addParticipantSuccess/Failure, addModalitySuccess/Failure,
+  confirmUnmute, receiveMessage) jsou **URL na trouter klienta**
+  (`https://pub-ent-….trouter.teams.microsoft.com:3443/v4/f/{trouter id}/callAgent/{uuid}/{náhodné}/…`).
+  Server na ně posílá události, klient je dostane WebSocketem trouteru.
+- `scenario: "UserInitiatedTestCall"` u testovacího hovoru.
+- `participants.from`, `endpointCapabilities`, `clientEndpointCapabilities`, `endpointState`.
+- `callInvitation.callModalities` (3 modality), `callInvitation.links` (progress,
+  **mediaAnswer**, acceptance, redirection, end: opět trouter URL) a
+  `callInvitation.mediaContent`:
+  - `contentType: application/sdp-ngc-1.0`, `blob` = **SDP nabídka** (~34 KB),
+    `mediaDescriptions`, `applyChannelParameters`, `mediaLegId`.
+
+SDP nabídka je WebRTC s rozšířeními Microsoftu: `a=group:BUNDLE` přes 13 m-řádků
+(1× audio `main-audio`, 11× video `main-video`/`applicationsharing-video`, 1× `m=x-data`
+přes SCTP), `RTP/SAVP` s `a=fingerprint` + `a=setup:actpass` (DTLS-SRTP), `a=ice-options:trickle`,
+`a=rtcp-mux`, vlastní `a=x-ssrc-range`, `a=x-signaling-fb`. Kodeky: opus, G722, PCMU/PCMA,
+RED, CN, telephone-event; video H264, AV1, rtx. V nabídce je jediný host kandidát (trickle),
+další kandidáti ani konfigurace relay (TURN) v HTTP provozu nejsou.
+
+Zjištění:
+- I 1:1 (testovací) hovor je na serveru **ad hoc schůzka** (`conversationType: adHocMeeting`,
+  `isMultiParty`, `isHostless`): média jdou na mediální server Microsoftu (`cc`, `mcProxy`),
+  ne přímo mezi klienty.
+- Odpověď protistrany (SDP `mediaAnswer`), průběh a konec hovoru chodí **přes trouter**.
+  Bez trouteru tedy nejde ani odchozí hovor, nejen příchozí.
+- Klient používá upravené WebRTC ve web workeru (`precompiled-webrtc-web-worker`) a WASM
+  zpracování zvuku (`wasmvqe`).
+
+Chybí (další záznam): WebSocket trouteru včetně rámců s `mediaAnswer` a dalšími událostmi
+hovoru, odkud klient bere relay/TURN servery a jak posílá trickle ICE kandidáty, a `aud`
+tokenu pro flightproxy (export „with sensitive data“).
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce
@@ -309,6 +365,9 @@ WebSocketu (`_webSocketMessages`), Firefox je vynechává. HAR obsahuje tokeny a
      (dostupný → nerušit → dostupný);
    - **obrázek:** do chatu vložit obrázek ze schránky (Ctrl+V) a odeslat (✅ zachyceno 2026-11-05, není třeba opakovat);
    - **soubor:** v chatu 📎 → nahrát malý soubor z počítače a odeslat; v kanálu totéž;
+   - **hovor:** ⚙ Nastavení → Zařízení → *Uskutečnit testovací hovor* (echo bot, nikoho
+     neruší), nechat ho doběhnout nebo po ~20 s zavěsit. Záznam musí začít obnovením
+     stránky (F5), jinak v něm chybí trouter, přes který chodí odpověď a události hovoru;
    - **lidé mimo organizaci:** do hledání napsat celou e-mailovou adresu člověka z jiné
      organizace a otevřít s ním chat (nic neposílat);
    - ~~kalendář~~ hotovo: čtení přes middle tier, vytvoření/zrušení schůzky zachyceno
