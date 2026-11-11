@@ -126,7 +126,13 @@ Současný web klient používá WebSocket **trouter** (`*.trouter.teams.microso
 Pokud long-poll nebude fungovat, je trouter další krok (stejně ho budeme potřebovat
 pro příchozí hovory ve fázi 2).
 
-### Trouter 🔬 (HAR 2026-11-11, zatím neimplementováno)
+### Trouter 🟡 (HAR 2026-11-11; spojení a přítomnost implementovány a ověřeny naživo)
+
+Stav implementace (`crates/api/src/realtime/trouter.rs`, 2026-11-11): připojení, přihlášení,
+ping, potvrzování doručených požadavků a odběr přítomnosti fungují proti produkci.
+Registrace v registraru (zprávy, hovory) zatím ne. Authz odpověď uvádí adresy i pro další
+regiony (`regionGtms.calling_trouterUrl`, `presenceUPS`, `calling_registrarUrl`); zatím
+používáme pevnou `wss://go-eu…/v4/c` (jde přepsat v `endpoints.toml` → `trouter_url`).
 
 Web klient drží **dvě** spojení: jedno pro chat a přítomnost (`ua: TeamsCDL`, registrace
 `TeamsCDLWebWorker`), druhé pro hovory (`ua: SkypeSpaces`, registrace `SkypeSpacesWeb`).
@@ -162,7 +168,15 @@ Každé má vlastní `epid` (náhodné UUID koncového bodu).
    (hovory: `appId: SkypeSpacesWeb`, `templateKey: SkypeSpacesWeb_2.6`, `platform: edgeChromium`).
    Autorizace není v záznamu (sanitized); `trouter.connected` uvádí i novější
    `registrarUrl` (`communications.svc.cloud.microsoft/registrar/eu/v3/registrations`).
-5. Přítomnost: `POST /ups/emea/v1/pubsub/subscriptions/<epid>`
+5. Přítomnost (✅ ověřeno): token `https://presence.teams.microsoft.com/.default`, povinné
+   hlavičky `x-ms-client-user-agent` (`Teams-V2-Web`), `x-ms-correlation-id` (UUID),
+   posíláme i `x-ms-endpoint-id` a `x-ms-client-version`; bez nich `400 Missing mandatory
+   header`. Jednorázový dotaz: `POST /ups/emea/v1/presence/getpresence/`
+   `[{"mri", "source": "ups"}]` → `[{mri, presence: {availability, activity, calendarData}, status}]`
+   (stačí Bearer). Vlastní stav klient hlásí `PUT /ups/emea/v1/me/endpoints/`
+   `{"id": "<epid>", "availability", "activity", "activityReporting": "Transport", "deviceType": "Web"}`
+   (neimplementováno: bez něj je uživatel pro ostatní Offline, pokud nemá otevřený jiný klient).
+   Odběr: `POST /ups/emea/v1/pubsub/subscriptions/<epid>`
    `{"trouterUri": "<surl>unifiedPresenceService", "shouldPurgePreviousSubscriptions": true,
    "subscriptionsToAdd": [{"mri": "8:orgid:…", "source": "ups"}], "subscriptionsToRemove": []}`.
 

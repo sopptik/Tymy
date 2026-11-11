@@ -26,7 +26,12 @@ pub struct Endpoints {
     /// Hlavička `x-ms-client-version` pro zápis do media služby (obrázky). Bez ní služba
     /// odmítne nahrání (`400` „platform id … User-Agent“); `1415` = web klient Teams.
     pub media_client_version: String,
+    /// WebSocket trouteru (real-time události), `wss://…/v4/c`.
+    pub trouter_url: String,
 }
+
+/// Trouter pro Evropu z HAR (2026-11-11); jiné regiony přes `endpoints.toml`.
+const TROUTER_URL: &str = "wss://go-eu.trouter.teams.microsoft.com/v4/c";
 
 /// Verze web klienta Teams z HAR (2026-11-05); s ní media služba přijme nahrání obrázku.
 const WEB_CLIENT_VERSION: &str = "1415/26101515216";
@@ -51,6 +56,7 @@ impl Endpoints {
                 chat_service: "https://emea.ng.msg.teams.microsoft.com".into(),
                 redirect_uri: LOOPBACK_REDIRECT.into(),
                 media_client_version: WEB_CLIENT_VERSION.into(),
+                trouter_url: TROUTER_URL.into(),
             },
             // NEOVĚŘENO: hodnoty pro osobní účty jsou hypotéza, kterou je nutné potvrdit
             // odchytem provozu teams.live.com (fáze 0, krok 1).
@@ -62,6 +68,7 @@ impl Endpoints {
                 chat_service: "https://msgapi.teams.live.com".into(),
                 redirect_uri: LOOPBACK_REDIRECT.into(),
                 media_client_version: WEB_CLIENT_VERSION.into(),
+                trouter_url: TROUTER_URL.into(),
             },
         }
     }
@@ -81,7 +88,8 @@ impl Endpoints {
             authz_url,
             chat_service,
             redirect_uri,
-            media_client_version
+            media_client_version,
+            trouter_url
         );
         e
     }
@@ -127,6 +135,7 @@ pub struct EndpointOverrides {
     pub chat_service: Option<String>,
     pub redirect_uri: Option<String>,
     pub media_client_version: Option<String>,
+    pub trouter_url: Option<String>,
 }
 
 #[cfg(test)]

@@ -21,6 +21,12 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
+uuid.workspace = true
+tokio-tungstenite.workspace = true
+tokio-rustls.workspace = true
+rustls-native-certs.workspace = true
+futures-util.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

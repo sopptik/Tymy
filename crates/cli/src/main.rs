@@ -72,6 +72,11 @@ enum Command {
     },
     /// Sleduje události v reálném čase (Ctrl+C ukončí).
     Watch,
+    /// Stav (přítomnost) uživatelů; bez MRI vlastní stav.
+    Presence {
+        /// MRI uživatelů (`8:orgid:<id>`).
+        users: Vec<String>,
+    },
     /// Ladění: získá access token pro rozsah a vypíše jen jeho nároky (aud, scp, appid).
     Token {
         /// Rozsah, např. `https://outlook.office.com/.default`.
@@ -238,6 +243,26 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&shape(&v))?);
             Ok(())
         }
+        Command::Presence { users } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let users: Vec<tymy_core::UserId> = if users.is_empty() {
+                vec![tymy_core::UserId(format!(
+                    "8:orgid:{}",
+                    backend.profile().await?.account_id.as_str()
+                ))]
+            } else {
+                users.into_iter().map(tymy_core::UserId).collect()
+            };
+            for (user, p) in backend.presence(&users).await? {
+                println!(
+                    "{user}: {} ({:?}, {:?})",
+                    p.label(),
+                    p.availability,
+                    p.activity
+                );
+            }
+            Ok(())
+        }
         Command::Token { scope } => {
             let backend = backend(&config, cli.account.as_deref()).await?;
             let token = backend.access_token(&scope).await?;
@@ -394,6 +419,12 @@ async fn resolve_chat(backend: &TeamsBackend, chat: &str) -> Result<Conversation
 
 async fn watch(backend: &TeamsBackend, json: bool) -> Result<()> {
     eprintln!("Sleduji události, Ctrl+C ukončí…");
+    // vlastní stav jako minimum, ať je vidět, že kanál žije
+    let me = tymy_core::UserId(format!(
+        "8:orgid:{}",
+        backend.profile().await?.account_id.as_str()
+    ));
+    backend.watch_presence(&[me]).await?;
     let mut backoff = Duration::from_secs(1);
     loop {
         let result = tokio::select! {
@@ -508,6 +539,11 @@ fn print_event(e: &Event) {
             print_message(m, true);
         }
         Event::ConversationUpdated(id) => println!("· konverzace změněna: {id}"),
+        Event::Presence(list) => {
+            for (user, p) in list {
+                println!("· stav {user}: {}", p.label());
+            }
+        }
         Event::Typing {
             conversation_id,
             user,

@@ -162,6 +162,22 @@ pub trait ChatBackend: Send + Sync {
     /// Hledání lidí mimo organizaci podle přesné e-mailové adresy.
     async fn find_external(&self, email: &str) -> Result<Vec<Person>>;
 
+    /// Stav (přítomnost) uživatelů. Výchozí = účet stav neposkytuje.
+    async fn presence(
+        &self,
+        users: &[crate::UserId],
+    ) -> Result<Vec<(crate::UserId, crate::Presence)>> {
+        let _ = users;
+        Ok(vec![])
+    }
+
+    /// Nastaví, čí stav chceme dostávat v událostech [`crate::Event::Presence`]
+    /// (nahradí předchozí seznam).
+    async fn watch_presence(&self, users: &[crate::UserId]) -> Result<()> {
+        let _ = users;
+        Ok(())
+    }
+
     /// Události kalendáře, které zasahují do intervalu `from..to` (včetně výskytů
     /// opakovaných událostí), seřazené podle začátku. Výchozí = účet kalendář nemá.
     async fn calendar(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {

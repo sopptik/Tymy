@@ -1,7 +1,5 @@
-//! Real-time události.
+//! Real-time události přes WebSocket „trouter“ (`docs/protocol/README.md` § 4).
 //!
-//! První verze používá HTTP long-poll endpoint zděděný z protokolu Skype
-//! (endpoint → subscription → opakovaný poll). Web klient Teams dnes používá
-//! WebSocket „trouter“, ten přijde později jako druhá implementace.
+//! Dřívější HTTP long-poll zděděný ze Skype Microsoft vypnul (`410 Gone`).
 
-pub(crate) mod poll;
+pub(crate) mod trouter;

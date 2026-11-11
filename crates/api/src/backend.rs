@@ -15,7 +15,7 @@ use tymy_core::{
 };
 
 use crate::auth::{self, CredentialStore, SkypeSession};
-use crate::realtime::poll::{self, PollRegistration};
+use crate::realtime::trouter::{self, Delivery, TlsTrouter};
 use crate::{Endpoints, chat, http::Http, media};
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
@@ -29,8 +29,14 @@ pub struct TeamsBackend {
     session: Mutex<Option<SkypeSession>>,
     /// Access token pro Microsoft Graph (plánování schůzek) a jeho platnost.
     graph_token: Mutex<Option<auth::TokenSet>>,
-    /// Oddělený zámek: long-poll ho drží desítky sekund a nesmí blokovat ostatní volání.
-    poll: Mutex<Option<PollRegistration>>,
+    /// Access tokeny pro další rozsahy (přítomnost, trouter) podle rozsahu.
+    scoped_tokens: Mutex<std::collections::HashMap<String, auth::TokenSet>>,
+    /// Oddělený zámek: čekání na událost ho drží dlouho a nesmí blokovat ostatní volání.
+    trouter: Mutex<Option<TlsTrouter>>,
+    /// Adresa a id připojeného trouteru (pro odběry), dokud spojení žije.
+    trouter_info: Mutex<Option<trouter::Info>>,
+    /// Uživatelé, jejichž stav odebíráme.
+    presence_watch: Mutex<Vec<tymy_core::UserId>>,
 }
 
 impl TeamsBackend {
@@ -47,7 +53,10 @@ impl TeamsBackend {
             credentials,
             session: Mutex::new(None),
             graph_token: Mutex::new(None),
-            poll: Mutex::new(None),
+            scoped_tokens: Mutex::new(Default::default()),
+            trouter: Mutex::new(None),
+            trouter_info: Mutex::new(None),
+            presence_watch: Mutex::new(vec![]),
         }
     }
 
@@ -105,6 +114,53 @@ impl TeamsBackend {
             self.credentials.save(account, new_rt).await?;
         }
         Ok(tokens)
+    }
+
+    /// Pošle serveru aktuální seznam odebíraných stavů, pokud je trouter připojený
+    /// (jinak se pošle po připojení).
+    async fn subscribe_presence(&self) -> Result<()> {
+        let users = self.presence_watch.lock().await.clone();
+        let Some(info) = self.trouter_info.lock().await.clone() else {
+            return Ok(());
+        };
+        if users.is_empty() {
+            return Ok(());
+        }
+        let base = self.ups_base().await?;
+        let token = self.scoped_token(crate::presence::PRESENCE_SCOPE).await?;
+        crate::presence::subscribe(
+            &self.http,
+            &base,
+            &token,
+            &info.epid,
+            &info.surl,
+            &self.endpoints.media_client_version,
+            &users,
+        )
+        .await
+    }
+
+    async fn ups_base(&self) -> Result<url::Url> {
+        let session = self.session().await?;
+        let mt = session
+            .middle_tier
+            .as_ref()
+            .ok_or_else(|| Error::Protocol("authz odpověď neobsahovala middleTier".into()))?;
+        crate::presence::ups_base(mt)
+    }
+
+    /// Access token pro `scope` z mezipaměti; obnoví se s předstihem před vypršením.
+    pub async fn scoped_token(&self, scope: &str) -> Result<String> {
+        let mut guard = self.scoped_tokens.lock().await;
+        if let Some(t) = guard.get(scope).filter(|t| {
+            t.expires_at - Duration::minutes(REFRESH_MARGIN_MINUTES) > chrono::Utc::now()
+        }) {
+            return Ok(t.access_token.clone());
+        }
+        let t = self.token_set(scope).await?;
+        let access = t.access_token.clone();
+        guard.insert(scope.to_owned(), t);
+        Ok(access)
     }
 
     /// Požadavek na Microsoft Graph (token v mezipaměti, při 401 jednou nový).
@@ -332,6 +388,18 @@ impl ChatBackend for TeamsBackend {
             .await
     }
 
+    async fn presence(
+        &self,
+        users: &[tymy_core::UserId],
+    ) -> Result<Vec<(tymy_core::UserId, tymy_core::Presence)>> {
+        if users.is_empty() {
+            return Ok(vec![]);
+        }
+        let base = self.ups_base().await?;
+        let token = self.scoped_token(crate::presence::PRESENCE_SCOPE).await?;
+        crate::presence::get_presence(&self.http, &base, &token, users).await
+    }
+
     async fn create_meeting(&self, meeting: &tymy_core::NewMeeting) -> Result<String> {
         let body = crate::graph::event_body(meeting);
         let v = self
@@ -486,30 +554,38 @@ impl ChatBackend for TeamsBackend {
     }
 
     async fn poll_events(&self) -> Result<Vec<Event>> {
-        let session = self.session().await?;
-        let mut reg = self.poll.lock().await;
-        if reg.is_none() {
-            *reg = Some(poll::register(&self.http, &session).await?);
-        }
-        let current = reg.clone().unwrap_or_default();
-        match poll::poll(&self.http, &session, &current).await {
-            Ok(events) => Ok(events),
-            Err(e) => {
-                // Registrace mohla vypršet; příště ji vytvoříme znovu.
-                *reg = None;
-                match e {
-                    Error::Auth(_) => {
-                        self.invalidate_session().await;
-                        Err(e)
-                    }
-                    // Zaniklá subscription: nic nehlásíme, další volání se přeregistruje.
-                    Error::Http {
-                        status: 404 | 410, ..
-                    } => Ok(vec![]),
-                    e => Err(e),
-                }
+        let mut guard = self.trouter.lock().await;
+        if guard.is_none() {
+            let token = self.scoped_token(trouter::TROUTER_SCOPE).await?;
+            let t = TlsTrouter::connect(
+                &self.endpoints.trouter_url,
+                &token,
+                &self.endpoints.media_client_version,
+            )
+            .await?;
+            *self.trouter_info.lock().await = Some(t.info.clone());
+            *guard = Some(t);
+            if let Err(e) = self.subscribe_presence().await {
+                tracing::warn!(error = %e, "odběr stavů po připojení trouteru");
             }
         }
+        let Some(t) = guard.as_mut() else {
+            return Ok(vec![]);
+        };
+        match t.next().await {
+            Ok(d) => Ok(events_from(d)),
+            Err(e) => {
+                // příští volání se připojí znovu
+                *guard = None;
+                *self.trouter_info.lock().await = None;
+                Err(e)
+            }
+        }
+    }
+
+    async fn watch_presence(&self, users: &[tymy_core::UserId]) -> Result<()> {
+        *self.presence_watch.lock().await = users.to_vec();
+        self.subscribe_presence().await
     }
 }
 
@@ -525,6 +601,27 @@ pub async fn complete_login(
     })?;
     credentials.save(&profile.account_id, rt).await?;
     Ok(profile)
+}
+
+/// Převede požadavek doručený trouterem na události.
+fn events_from(d: Delivery) -> Vec<Event> {
+    match d.path.trim_end_matches('/') {
+        "unifiedPresenceService" => {
+            let list = crate::presence::parse_notification(&d.body);
+            if list.is_empty() {
+                vec![]
+            } else {
+                vec![Event::Presence(list)]
+            }
+        }
+        "messaging" => serde_json::from_str::<chat::wire::EventMessage>(&d.body)
+            .map(|e| vec![e.into_domain()])
+            .unwrap_or_default(),
+        other => vec![Event::Unknown {
+            resource_type: other.to_owned(),
+            raw: serde_json::Value::Null,
+        }],
+    }
 }
 
 #[cfg(test)]

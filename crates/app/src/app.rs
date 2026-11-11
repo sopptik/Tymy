@@ -21,8 +21,8 @@ use tymy_core::text::{
 use tymy_core::{
     AccountId, AccountKind, CalendarEvent, ChatBackend, Conversation, ConversationId,
     ConversationKind, ConversationPage, Error, EventReply, EventResponse, MentionRef, Message,
-    MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Profile, ReplyRef,
-    one_on_one_id, one_on_one_peer,
+    MessageId, MessageKind, MessagePage, Outgoing, OutgoingImage, Person, Presence, Profile,
+    ReplyRef, UserId, one_on_one_id, one_on_one_peer,
 };
 
 use tymy_store::{HIT_END, HIT_START, SearchHit, Store};
@@ -281,6 +281,14 @@ pub enum Msg {
     ToggleAutostart,
     /// Zjistit nepřečtené u neaktivních účtů.
     PollOthers,
+    /// Události z real-time kanálu (trouter); po zpracování se čeká na další.
+    Realtime(Result<Vec<tymy_core::Event>, Failure>),
+    /// Po chybě real-time kanálu: zkusit znovu.
+    RealtimeRetry,
+    /// Odběr stavů uživatelů nastaven (nebo ne).
+    PresenceWatched(Result<(), Failure>),
+    /// Pravidelné obnovení stavů dotazem (pojistka proti „zamrzlým“ stavům).
+    PresenceLoaded(Result<Vec<(UserId, Presence)>, Failure>),
     OtherUnread(
         AccountId,
         Result<(OtherBackend, Vec<Conversation>), Failure>,
@@ -613,6 +621,18 @@ impl Msg {
             Msg::SignOut => debug!("update: SignOut"),
             Msg::SignedOut(r) => debug!(result = ok(r.is_ok()), "update: SignedOut"),
             Msg::PollOthers => trace!("update: PollOthers"),
+            Msg::Realtime(r) => debug!(
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: Realtime"
+            ),
+            Msg::RealtimeRetry => debug!("update: RealtimeRetry"),
+            Msg::PresenceWatched(r) => debug!(result = ok(r.is_ok()), "update: PresenceWatched"),
+            Msg::PresenceLoaded(r) => debug!(
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: PresenceLoaded"
+            ),
             Msg::ToggleAutostart => debug!("update: ToggleAutostart"),
             Msg::ReadReported(c, id, r) => {
                 debug!(conversation = %c, %id, result = ok(r.is_ok()), "update: ReadReported")
@@ -783,6 +803,15 @@ fn msg_num(id: &MessageId) -> u64 {
 }
 
 /// Hledání lidí: pauza v psaní před dotazem a minimální délka dotazu.
+/// Prodleva před opakovaným připojením real-time kanálu (zdvojnásobuje se do maxima).
+const REALTIME_BACKOFF_MIN: Duration = Duration::from_secs(2);
+const REALTIME_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Kolika lidem nejvýš sledujeme stav (nejnovější 1:1 chaty).
+const PRESENCE_WATCH_MAX: usize = 200;
+/// Jak často se stavy načtou znovu dotazem (pojistka proti zamrzlým stavům).
+const PRESENCE_REFRESH: Duration = Duration::from_secs(120);
+/// Jak často se obnoví odběr živých změn stavu.
+const PRESENCE_RESUBSCRIBE: Duration = Duration::from_secs(15 * 60);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const MIN_PEOPLE_QUERY: usize = 2;
 
@@ -944,6 +973,16 @@ pub struct App {
     search_seq: u64,
     /// Výsledky hledání lidí (adresář + externí).
     people: Vec<Person>,
+    /// Stav (přítomnost) uživatelů podle MRI; plní ho real-time kanál a pravidelný dotaz.
+    presence: HashMap<UserId, Presence>,
+    /// Uživatelé, jejichž stav jsme si u serveru naposledy objednali.
+    presence_watch: Vec<UserId>,
+    /// Kdy jsme odběr stavů naposledy objednali (pravidelně se obnovuje).
+    presence_subscribed: Option<std::time::Instant>,
+    /// Kdy jsme stavy naposledy načetli dotazem.
+    presence_refreshed: Option<std::time::Instant>,
+    /// Prodleva před dalším pokusem o připojení real-time kanálu.
+    realtime_backoff: Duration,
     searching_people: bool,
     /// Poznámka k hledání (např. že externí hledání není k dispozici).
     people_note: Option<String>,
@@ -1155,6 +1194,11 @@ impl App {
             error_heals: false,
             search_seq: 0,
             people: vec![],
+            presence: HashMap::new(),
+            presence_watch: vec![],
+            presence_subscribed: None,
+            presence_refreshed: None,
+            realtime_backoff: REALTIME_BACKOFF_MIN,
             searching_people: false,
             people_note: None,
             draft_chats: vec![],
@@ -1451,6 +1495,78 @@ impl App {
             },
             move |r| Msg::Messages(id.clone(), r, older),
         )
+    }
+
+    /// Čeká na další události real-time kanálu (při prvním volání ho připojí).
+    fn listen_realtime(&self) -> Task<Msg> {
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        Task::perform(
+            async move { backend.poll_events().await.map_err(Failure::from) },
+            Msg::Realtime,
+        )
+    }
+
+    /// Protistrana 1:1 chatu.
+    fn peer(&self, c: &Conversation) -> Option<UserId> {
+        if c.kind != ConversationKind::OneOnOne {
+            return None;
+        }
+        let me = &self.session()?.profile.account_id;
+        one_on_one_peer(&c.id, me.as_str())
+    }
+
+    /// Stav protistrany 1:1 chatu, pokud ho známe.
+    fn peer_presence(&self, c: &Conversation) -> Option<&Presence> {
+        self.presence.get(&self.peer(c)?)
+    }
+
+    /// Udržuje stavy uživatelů aktuální (voláno při každé obnově):
+    /// - objedná u serveru živé změny pro lidi z 1:1 chatů a pro mě, když se seznam změní,
+    ///   a odběr pravidelně obnovuje ([`PRESENCE_RESUBSCRIBE`]);
+    /// - každých [`PRESENCE_REFRESH`] načte stavy znovu dotazem, aby nezamrzly, kdyby
+    ///   se nějaká změna ztratila nebo real-time kanál nefungoval.
+    fn sync_presence(&mut self) -> Task<Msg> {
+        let Some(session) = self.session() else {
+            return Task::none();
+        };
+        let backend = session.backend.clone();
+        let mut users = vec![my_mri(&session.profile)];
+        for c in &self.conversations {
+            if users.len() >= PRESENCE_WATCH_MAX {
+                break;
+            }
+            if let Some(peer) = self.peer(c).filter(|p| !users.contains(p))
+                && self.listed(c)
+            {
+                users.push(peer);
+            }
+        }
+        let mut tasks = vec![];
+        let stale = self
+            .presence_subscribed
+            .is_none_or(|t| t.elapsed() >= PRESENCE_RESUBSCRIBE);
+        if users != self.presence_watch || stale {
+            self.presence_watch = users.clone();
+            self.presence_subscribed = Some(std::time::Instant::now());
+            let (backend, users) = (backend.clone(), users.clone());
+            tasks.push(Task::perform(
+                async move { backend.watch_presence(&users).await.map_err(Failure::from) },
+                Msg::PresenceWatched,
+            ));
+        }
+        if self
+            .presence_refreshed
+            .is_none_or(|t| t.elapsed() >= PRESENCE_REFRESH)
+        {
+            self.presence_refreshed = Some(std::time::Instant::now());
+            tasks.push(Task::perform(
+                async move { backend.presence(&users).await.map_err(Failure::from) },
+                Msg::PresenceLoaded,
+            ));
+        }
+        Task::batch(tasks)
     }
 
     fn fetch_conversations(&mut self) -> Task<Msg> {
@@ -2765,6 +2881,7 @@ impl App {
                 };
                 Task::batch([
                     self.fetch_conversations(),
+                    self.listen_realtime(),
                     Task::done(Msg::CalendarTick),
                     debug_tab,
                     // nepřečtené ostatních účtů až po rozběhnutí aktivního
@@ -2890,6 +3007,57 @@ impl App {
             }
             Msg::Scoped(..) => Task::none(),
             Msg::PollOthers => self.poll_others(),
+            Msg::Realtime(Ok(events)) => {
+                self.realtime_backoff = REALTIME_BACKOFF_MIN;
+                for event in events {
+                    if let tymy_core::Event::Presence(list) = event {
+                        self.presence.extend(list);
+                    }
+                }
+                self.listen_realtime()
+            }
+            Msg::Realtime(Err(e)) => {
+                if e.reauth {
+                    return self.fail(e);
+                }
+                // výpadek kanálu není chyba pro uživatele: chaty i stavy se dál obnovují dotazem
+                tracing::warn!(error = %e.text, wait = ?self.realtime_backoff, "real-time kanál");
+                let wait = self.realtime_backoff;
+                self.realtime_backoff = (wait * 2).min(REALTIME_BACKOFF_MAX);
+                Task::perform(tokio::time::sleep(wait), |_| Msg::RealtimeRetry)
+            }
+            Msg::RealtimeRetry => self.listen_realtime(),
+            Msg::PresenceWatched(r) => {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e.text, "odběr stavů uživatelů");
+                    // příští obnova to zkusí znovu
+                    self.presence_watch.clear();
+                }
+                Task::none()
+            }
+            Msg::PresenceLoaded(r) => {
+                match r {
+                    Ok(list) => {
+                        // koho server nevrátil, toho stav neznáme (nenechat starou hodnotu)
+                        let known: HashSet<&UserId> = list.iter().map(|(u, _)| u).collect();
+                        let watched = &self.presence_watch;
+                        self.presence
+                            .retain(|u, _| known.contains(u) || !watched.contains(u));
+                        self.presence.extend(list);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e.text, "obnovení stavů uživatelů");
+                        // stavy starší než dva intervaly raději neukazovat
+                        if self
+                            .presence_refreshed
+                            .is_none_or(|t| t.elapsed() >= 2 * PRESENCE_REFRESH)
+                        {
+                            self.presence.clear();
+                        }
+                    }
+                }
+                Task::none()
+            }
             Msg::OtherNotificationClicked(account, conv) => {
                 tracing::info!(%account, "notifikace z jiného účtu: přepínám");
                 let switch = self.load_account(Some(account));
@@ -3044,10 +3212,11 @@ impl App {
             }
 
             Msg::Tick => {
+                let presence = self.sync_presence();
                 if self.refreshing {
-                    Task::none()
+                    presence
                 } else {
-                    self.fetch_conversations()
+                    Task::batch([self.fetch_conversations(), presence])
                 }
             }
             Msg::Conversations(Ok(page), full) => {
@@ -5265,7 +5434,7 @@ impl App {
         };
         let who = button(
             row![
-                avatar(me, 34.0),
+                avatar_with_presence(me, 34.0, self.presence.get(&my_mri(&session.profile))),
                 column![
                     text(truncate(me, 20)).size(14).font(SEMIBOLD),
                     text(truncate(
@@ -6303,9 +6472,12 @@ impl App {
         ]
         .align_y(iced::Alignment::Center);
         button(
-            row![avatar(&title, 38.0), column![top, bottom].spacing(3)]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
+            row![
+                avatar_with_presence(&title, 38.0, self.peer_presence(c)),
+                column![top, bottom].spacing(3)
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
         .padding([8, 8])
@@ -6602,7 +6774,10 @@ impl App {
         let title = self.conv_title(conv, false);
         let subtitle = match conv.kind {
             ConversationKind::OneOnOne if self.is_draft(&conv.id) => "Nový chat".to_owned(),
-            ConversationKind::OneOnOne => "Chat".to_owned(),
+            ConversationKind::OneOnOne => match self.peer_presence(conv) {
+                Some(p) => p.label().to_owned(),
+                None => "Chat".to_owned(),
+            },
             ConversationKind::Group => "Skupinový chat".to_owned(),
             ConversationKind::Meeting => "Chat schůzky".to_owned(),
             ConversationKind::Channel => match self.team_name(conv) {
@@ -6614,7 +6789,7 @@ impl App {
         let header_avatar = if conv.kind == ConversationKind::Channel {
             team_avatar(&self.team_name(conv).unwrap_or_else(|| title.clone()), 38.0)
         } else {
-            avatar(&title, 38.0)
+            avatar_with_presence(&title, 38.0, self.peer_presence(conv))
         };
         let manage: Element<'a, Msg> =
             if conv.kind == ConversationKind::Group && !self.is_draft(&conv.id) {
@@ -7660,6 +7835,47 @@ fn avatar<'a>(name: &str, size: f32) -> Element<'a, Msg> {
         .center_y(size)
         .style(style::avatar(style::avatar_color(name), size / 2.0))
         .into()
+}
+
+/// Avatar s tečkou stavu vpravo dole (bez známého stavu jen avatar).
+fn avatar_with_presence<'a>(
+    name: &str,
+    size: f32,
+    presence: Option<&Presence>,
+) -> Element<'a, Msg> {
+    let Some(kind) = presence.and_then(|p| style::PresenceDot::of(p.availability)) else {
+        return avatar(name, size);
+    };
+    let dot = (size * 0.32).round().max(9.0);
+    // „nerušit“: bílá čárka uprostřed
+    let inner: Element<'a, Msg> = if kind == style::PresenceDot::DoNotDisturb {
+        container(space())
+            .width(dot * 0.5)
+            .height(2)
+            .style(|_: &Theme| container::Style {
+                background: Some(Color::WHITE.into()),
+                ..Default::default()
+            })
+            .into()
+    } else {
+        space().into()
+    };
+    stack![
+        avatar(name, size),
+        container(
+            container(inner)
+                .width(dot)
+                .height(dot)
+                .center_x(dot)
+                .center_y(dot)
+                .style(move |t: &Theme| style::presence_dot(t, kind, dot))
+        )
+        .width(size)
+        .height(size)
+        .align_right(size)
+        .align_bottom(size),
+    ]
+    .into()
 }
 
 /// Avatar týmu: zaoblený čtverec.

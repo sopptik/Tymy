@@ -12,6 +12,7 @@ pub mod graph;
 mod http;
 pub mod media;
 pub mod people;
+pub mod presence;
 mod realtime;
 
 pub use backend::{TeamsBackend, complete_login};

@@ -521,6 +521,53 @@ pub fn avatar(bg: Color, radius: f32) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// Tečka stavu u avataru.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceDot {
+    Available,
+    Busy,
+    DoNotDisturb,
+    Away,
+    Offline,
+}
+
+impl PresenceDot {
+    /// Tečka pro dostupnost; neznámý stav se nekreslí.
+    pub fn of(a: tymy_core::Availability) -> Option<Self> {
+        use tymy_core::Availability as A;
+        Some(match a {
+            A::Available => Self::Available,
+            A::Busy => Self::Busy,
+            A::DoNotDisturb => Self::DoNotDisturb,
+            A::BeRightBack | A::Away => Self::Away,
+            A::Offline => Self::Offline,
+            A::Unknown => return None,
+        })
+    }
+}
+
+/// Tečka stavu: zelená dostupný, červená zaneprázdněný / nerušit, žlutá pryč, šedý
+/// kroužek offline; okraj v barvě panelu ji oddělí od avataru.
+pub fn presence_dot(t: &Theme, kind: PresenceDot, size: f32) -> container::Style {
+    let c = colors(t);
+    let offline = kind == PresenceDot::Offline;
+    let fill = match kind {
+        PresenceDot::Available => color!(0x4FB548),
+        PresenceDot::Busy | PresenceDot::DoNotDisturb => color!(0xD13B4C),
+        PresenceDot::Away => color!(0xF2A93B),
+        PresenceDot::Offline => c.sidebar,
+    };
+    container::Style {
+        background: Some(fill.into()),
+        border: Border {
+            radius: (size / 2.0).into(),
+            width: if offline { 2.0 } else { 1.5 },
+            color: if offline { c.muted } else { c.sidebar },
+        },
+        ..Default::default()
+    }
+}
+
 /// Barva avataru odvozená ze jména (stabilní mezi spuštěními).
 pub fn avatar_color(name: &str) -> Color {
     const PALETTE: [Color; 10] = [

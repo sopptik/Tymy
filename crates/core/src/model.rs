@@ -318,6 +318,8 @@ pub enum Event {
         conversation_id: ConversationId,
         user: Option<UserId>,
     },
+    /// Změna stavu (přítomnosti) uživatelů.
+    Presence(Vec<(UserId, crate::Presence)>),
     /// Událost, kterou zatím neumíme interpretovat. Necháváme surová data kvůli ladění protokolu.
     Unknown {
         resource_type: String,

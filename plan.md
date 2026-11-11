@@ -229,8 +229,18 @@ samostatného commitu“)
    (`docs/protocol/README.md` § 4): WebSocket `go-eu.trouter…/v4/c`, přihlášení tokenem
    `ic3.teams.office.com`, rámce socket.io 0.9, registrace adresy v registraru, odběr
    přítomnosti; zprávy chodí jako stejná `EventMessage` jako u long-pollu, takže je
-   zpracuje stávající parser. Připraveno k implementaci; registrace se hlásí šablonou
-   oficiálního klienta (`TeamsCDLWebWorker_2.7`) → potřeba souhlas uživatele.
+   zpracuje stávající parser. Uživatel souhlasil (2026-11-11: „ano, pusť se do toho. pokud
+   by to šlo udělal bych jako první krok stav uživatele“).
+   - ✅ **Krok 1, stav uživatelů (2026-11-11):** klient trouteru (`tokio-tungstenite`,
+     nahradil mrtvý long-poll), odběr přítomnosti přes UPS, tečka stavu u avataru v seznamu
+     1:1 chatů, v hlavičce chatu (s popiskem „Dostupný / V hovoru / Pryč…“) a u vlastního
+     profilu. Ověřeno naživo. Na přání uživatele („bylo by fajn kdyby se po nějaké době
+     udělal refresh stavů (nějaký watchdog) … informace zamrzá“) pojistka: každé 2 min se
+     stavy načtou znovu dotazem, odběr se obnovuje po 15 min, při výpadku kanálu se
+     připojuje znovu (2–60 s) a stavy starší než 4 min bez obnovení se přestanou ukazovat.
+   - ⏳ **Krok 2:** hlášení vlastního stavu (`PUT …/me/endpoints/`), jinak je uživatel
+     v Tymy pro ostatní Offline; čeká na rozhodnutí uživatele.
+   - ⏳ **Krok 3:** registrace v registraru → okamžité zprávy a „píše…“ místo 5s obnovy.
 2. ✅ **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
    Hotovo (2026-11-04), ověřeno uživatelem 2026-11-05: otevřený chat se nahlásí jako přečtený, když
    má okno fokus a není skryté (při návratu do okna hned). Přečtení se teď i lokálně počítá

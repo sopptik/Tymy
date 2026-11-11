@@ -109,6 +109,7 @@ pub(crate) struct WireMessage {
     pub properties: Option<Value>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct PollResponse {
     #[serde(rename = "eventMessages", default)]
