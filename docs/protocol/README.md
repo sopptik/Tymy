@@ -175,7 +175,10 @@ Každé má vlastní `epid` (náhodné UUID koncového bodu).
    `[{"mri", "source": "ups"}]` → `[{mri, presence: {availability, activity, calendarData}, status}]`
    (stačí Bearer). Vlastní stav klient hlásí `PUT /ups/emea/v1/me/endpoints/`
    `{"id": "<epid>", "availability", "activity", "activityReporting": "Transport", "deviceType": "Web"}`
-   (neimplementováno: bez něj je uživatel pro ostatní Offline, pokud nemá otevřený jiný klient).
+   → `201` poprvé, pak `200` (✅ ověřeno 2026-11-11; stejné povinné hlavičky jako odběr).
+   Bez něj je uživatel pro ostatní Offline, pokud nemá otevřený jiný klient. `id` je stejné
+   UUID jako `epid` trouteru. Tymy hlásí `Available`, po 5 min nečinnosti `Away`, a hlášení
+   opakuje každé 2 min.
    Odběr: `POST /ups/emea/v1/pubsub/subscriptions/<epid>`
    `{"trouterUri": "<surl>unifiedPresenceService", "shouldPurgePreviousSubscriptions": true,
    "subscriptionsToAdd": [{"mri": "8:orgid:…", "source": "ups"}], "subscriptionsToRemove": []}`.

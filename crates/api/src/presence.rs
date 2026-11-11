@@ -100,6 +100,45 @@ pub async fn subscribe(
     Ok(())
 }
 
+/// Ohlásí stav tohoto koncového bodu (`epid`); server z koncových bodů uživatele skládá
+/// jeho výsledný stav. Ručně nastavený stav (např. „Nerušit“) má přednost.
+pub async fn publish(
+    http: &Http,
+    base: &Url,
+    token: &str,
+    epid: &str,
+    client_version: &str,
+    availability: Availability,
+) -> Result<()> {
+    let state = match availability {
+        Availability::Away | Availability::BeRightBack => "Away",
+        _ => "Available",
+    };
+    let url = base
+        .join("me/endpoints/")
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    let resp = http
+        .client
+        .put(url)
+        .bearer_auth(token)
+        .header("x-ms-endpoint-id", epid)
+        .header("x-ms-client-user-agent", CLIENT_USER_AGENT)
+        .header("x-ms-correlation-id", uuid::Uuid::new_v4().to_string())
+        .header("x-ms-client-version", client_version)
+        .json(&json!({
+            "id": epid,
+            "availability": state,
+            "activity": state,
+            "activityReporting": "Transport",
+            "deviceType": "Web",
+        }))
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await?;
+    Ok(())
+}
+
 /// Tělo oznámení z trouteru (`{"presence": [...], "isSnapshot": bool}`).
 pub fn parse_notification(body: &str) -> Vec<(UserId, Presence)> {
     serde_json::from_str::<Value>(body)
@@ -216,6 +255,37 @@ mod tests {
             "https://pub.example/v4/f/abc/",
             "1415/1",
             &[UserId("8:orgid:aaaa".into())],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn publishes_own_endpoint_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/ups/emea/v1/me/endpoints/"))
+            .and(header("x-ms-client-user-agent", "Teams-V2-Web"))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                assert_eq!(
+                    body,
+                    json!({"id": "ep-1", "availability": "Away", "activity": "Away",
+                        "activityReporting": "Transport", "deviceType": "Web"})
+                );
+                ResponseTemplate::new(200)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = Url::parse(&format!("{}/ups/emea/v1/", server.uri())).unwrap();
+        publish(
+            &Http::new().unwrap(),
+            &base,
+            "t",
+            "ep-1",
+            "1415/1",
+            Availability::Away,
         )
         .await
         .unwrap();

@@ -178,6 +178,13 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Ohlásí serveru vlastní stav tohoto klienta (dostupný / pryč), aby ho viděli ostatní.
+    /// Je třeba opakovat, jinak stav po čase vyprší.
+    async fn publish_presence(&self, availability: crate::Availability) -> Result<()> {
+        let _ = availability;
+        Ok(())
+    }
+
     /// Události kalendáře, které zasahují do intervalu `from..to` (včetně výskytů
     /// opakovaných událostí), seřazené podle začátku. Výchozí = účet kalendář nemá.
     async fn calendar(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {

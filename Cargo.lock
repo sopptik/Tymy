@@ -5508,6 +5508,8 @@ dependencies = [
  "tymy-config",
  "tymy-core",
  "tymy-store",
+ "x11rb",
+ "zbus",
 ]
 
 [[package]]

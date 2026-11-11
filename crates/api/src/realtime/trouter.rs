@@ -34,7 +34,7 @@ const DEAD_AFTER: Duration = Duration::from_secs(50);
 pub struct Info {
     /// Veřejná adresa klienta, `https://…:3443/v4/f/<id>/`; na cesty pod ní server doručuje.
     pub surl: String,
-    /// Id koncového bodu (náhodné UUID tohoto připojení).
+    /// Id koncového bodu (UUID tohoto klienta, stejné pro hlášení stavu).
     pub epid: String,
 }
 
@@ -190,8 +190,13 @@ pub type TlsTrouter = Trouter<tokio_rustls::client::TlsStream<TcpStream>>;
 
 impl TlsTrouter {
     /// Připojí se na `base` (`wss://…/v4/c`) a přihlásí tokenem pro [`TROUTER_SCOPE`].
-    pub async fn connect(base: &str, token: &str, client_version: &str) -> Result<Self> {
-        let epid = uuid::Uuid::new_v4().to_string();
+    pub async fn connect(
+        base: &str,
+        token: &str,
+        client_version: &str,
+        epid: &str,
+    ) -> Result<Self> {
+        let epid = epid.to_owned();
         let url = connect_url(base, &epid, client_version)?;
         if url.scheme() != "wss" {
             return Err(Error::Other("trouter vyžaduje wss://".into()));

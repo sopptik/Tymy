@@ -287,6 +287,10 @@ pub enum Msg {
     RealtimeRetry,
     /// Odběr stavů uživatelů nastaven (nebo ne).
     PresenceWatched(Result<(), Failure>),
+    /// Zjištěná nečinnost uživatele (pro hlášení vlastního stavu).
+    Idle(Option<Duration>),
+    /// Vlastní stav ohlášen serveru (nebo ne).
+    PresencePublished(tymy_core::Availability, Result<(), Failure>),
     /// Pravidelné obnovení stavů dotazem (pojistka proti „zamrzlým“ stavům).
     PresenceLoaded(Result<Vec<(UserId, Presence)>, Failure>),
     OtherUnread(
@@ -627,6 +631,10 @@ impl Msg {
                 "update: Realtime"
             ),
             Msg::RealtimeRetry => debug!("update: RealtimeRetry"),
+            Msg::Idle(_) => trace!("update: Idle"),
+            Msg::PresencePublished(a, r) => {
+                debug!(state = ?a, result = ok(r.is_ok()), "update: PresencePublished")
+            }
             Msg::PresenceWatched(r) => debug!(result = ok(r.is_ok()), "update: PresenceWatched"),
             Msg::PresenceLoaded(r) => debug!(
                 result = ok(r.is_ok()),
@@ -812,6 +820,12 @@ const PRESENCE_WATCH_MAX: usize = 200;
 const PRESENCE_REFRESH: Duration = Duration::from_secs(120);
 /// Jak často se obnoví odběr živých změn stavu.
 const PRESENCE_RESUBSCRIBE: Duration = Duration::from_secs(15 * 60);
+/// Jak často se zjišťuje nečinnost uživatele.
+const IDLE_CHECK: Duration = Duration::from_secs(20);
+/// Po takové nečinnosti (myš, klávesnice) se hlásí stav „Pryč“.
+const IDLE_AWAY: Duration = Duration::from_secs(5 * 60);
+/// Jak často se vlastní stav hlásí znovu, i když se nezměnil (jinak na serveru vyprší).
+const PRESENCE_PUBLISH: Duration = Duration::from_secs(120);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const MIN_PEOPLE_QUERY: usize = 2;
 
@@ -981,6 +995,10 @@ pub struct App {
     presence_subscribed: Option<std::time::Instant>,
     /// Kdy jsme stavy naposledy načetli dotazem.
     presence_refreshed: Option<std::time::Instant>,
+    /// Vlastní stav naposledy ohlášený serveru a kdy (hlášení se opakuje, jinak vyprší).
+    presence_published: Option<(tymy_core::Availability, std::time::Instant)>,
+    /// Kdy jsme naposledy zjišťovali nečinnost uživatele.
+    idle_checked: Option<std::time::Instant>,
     /// Prodleva před dalším pokusem o připojení real-time kanálu.
     realtime_backoff: Duration,
     searching_people: bool,
@@ -1198,6 +1216,8 @@ impl App {
             presence_watch: vec![],
             presence_subscribed: None,
             presence_refreshed: None,
+            presence_published: None,
+            idle_checked: None,
             realtime_backoff: REALTIME_BACKOFF_MIN,
             searching_people: false,
             people_note: None,
@@ -1544,6 +1564,18 @@ impl App {
             }
         }
         let mut tasks = vec![];
+        if self.idle_checked.is_none_or(|t| t.elapsed() >= IDLE_CHECK) {
+            self.idle_checked = Some(std::time::Instant::now());
+            tasks.push(Task::perform(
+                async {
+                    tokio::task::spawn_blocking(crate::idle::idle_time)
+                        .await
+                        .ok()
+                        .flatten()
+                },
+                Msg::Idle,
+            ));
+        }
         let stale = self
             .presence_subscribed
             .is_none_or(|t| t.elapsed() >= PRESENCE_RESUBSCRIBE);
@@ -3027,6 +3059,43 @@ impl App {
                 Task::perform(tokio::time::sleep(wait), |_| Msg::RealtimeRetry)
             }
             Msg::RealtimeRetry => self.listen_realtime(),
+            Msg::Idle(idle) => {
+                use tymy_core::Availability;
+                // nečinnost neznáme (Wayland) → hlásit dostupnost, dokud aplikace běží
+                let state = match idle {
+                    Some(t) if t >= IDLE_AWAY => Availability::Away,
+                    _ => Availability::Available,
+                };
+                let due = self
+                    .presence_published
+                    .is_none_or(|(s, at)| s != state || at.elapsed() >= PRESENCE_PUBLISH);
+                let Some(backend) = self.session().map(|s| s.backend.clone()).filter(|_| due)
+                else {
+                    return Task::none();
+                };
+                self.presence_published = Some((state, std::time::Instant::now()));
+                Task::perform(
+                    async move { backend.publish_presence(state).await.map_err(Failure::from) },
+                    move |r| Msg::PresencePublished(state, r),
+                )
+            }
+            Msg::PresencePublished(_, r) => {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e.text, "hlášení vlastního stavu");
+                    // zkusit při další kontrole znovu
+                    self.presence_published = None;
+                    return Task::none();
+                }
+                // vlastní tečku hned přečíst ze serveru (může platit ručně nastavený stav)
+                let Some(session) = self.session() else {
+                    return Task::none();
+                };
+                let (backend, me) = (session.backend.clone(), my_mri(&session.profile));
+                Task::perform(
+                    async move { backend.presence(&[me]).await.map_err(Failure::from) },
+                    Msg::PresenceLoaded,
+                )
+            }
             Msg::PresenceWatched(r) => {
                 if let Err(e) = r {
                     tracing::warn!(error = %e.text, "odběr stavů uživatelů");
@@ -3039,10 +3108,13 @@ impl App {
                 match r {
                     Ok(list) => {
                         // koho server nevrátil, toho stav neznáme (nenechat starou hodnotu)
-                        let known: HashSet<&UserId> = list.iter().map(|(u, _)| u).collect();
-                        let watched = &self.presence_watch;
-                        self.presence
-                            .retain(|u, _| known.contains(u) || !watched.contains(u));
+                        // (jen u úplného obnovení; dotaz na jednoho člověka ostatní nemaže)
+                        if list.len() > 1 {
+                            let known: HashSet<&UserId> = list.iter().map(|(u, _)| u).collect();
+                            let watched = &self.presence_watch;
+                            self.presence
+                                .retain(|u, _| known.contains(u) || !watched.contains(u));
+                        }
                         self.presence.extend(list);
                     }
                     Err(e) => {

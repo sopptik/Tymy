@@ -35,6 +35,8 @@ pub struct TeamsBackend {
     trouter: Mutex<Option<TlsTrouter>>,
     /// Adresa a id připojeného trouteru (pro odběry), dokud spojení žije.
     trouter_info: Mutex<Option<trouter::Info>>,
+    /// Id tohoto klienta jako koncového bodu (trouter, hlášení stavu); nové při každém spuštění.
+    endpoint_id: String,
     /// Uživatelé, jejichž stav odebíráme.
     presence_watch: Mutex<Vec<tymy_core::UserId>>,
 }
@@ -56,6 +58,7 @@ impl TeamsBackend {
             scoped_tokens: Mutex::new(Default::default()),
             trouter: Mutex::new(None),
             trouter_info: Mutex::new(None),
+            endpoint_id: uuid::Uuid::new_v4().to_string(),
             presence_watch: Mutex::new(vec![]),
         }
     }
@@ -561,6 +564,7 @@ impl ChatBackend for TeamsBackend {
                 &self.endpoints.trouter_url,
                 &token,
                 &self.endpoints.media_client_version,
+                &self.endpoint_id,
             )
             .await?;
             *self.trouter_info.lock().await = Some(t.info.clone());
@@ -581,6 +585,20 @@ impl ChatBackend for TeamsBackend {
                 Err(e)
             }
         }
+    }
+
+    async fn publish_presence(&self, availability: tymy_core::Availability) -> Result<()> {
+        let base = self.ups_base().await?;
+        let token = self.scoped_token(crate::presence::PRESENCE_SCOPE).await?;
+        crate::presence::publish(
+            &self.http,
+            &base,
+            &token,
+            &self.endpoint_id,
+            &self.endpoints.media_client_version,
+            availability,
+        )
+        .await
     }
 
     async fn watch_presence(&self, users: &[tymy_core::UserId]) -> Result<()> {

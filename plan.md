@@ -238,8 +238,18 @@ samostatného commitu“)
      udělal refresh stavů (nějaký watchdog) … informace zamrzá“) pojistka: každé 2 min se
      stavy načtou znovu dotazem, odběr se obnovuje po 15 min, při výpadku kanálu se
      připojuje znovu (2–60 s) a stavy starší než 4 min bez obnovení se přestanou ukazovat.
-   - ⏳ **Krok 2:** hlášení vlastního stavu (`PUT …/me/endpoints/`), jinak je uživatel
-     v Tymy pro ostatní Offline; čeká na rozhodnutí uživatele.
+   - ✅ **Krok 2, hlášení vlastního stavu (2026-11-11, „ano, doplň hlášení stavu“):**
+     `PUT …/me/endpoints/` „Dostupný“, po 5 min nečinnosti myši a klávesnice „Pryč“;
+     opakuje se každé 2 min (a hned při změně). Ručně nastavený stav v Teams má přednost.
+     Ověřeno naživo. Připomínky uživatele: „co když bude mít uživatel jiné prostředí než
+     x11?“ a „měla by být po spuštění detekce prostředí a s tou by se mělo pracovat“ →
+     `crates/app/src/idle.rs` při prvním dotazu rozpozná relaci (`XDG_SESSION_TYPE`,
+     `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`) a vybere první zdroj, který
+     odpoví: X11 MIT-SCREEN-SAVER; na Waylandu Mutter IdleMonitor (GNOME),
+     `org.freedesktop.ScreenSaver` (KDE), jinak logind `IdleHint`. Na Waylandu se X11
+     nepoužívá (XWayland vidí jen X11 okna). Když neodpoví nic, hlásí se „Dostupný“
+     a do logu jde varování. Ověřeno jen X11/MATE; Wayland zdroje neověřeny (není kde).
+     Při ukončení aplikace se stav neodhlašuje, na serveru vyprší sám.
    - ⏳ **Krok 3:** registrace v registraru → okamžité zprávy a „píše…“ místo 5s obnovy.
 2. ✅ **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
    Hotovo (2026-11-04), ověřeno uživatelem 2026-11-05: otevřený chat se nahlásí jako přečtený, když
