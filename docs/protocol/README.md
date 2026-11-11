@@ -179,7 +179,16 @@ Každé má vlastní `epid` (náhodné UUID koncového bodu).
    → `201` poprvé, pak `200` (✅ ověřeno 2026-11-11; stejné povinné hlavičky jako odběr).
    Bez něj je uživatel pro ostatní Offline, pokud nemá otevřený jiný klient. `id` je stejné
    UUID jako `epid` trouteru. Tymy hlásí `Available`, po 5 min nečinnosti `Away`, a hlášení
-   opakuje každé 2 min.
+   opakuje každých 60 s (při 120 s stav občas spadl na Offline, hlášení na serveru vyprší dřív).
+   Ruční stav (✅ ověřeno 2026-11-11, bez HAR): `PUT /ups/emea/v1/me/forceavailability/`
+   `{"availability": "Available|Busy|DoNotDisturb|BeRightBack|Away|Offline"}` → `200`;
+   volitelně `"desiredExpirationTime": "<UTC ISO>"` (bez něj platí dny). V odpovědi
+   `getpresence` je pak `presence.forcedAvailability: {availability, activity, expiry, publishTime}`
+   (záznam zůstává i po vypršení, rozhoduje `expiry`). Zrušení server přímo neumí:
+   `DELETE` i neznámé cesty vrací `401 {"substatuscode": 40102}`, prázdné tělo `400
+   Availability is required`. Tymy proto ruční stav přepíše stavem `Available` s platností
+   5 s; po vypršení platí zase stav z koncových bodů. Ladění: `tymy-cli presence --set dnd`,
+   `--reset`, `tymy-cli ups <metoda> <cesta> [tělo]`.
    Odběr: `POST /ups/emea/v1/pubsub/subscriptions/<epid>`
    `{"trouterUri": "<surl>unifiedPresenceService", "shouldPurgePreviousSubscriptions": true,
    "subscriptionsToAdd": [{"mri": "8:orgid:…", "source": "ups"}], "subscriptionsToRemove": []}`.

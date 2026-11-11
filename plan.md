@@ -250,6 +250,12 @@ samostatného commitu“)
      nepoužívá (XWayland vidí jen X11 okna). Když neodpoví nic, hlásí se „Dostupný“
      a do logu jde varování. Ověřeno jen X11/MATE; Wayland zdroje neověřeny (není kde).
      Při ukončení aplikace se stav neodhlašuje, na serveru vyprší sám.
+   - ✅ **Ruční stav (2026-11-11, „jak nastavím svůj stav ručně?“ → „ano, udělej to, stav
+     můžeš přepnout“):** v nabídce u profilu sekce „Stav“: Dostupný, Zaneprázdněný, Nerušit,
+     Hned jsem zpět, Pryč, Zobrazit jako offline, Automaticky (podle aktivity); platný ruční
+     stav má ✓. Volání `me/forceavailability/` nebylo v HAR, ověřeno naživo na účtu
+     uživatele včetně zrušení (krátce platným zástupným stavem). Hlášení automatického
+     stavu zkráceno na 60 s.
    - 🟡 **Krok 3, okamžité zprávy (2026-11-11, „pokračuj dalším krokem, okamžité zprávy
      přes trouter“):** registrace adresy trouteru v registraru (skypetoken, obnova po
      45 min; server ji přijal, `202`). Oznámení o nové nebo změněné zprávě spustí hned

@@ -76,6 +76,24 @@ enum Command {
     Presence {
         /// MRI uživatelů (`8:orgid:<id>`).
         users: Vec<String>,
+        /// Ručně nastaví vlastní stav: available, busy, dnd, brb, away, offline.
+        #[arg(long)]
+        set: Option<String>,
+        /// Zruší ručně nastavený stav.
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Ladění: požadavek na službu přítomnosti (`ups`), vypíše stav a tělo odpovědi.
+    Ups {
+        /// GET, PUT, POST, DELETE.
+        method: String,
+        /// Cesta za `…/v1/`, např. `me/forceavailability/`.
+        path: String,
+        /// Tělo požadavku (JSON).
+        body: Option<String>,
+        /// Přímo na presence.teams.microsoft.com místo přes teams.microsoft.com/ups.
+        #[arg(long)]
+        direct: bool,
     },
     /// Ladění: získá access token pro rozsah a vypíše jen jeho nároky (aud, scp, appid).
     Token {
@@ -243,8 +261,23 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&shape(&v))?);
             Ok(())
         }
-        Command::Presence { users } => {
+        Command::Presence { users, set, reset } => {
             let backend = backend(&config, cli.account.as_deref()).await?;
+            if let Some(name) = set {
+                use tymy_core::Availability as A;
+                let a = match name.as_str() {
+                    "available" => A::Available,
+                    "busy" => A::Busy,
+                    "dnd" => A::DoNotDisturb,
+                    "brb" => A::BeRightBack,
+                    "away" => A::Away,
+                    "offline" => A::Offline,
+                    other => anyhow::bail!("neznámý stav: {other}"),
+                };
+                backend.set_status(Some(a)).await?;
+            } else if reset {
+                backend.set_status(None).await?;
+            }
             let users: Vec<tymy_core::UserId> = if users.is_empty() {
                 vec![tymy_core::UserId(format!(
                     "8:orgid:{}",
@@ -261,6 +294,21 @@ async fn main() -> Result<()> {
                     p.activity
                 );
             }
+            Ok(())
+        }
+        Command::Ups {
+            method,
+            path,
+            body,
+            direct,
+        } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let method: tymy_api::Method = method.to_uppercase().parse()?;
+            let body = body.map(|b| serde_json::from_str(&b)).transpose()?;
+            let (status, text) = backend
+                .ups_debug(method, &path, body.as_ref(), direct)
+                .await?;
+            println!("{status} {text}");
             Ok(())
         }
         Command::Token { scope } => {

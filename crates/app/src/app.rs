@@ -287,6 +287,10 @@ pub enum Msg {
     RealtimeRetry,
     /// Odběr stavů uživatelů nastaven (nebo ne).
     PresenceWatched(Result<(), Failure>),
+    /// Ručně nastavit vlastní stav; `None` = zpět na automatický.
+    SetStatus(Option<tymy_core::Availability>),
+    /// Ruční stav nastaven (nebo ne).
+    StatusSet(Result<(), Failure>),
     /// Zjištěná nečinnost uživatele (pro hlášení vlastního stavu).
     Idle(Option<Duration>),
     /// Vlastní stav ohlášen serveru (nebo ne).
@@ -632,6 +636,8 @@ impl Msg {
             ),
             Msg::RealtimeRetry => debug!("update: RealtimeRetry"),
             Msg::Idle(_) => trace!("update: Idle"),
+            Msg::SetStatus(s) => debug!(status = ?s, "update: SetStatus"),
+            Msg::StatusSet(r) => debug!(result = ok(r.is_ok()), "update: StatusSet"),
             Msg::PresencePublished(a, r) => {
                 debug!(state = ?a, result = ok(r.is_ok()), "update: PresencePublished")
             }
@@ -825,7 +831,10 @@ const IDLE_CHECK: Duration = Duration::from_secs(20);
 /// Po takové nečinnosti (myš, klávesnice) se hlásí stav „Pryč“.
 const IDLE_AWAY: Duration = Duration::from_secs(5 * 60);
 /// Jak často se vlastní stav hlásí znovu, i když se nezměnil (jinak na serveru vyprší).
-const PRESENCE_PUBLISH: Duration = Duration::from_secs(120);
+const PRESENCE_PUBLISH: Duration = Duration::from_secs(60);
+/// Za jak dlouho po změně ručního stavu načíst vlastní stav znovu (zrušení se projeví
+/// až po vypršení zástupného stavu).
+const STATUS_SETTLE: Duration = Duration::from_secs(8);
 /// Obnova seznamu chatů dotazem, když zprávy chodí real-time kanálem (pojistka).
 const LIVE_REFRESH: Duration = Duration::from_secs(30);
 /// Jak dlouho ukazovat „píše…“ od posledního oznámení (Teams ho opakuje po pár sekundách).
@@ -1539,6 +1548,76 @@ impl App {
             async move { backend.poll_events().await.map_err(Failure::from) },
             Msg::Realtime,
         )
+    }
+
+    /// Načte ze serveru vlastní stav (po `delay`).
+    fn load_my_presence(&self, delay: Duration) -> Task<Msg> {
+        let Some(session) = self.session() else {
+            return Task::none();
+        };
+        let (backend, me) = (session.backend.clone(), my_mri(&session.profile));
+        Task::perform(
+            async move {
+                tokio::time::sleep(delay).await;
+                backend.presence(&[me]).await.map_err(Failure::from)
+            },
+            Msg::PresenceLoaded,
+        )
+    }
+
+    /// Volba vlastního stavu v nabídce účtů.
+    fn status_menu<'a>(&'a self, session: &'a Session) -> Element<'a, Msg> {
+        use tymy_core::Availability as A;
+        let forced = self
+            .presence
+            .get(&my_mri(&session.profile))
+            .and_then(|p| p.forced);
+        let item = |label: &'static str, status: Option<A>| -> Element<'a, Msg> {
+            let dot: Element<'a, Msg> = match status.and_then(style::PresenceDot::of) {
+                Some(kind) => container(space())
+                    .width(10)
+                    .height(10)
+                    .style(move |t: &Theme| style::presence_dot(t, kind, 10.0))
+                    .into(),
+                None => text("↺").size(11).style(muted).width(10).into(),
+            };
+            button(
+                row![
+                    dot,
+                    text(label).size(13).width(Length::Fill),
+                    text(if forced == status { "✓" } else { "" })
+                        .size(13)
+                        .style(style::accent),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(|t: &Theme, st| style::list_item(t, st, false))
+            .on_press(Msg::SetStatus(status))
+            .into()
+        };
+        column![
+            text("STAV").size(10).font(SEMIBOLD).style(muted),
+            item("Dostupný", Some(A::Available)),
+            item("Zaneprázdněný", Some(A::Busy)),
+            item("Nerušit", Some(A::DoNotDisturb)),
+            item("Hned jsem zpět", Some(A::BeRightBack)),
+            item("Pryč", Some(A::Away)),
+            item("Zobrazit jako offline", Some(A::Offline)),
+            item("Automaticky (podle aktivity)", None),
+            space().height(4),
+            text("ÚČTY").size(10).font(SEMIBOLD).style(muted),
+        ]
+        .spacing(2)
+        .padding(iced::Padding {
+            top: 4.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
+        .into()
     }
 
     /// Protistrana 1:1 chatu.
@@ -2916,6 +2995,8 @@ impl App {
                     self.tab = Tab::Calendar;
                     self.calendar.selected = Some(event);
                 }
+                // ladění: `TYMY_ACCOUNT_MENU=1` otevře po startu nabídku účtů a stavu
+                self.account_menu = std::env::var_os("TYMY_ACCOUNT_MENU").is_some();
                 // ladění: `TYMY_OPEN_TAB=calendar` otevře po startu záložku Kalendář
                 // (`meeting` navíc otevře formulář nové schůzky, nic neukládá)
                 let debug_tab = match std::env::var("TYMY_OPEN_TAB").as_deref() {
@@ -3143,15 +3224,26 @@ impl App {
                     return Task::none();
                 }
                 // vlastní tečku hned přečíst ze serveru (může platit ručně nastavený stav)
-                let Some(session) = self.session() else {
+                self.load_my_presence(Duration::ZERO)
+            }
+            Msg::SetStatus(status) => {
+                self.account_menu = false;
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
                     return Task::none();
                 };
-                let (backend, me) = (session.backend.clone(), my_mri(&session.profile));
                 Task::perform(
-                    async move { backend.presence(&[me]).await.map_err(Failure::from) },
-                    Msg::PresenceLoaded,
+                    async move { backend.set_status(status).await.map_err(Failure::from) },
+                    Msg::StatusSet,
                 )
             }
+            Msg::StatusSet(r) => match r {
+                // hned a ještě jednou po chvíli: zrušení ručního stavu se projeví se zpožděním
+                Ok(()) => Task::batch([
+                    self.load_my_presence(Duration::ZERO),
+                    self.load_my_presence(STATUS_SETTLE),
+                ]),
+                Err(e) => self.fail(e),
+            },
             Msg::PresenceWatched(r) => {
                 if let Err(e) = r {
                     tracing::warn!(error = %e.text, "odběr stavů uživatelů");
@@ -5467,7 +5559,7 @@ impl App {
             return space().height(0).into();
         }
         let active = &session.profile.account_id;
-        let mut col = Column::new().spacing(2);
+        let mut col = Column::new().spacing(2).push(self.status_menu(session));
         for a in &self.accounts {
             let is_active = &a.id == active;
             let status = if is_active {

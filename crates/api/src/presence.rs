@@ -12,6 +12,8 @@ use crate::http::{Http, SendLogged, check, json, net_err};
 pub const PRESENCE_SCOPE: &str = "https://presence.teams.microsoft.com/.default";
 /// Označení klienta, které služba přítomnosti vyžaduje (hodnota web klienta Teams).
 const CLIENT_USER_AGENT: &str = "Teams-V2-Web";
+/// Platnost zástupného stavu, kterým se ruší ruční stav.
+const RESET_EXPIRY: chrono::Duration = chrono::Duration::seconds(5);
 /// Kolik uživatelů na jeden dotaz (web klient posílá desítky).
 const BATCH: usize = 50;
 
@@ -139,6 +141,55 @@ pub async fn publish(
     Ok(())
 }
 
+/// Hodnota `availability` pro ruční stav.
+fn forced_name(a: Availability) -> &'static str {
+    match a {
+        Availability::Available | Availability::Unknown => "Available",
+        Availability::Busy => "Busy",
+        Availability::DoNotDisturb => "DoNotDisturb",
+        Availability::BeRightBack => "BeRightBack",
+        Availability::Away => "Away",
+        Availability::Offline => "Offline",
+    }
+}
+
+/// Ručně nastaví stav uživatele (`me/forceavailability/`); `None` ruční stav zruší.
+pub async fn force(
+    http: &Http,
+    base: &Url,
+    token: &str,
+    epid: &str,
+    client_version: &str,
+    status: Option<Availability>,
+) -> Result<()> {
+    let url = base
+        .join("me/forceavailability/")
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    // Zrušení: server nemá mazání (DELETE i prázdné tělo odmítá), ruční stav se proto
+    // přepíše stavem s platností pár sekund; po vypršení platí zase automatický.
+    let body = match status {
+        Some(a) => json!({ "availability": forced_name(a) }),
+        None => json!({
+            "availability": "Available",
+            "desiredExpirationTime": (chrono::Utc::now() + RESET_EXPIRY)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
+        }),
+    };
+    let request = http.client.put(url).json(&body);
+    let resp = request
+        .bearer_auth(token)
+        .header("x-ms-endpoint-id", epid)
+        .header("x-ms-client-user-agent", CLIENT_USER_AGENT)
+        .header("x-ms-correlation-id", uuid::Uuid::new_v4().to_string())
+        .header("x-ms-client-version", client_version)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await?;
+    Ok(())
+}
+
 /// Tělo oznámení z trouteru (`{"presence": [...], "isSnapshot": bool}`).
 pub fn parse_notification(body: &str) -> Vec<(UserId, Presence)> {
     serde_json::from_str::<Value>(body)
@@ -166,12 +217,20 @@ pub fn parse_list(v: &Value) -> Vec<(UserId, Presence)> {
                 .pointer("/calendarData/isOutOfOffice")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // ruční stav platí jen do `expiry`; server vrací i už vypršelý záznam
+            let forced = p.get("forcedAvailability").and_then(|f| {
+                let expiry = f.get("expiry")?.as_str()?;
+                let expiry = chrono::DateTime::parse_from_rfc3339(expiry).ok()?;
+                let state = Availability::parse(f.get("availability")?.as_str()?);
+                (expiry > chrono::Utc::now()).then_some(state)
+            });
             Some((
                 UserId(mri.to_owned()),
                 Presence {
                     availability,
                     activity,
                     out_of_office,
+                    forced,
                 },
             ))
         })
@@ -289,6 +348,60 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn forced_status_counts_only_until_expiry() {
+        let item = |expiry: &str| {
+            json!([{"mri": "8:orgid:aaaa", "presence": {"availability": "DoNotDisturb",
+                "forcedAvailability": {"availability": "DoNotDisturb", "expiry": expiry}}}])
+        };
+        assert_eq!(
+            parse_list(&item("2999-01-01T00:00:00Z"))[0].1.forced,
+            Some(Availability::DoNotDisturb)
+        );
+        assert_eq!(parse_list(&item("2001-01-01T00:00:00Z"))[0].1.forced, None);
+    }
+
+    #[tokio::test]
+    async fn forces_and_resets_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/ups/emea/v1/me/forceavailability/"))
+            .respond_with(|req: &Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                if body["availability"] == "BeRightBack" {
+                    assert!(body.get("desiredExpirationTime").is_none());
+                } else {
+                    // zrušení = krátce platný zástupný stav
+                    assert_eq!(body["availability"], "Available");
+                    let until = body["desiredExpirationTime"].as_str().unwrap();
+                    let until = chrono::DateTime::parse_from_rfc3339(until).unwrap();
+                    let left = until.signed_duration_since(chrono::Utc::now());
+                    assert!(
+                        left <= chrono::Duration::seconds(6) && left > chrono::Duration::zero()
+                    );
+                }
+                ResponseTemplate::new(200)
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let base = Url::parse(&format!("{}/ups/emea/v1/", server.uri())).unwrap();
+        let http = Http::new().unwrap();
+        force(
+            &http,
+            &base,
+            "t",
+            "ep",
+            "1415/1",
+            Some(Availability::BeRightBack),
+        )
+        .await
+        .unwrap();
+        force(&http, &base, "t", "ep", "1415/1", None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -150,6 +150,43 @@ impl TeamsBackend {
         .await
     }
 
+    /// Ladění protokolu: obecný požadavek na službu přítomnosti; vrátí stav a tělo odpovědi.
+    /// `direct` = přímo na `presence.teams.microsoft.com/v1/` místo přes `…/ups/<region>/v1/`.
+    pub async fn ups_debug(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        direct: bool,
+    ) -> Result<(u16, String)> {
+        let base = if direct {
+            url::Url::parse("https://presence.teams.microsoft.com/v1/")
+                .map_err(|e| Error::Other(e.to_string()))?
+        } else {
+            self.ups_base().await?
+        };
+        let url = base
+            .join(path.trim_start_matches('/'))
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let token = self.scoped_token(crate::presence::PRESENCE_SCOPE).await?;
+        let mut rb = self
+            .http
+            .client
+            .request(method, url)
+            .bearer_auth(token)
+            .header("x-ms-endpoint-id", &self.endpoint_id)
+            .header("x-ms-client-user-agent", "Teams-V2-Web")
+            .header("x-ms-correlation-id", uuid::Uuid::new_v4().to_string())
+            .header("x-ms-client-version", &self.endpoints.media_client_version);
+        if let Some(b) = body {
+            rb = rb.json(b);
+        }
+        let resp = rb.send().await.map_err(|e| Error::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        Ok((status, text))
+    }
+
     async fn ups_base(&self) -> Result<url::Url> {
         let session = self.session().await?;
         let mt = session
@@ -639,6 +676,20 @@ impl ChatBackend for TeamsBackend {
             &self.endpoint_id,
             &self.endpoints.media_client_version,
             availability,
+        )
+        .await
+    }
+
+    async fn set_status(&self, status: Option<tymy_core::Availability>) -> Result<()> {
+        let base = self.ups_base().await?;
+        let token = self.scoped_token(crate::presence::PRESENCE_SCOPE).await?;
+        crate::presence::force(
+            &self.http,
+            &base,
+            &token,
+            &self.endpoint_id,
+            &self.endpoints.media_client_version,
+            status,
         )
         .await
     }

@@ -185,6 +185,13 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Ručně nastaví vlastní stav (má přednost před hlášeným automaticky);
+    /// `None` = zrušit ruční stav a vrátit se k automatickému.
+    async fn set_status(&self, status: Option<crate::Availability>) -> Result<()> {
+        let _ = status;
+        Err(crate::Error::Other("účet neumí nastavit stav".into()))
+    }
+
     /// Události kalendáře, které zasahují do intervalu `from..to` (včetně výskytů
     /// opakovaných událostí), seřazené podle začátku. Výchozí = účet kalendář nemá.
     async fn calendar(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {

@@ -38,6 +38,9 @@ pub struct Presence {
     pub activity: Option<String>,
     /// Zapnutá automatická odpověď „mimo kancelář“.
     pub out_of_office: bool,
+    /// Ručně nastavený stav, pokud platí (má přednost před automatickým).
+    #[serde(default)]
+    pub forced: Option<Availability>,
 }
 
 impl Presence {
@@ -83,14 +86,14 @@ mod tests {
         let call = Presence {
             availability: Availability::Busy,
             activity: Some("InACall".into()),
-            out_of_office: false,
+            ..Default::default()
         };
         assert_eq!(call.label(), "V hovoru");
         assert_eq!(Presence::default().label(), "Stav neznámý");
         let away = Presence {
             availability: Availability::Away,
             activity: Some("Away".into()),
-            out_of_office: false,
+            ..Default::default()
         };
         assert_eq!(away.label(), "Pryč");
     }
