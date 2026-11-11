@@ -2,4 +2,5 @@
 //!
 //! Dřívější HTTP long-poll zděděný ze Skype Microsoft vypnul (`410 Gone`).
 
+pub(crate) mod registrar;
 pub(crate) mod trouter;

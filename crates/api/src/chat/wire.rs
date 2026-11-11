@@ -298,6 +298,7 @@ impl EventMessage {
                         .filter(|_| messagetype.contains("Typing"))
                     {
                         return Event::Typing {
+                            active: !messagetype.contains("Clear"),
                             conversation_id: conversation_id.into(),
                             user: wire
                                 .from
@@ -606,9 +607,11 @@ mod tests {
             Event::Typing {
                 conversation_id,
                 user,
+                active,
             } => {
                 assert_eq!(conversation_id.as_str(), "19:abc@thread.v2");
                 assert!(user.is_some());
+                assert!(active);
             }
             e => panic!("{e:?}"),
         }

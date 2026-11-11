@@ -826,6 +826,10 @@ const IDLE_CHECK: Duration = Duration::from_secs(20);
 const IDLE_AWAY: Duration = Duration::from_secs(5 * 60);
 /// Jak často se vlastní stav hlásí znovu, i když se nezměnil (jinak na serveru vyprší).
 const PRESENCE_PUBLISH: Duration = Duration::from_secs(120);
+/// Obnova seznamu chatů dotazem, když zprávy chodí real-time kanálem (pojistka).
+const LIVE_REFRESH: Duration = Duration::from_secs(30);
+/// Jak dlouho ukazovat „píše…“ od posledního oznámení (Teams ho opakuje po pár sekundách).
+const TYPING_TTL: Duration = Duration::from_secs(8);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const MIN_PEOPLE_QUERY: usize = 2;
 
@@ -1001,6 +1005,12 @@ pub struct App {
     idle_checked: Option<std::time::Instant>,
     /// Prodleva před dalším pokusem o připojení real-time kanálu.
     realtime_backoff: Duration,
+    /// Real-time kanál doručuje oznámení o zprávách (pak se seznam chatů dotazuje řidčeji).
+    messaging_live: bool,
+    /// Kdy jsme naposledy spustili obnovu seznamu chatů.
+    last_refresh: Option<std::time::Instant>,
+    /// Chaty, ve kterých právě někdo píše, a kdy to přišlo naposledy.
+    typing: HashMap<ConversationId, std::time::Instant>,
     searching_people: bool,
     /// Poznámka k hledání (např. že externí hledání není k dispozici).
     people_note: Option<String>,
@@ -1219,6 +1229,9 @@ impl App {
             presence_published: None,
             idle_checked: None,
             realtime_backoff: REALTIME_BACKOFF_MIN,
+            messaging_live: false,
+            last_refresh: None,
+            typing: HashMap::new(),
             searching_people: false,
             people_note: None,
             draft_chats: vec![],
@@ -1606,6 +1619,7 @@ impl App {
             return Task::none();
         };
         self.refreshing = true;
+        self.last_refresh = Some(std::time::Instant::now());
         let full = self
             .last_full_refresh
             .is_none_or(|t| t.elapsed() >= FULL_REFRESH);
@@ -3040,13 +3054,53 @@ impl App {
             Msg::Scoped(..) => Task::none(),
             Msg::PollOthers => self.poll_others(),
             Msg::Realtime(Ok(events)) => {
+                use tymy_core::Event;
                 self.realtime_backoff = REALTIME_BACKOFF_MIN;
+                let me = self.session().map(|s| my_mri(&s.profile));
+                let mut refresh = false;
+                let mut reload_open = false;
                 for event in events {
-                    if let tymy_core::Event::Presence(list) = event {
-                        self.presence.extend(list);
+                    match event {
+                        Event::Presence(list) => self.presence.extend(list),
+                        Event::Connected { messaging } => {
+                            tracing::info!(messaging, "real-time kanál připojen");
+                            self.messaging_live = messaging;
+                            // co přišlo během výpadku, doběhne dotazem
+                            refresh = true;
+                        }
+                        Event::NewMessage(m) => {
+                            self.typing.remove(&m.conversation_id);
+                            refresh = true;
+                        }
+                        Event::MessageUpdated(m) => {
+                            // úprava, smazání nebo reakce u starší zprávy seznam chatů nezmění
+                            reload_open |= self.selected.as_ref() == Some(&m.conversation_id);
+                            refresh = true;
+                        }
+                        Event::ConversationUpdated(_) => refresh = true,
+                        Event::Typing {
+                            conversation_id,
+                            user,
+                            active,
+                        } => {
+                            if active && user.is_some() && user != me {
+                                self.typing
+                                    .insert(conversation_id, std::time::Instant::now());
+                            } else if !active {
+                                self.typing.remove(&conversation_id);
+                            }
+                        }
+                        Event::Unknown { .. } => {}
                     }
                 }
-                self.listen_realtime()
+                let mut tasks = vec![self.listen_realtime()];
+                if refresh && !self.refreshing {
+                    tasks.push(self.fetch_conversations());
+                }
+                if let Some(sel) = self.selected.clone().filter(|_| reload_open) {
+                    tasks.push(self.fetch_messages(sel, None));
+                }
+                Task::batch(tasks)
             }
             Msg::Realtime(Err(e)) => {
                 if e.reauth {
@@ -3054,6 +3108,8 @@ impl App {
                 }
                 // výpadek kanálu není chyba pro uživatele: chaty i stavy se dál obnovují dotazem
                 tracing::warn!(error = %e.text, wait = ?self.realtime_backoff, "real-time kanál");
+                self.messaging_live = false;
+                self.typing.clear();
                 let wait = self.realtime_backoff;
                 self.realtime_backoff = (wait * 2).min(REALTIME_BACKOFF_MAX);
                 Task::perform(tokio::time::sleep(wait), |_| Msg::RealtimeRetry)
@@ -3285,7 +3341,13 @@ impl App {
 
             Msg::Tick => {
                 let presence = self.sync_presence();
-                if self.refreshing {
+                self.typing.retain(|_, at| at.elapsed() < TYPING_TTL);
+                // se živým kanálem stačí dotaz jako pojistka jednou za čas
+                let due = !self.messaging_live
+                    || self
+                        .last_refresh
+                        .is_none_or(|t| t.elapsed() >= LIVE_REFRESH);
+                if self.refreshing || !due {
                     presence
                 } else {
                     Task::batch([self.fetch_conversations(), presence])
@@ -6534,11 +6596,23 @@ impl App {
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center);
+        let typing = self.typing.contains_key(&c.id);
+        let preview = if typing {
+            "píše…".to_owned()
+        } else {
+            preview
+        };
         let bottom = row![
             emoji_text(truncate(&preview, 27), Font::DEFAULT)
                 .wrapping(Wrapping::None)
                 .size(12)
-                .style(if has_draft { style::danger } else { muted }),
+                .style(if typing {
+                    accent
+                } else if has_draft {
+                    style::danger
+                } else {
+                    muted
+                }),
             space::horizontal(),
             unread_dot(unread),
         ]
@@ -6857,6 +6931,11 @@ impl App {
                 None => "Kanál týmu".to_owned(),
             },
             _ => String::new(),
+        };
+        let subtitle = if self.typing.contains_key(&conv.id) {
+            "píše…".to_owned()
+        } else {
+            subtitle
         };
         let header_avatar = if conv.kind == ConversationKind::Channel {
             team_avatar(&self.team_name(conv).unwrap_or_else(|| title.clone()), 38.0)

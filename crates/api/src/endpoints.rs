@@ -28,10 +28,15 @@ pub struct Endpoints {
     pub media_client_version: String,
     /// WebSocket trouteru (real-time události), `wss://…/v4/c`.
     pub trouter_url: String,
+    /// Registrar: kam se hlásí adresa trouteru, aby na ni server doručoval zprávy.
+    pub registrar_url: String,
 }
 
 /// Trouter pro Evropu z HAR (2026-11-11); jiné regiony přes `endpoints.toml`.
 const TROUTER_URL: &str = "wss://go-eu.trouter.teams.microsoft.com/v4/c";
+
+/// Registrar z HAR (2026-11-11), shodný s `regionGtms.calling_registrarUrl` v authz odpovědi.
+const REGISTRAR_URL: &str = "https://teams.microsoft.com/registrar/prod/V2/registrations";
 
 /// Verze web klienta Teams z HAR (2026-11-05); s ní media služba přijme nahrání obrázku.
 const WEB_CLIENT_VERSION: &str = "1415/26101515216";
@@ -57,6 +62,7 @@ impl Endpoints {
                 redirect_uri: LOOPBACK_REDIRECT.into(),
                 media_client_version: WEB_CLIENT_VERSION.into(),
                 trouter_url: TROUTER_URL.into(),
+                registrar_url: REGISTRAR_URL.into(),
             },
             // NEOVĚŘENO: hodnoty pro osobní účty jsou hypotéza, kterou je nutné potvrdit
             // odchytem provozu teams.live.com (fáze 0, krok 1).
@@ -69,6 +75,7 @@ impl Endpoints {
                 redirect_uri: LOOPBACK_REDIRECT.into(),
                 media_client_version: WEB_CLIENT_VERSION.into(),
                 trouter_url: TROUTER_URL.into(),
+                registrar_url: REGISTRAR_URL.into(),
             },
         }
     }
@@ -89,7 +96,8 @@ impl Endpoints {
             chat_service,
             redirect_uri,
             media_client_version,
-            trouter_url
+            trouter_url,
+            registrar_url
         );
         e
     }
@@ -136,6 +144,7 @@ pub struct EndpointOverrides {
     pub redirect_uri: Option<String>,
     pub media_client_version: Option<String>,
     pub trouter_url: Option<String>,
+    pub registrar_url: Option<String>,
 }
 
 #[cfg(test)]

@@ -130,7 +130,7 @@ pro příchozí hovory ve fázi 2).
 
 Stav implementace (`crates/api/src/realtime/trouter.rs`, 2026-11-11): připojení, přihlášení,
 ping, potvrzování doručených požadavků a odběr přítomnosti fungují proti produkci.
-Registrace v registraru (zprávy, hovory) zatím ne. Authz odpověď uvádí adresy i pro další
+Registrace pro oznámení o zprávách také (viz bod 4); registrace pro hovory zatím ne. Authz odpověď uvádí adresy i pro další
 regiony (`regionGtms.calling_trouterUrl`, `presenceUPS`, `calling_registrarUrl`); zatím
 používáme pevnou `wss://go-eu…/v4/c` (jde přepsat v `endpoints.toml` → `trouter_url`).
 
@@ -166,7 +166,8 @@ Každé má vlastní `epid` (náhodné UUID koncového bodu).
     "transports": {"TROUTER": [{"context": "", "path": "<surl>", "ttl": 3600}]}}
    ```
    (hovory: `appId: SkypeSpacesWeb`, `templateKey: SkypeSpacesWeb_2.6`, `platform: edgeChromium`).
-   Autorizace není v záznamu (sanitized); `trouter.connected` uvádí i novější
+   Autorizace: stačí hlavička `X-Skypetoken` (✅ ověřeno 2026-11-11, `202`). Registrace
+   platí `ttl` sekund, Tymy ji obnovuje po 45 min. `trouter.connected` uvádí i novější
    `registrarUrl` (`communications.svc.cloud.microsoft/registrar/eu/v3/registrations`).
 5. Přítomnost (✅ ověřeno): token `https://presence.teams.microsoft.com/.default`, povinné
    hlavičky `x-ms-client-user-agent` (`Teams-V2-Web`), `x-ms-correlation-id` (UUID),

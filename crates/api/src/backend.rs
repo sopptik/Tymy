@@ -15,8 +15,12 @@ use tymy_core::{
 };
 
 use crate::auth::{self, CredentialStore, SkypeSession};
+use crate::realtime::registrar;
 use crate::realtime::trouter::{self, Delivery, TlsTrouter};
 use crate::{Endpoints, chat, http::Http, media};
+
+/// Za jak dlouho zkusit registraci trouteru znovu, když se nepovedla.
+const REGISTER_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
 const REFRESH_MARGIN_MINUTES: i64 = 5;
@@ -35,6 +39,8 @@ pub struct TeamsBackend {
     trouter: Mutex<Option<TlsTrouter>>,
     /// Adresa a id připojeného trouteru (pro odběry), dokud spojení žije.
     trouter_info: Mutex<Option<trouter::Info>>,
+    /// Kdy jsme adresu trouteru naposledy zaregistrovali pro oznámení o zprávách.
+    registered_at: Mutex<Option<std::time::Instant>>,
     /// Id tohoto klienta jako koncového bodu (trouter, hlášení stavu); nové při každém spuštění.
     endpoint_id: String,
     /// Uživatelé, jejichž stav odebíráme.
@@ -60,6 +66,7 @@ impl TeamsBackend {
             trouter_info: Mutex::new(None),
             endpoint_id: uuid::Uuid::new_v4().to_string(),
             presence_watch: Mutex::new(vec![]),
+            registered_at: Mutex::new(None),
         }
     }
 
@@ -569,6 +576,7 @@ impl ChatBackend for TeamsBackend {
             .await?;
             *self.trouter_info.lock().await = Some(t.info.clone());
             *guard = Some(t);
+            *self.registered_at.lock().await = None;
             if let Err(e) = self.subscribe_presence().await {
                 tracing::warn!(error = %e, "odběr stavů po připojení trouteru");
             }
@@ -576,9 +584,43 @@ impl ChatBackend for TeamsBackend {
         let Some(t) = guard.as_mut() else {
             return Ok(vec![]);
         };
-        match t.next().await {
-            Ok(d) => Ok(events_from(d)),
-            Err(e) => {
+        // registrace pro oznámení o zprávách: po připojení a pak s předstihem před vypršením
+        let renew = std::time::Duration::from_secs(registrar::TTL_SECS * 3 / 4);
+        let age = self.registered_at.lock().await.map(|at| at.elapsed());
+        if age.is_none_or(|a| a >= renew) {
+            let session = self.session().await?;
+            match registrar::register(
+                &self.http,
+                &self.endpoints.registrar_url,
+                &session.token,
+                &t.info.epid,
+                &t.info.surl,
+                &self.endpoints.media_client_version,
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::info!("trouter zaregistrován pro oznámení o zprávách");
+                    *self.registered_at.lock().await = Some(std::time::Instant::now());
+                    return Ok(vec![Event::Connected { messaging: true }]);
+                }
+                // bez registrace dál chodí aspoň stavy; zkusí se znovu za chvíli
+                Err(e) => {
+                    tracing::warn!(error = %e, "registrace trouteru");
+                    *self.registered_at.lock().await =
+                        Some(std::time::Instant::now() - renew + REGISTER_RETRY);
+                    return Ok(vec![Event::Connected { messaging: false }]);
+                }
+            }
+        }
+        let wait = renew
+            .saturating_sub(age.unwrap_or_default())
+            .max(std::time::Duration::from_secs(1));
+        match tokio::time::timeout(wait, t.next()).await {
+            // čas obnovit registraci
+            Err(_) => Ok(vec![]),
+            Ok(Ok(d)) => Ok(events_from(d)),
+            Ok(Err(e)) => {
                 // příští volání se připojí znovu
                 *guard = None;
                 *self.trouter_info.lock().await = None;
@@ -738,6 +780,62 @@ mod tests {
         let convs = backend.conversations().await.unwrap();
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].topic.as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn converts_trouter_deliveries() {
+        let msg = Delivery {
+            path: "messaging".into(),
+            body: serde_json::json!({
+                "type": "EventMessage",
+                "resourceType": "NewMessage",
+                "resourceLink": "https://n.example/v1/users/ME/conversations/19:abc@thread.v2/messages/5",
+                "resource": {"id": "5", "messagetype": "RichText/Html", "content": "<p>Ahoj</p>",
+                    "from": "https://n.example/v1/users/ME/contacts/8:orgid:aaaa",
+                    "composetime": "2026-11-10T09:00:00.000Z"},
+            })
+            .to_string(),
+        };
+        match events_from(msg).as_slice() {
+            [Event::NewMessage(m)] => {
+                assert_eq!(m.conversation_id.as_str(), "19:abc@thread.v2");
+                assert_eq!(m.content, "<p>Ahoj</p>");
+            }
+            e => panic!("{e:?}"),
+        }
+        let stop = Delivery {
+            path: "messaging".into(),
+            body: serde_json::json!({
+                "resourceType": "NewMessage",
+                "resourceLink": "https://n.example/v1/users/ME/conversations/19:abc@thread.v2/messages/6",
+                "resource": {"id": "6", "messagetype": "Control/ClearTyping",
+                    "from": "https://n.example/v1/users/ME/contacts/8:orgid:aaaa"},
+            })
+            .to_string(),
+        };
+        assert!(matches!(
+            events_from(stop).as_slice(),
+            [Event::Typing { active: false, .. }]
+        ));
+        let presence = Delivery {
+            path: "unifiedPresenceService".into(),
+            body: r#"{"presence":[{"mri":"8:orgid:aaaa","presence":{"availability":"Busy"}}]}"#
+                .into(),
+        };
+        assert!(matches!(events_from(presence).as_slice(), [Event::Presence(l)] if l.len() == 1));
+        let call = Delivery {
+            path: "callAgent/u/r/call/end/".into(),
+            body: "{}".into(),
+        };
+        assert!(matches!(
+            events_from(call).as_slice(),
+            [Event::Unknown { .. }]
+        ));
+        let junk = Delivery {
+            path: "messaging".into(),
+            body: "nesmysl".into(),
+        };
+        assert!(events_from(junk).is_empty());
     }
 
     #[tokio::test]

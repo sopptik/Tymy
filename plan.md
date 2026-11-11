@@ -250,7 +250,15 @@ samostatného commitu“)
      nepoužívá (XWayland vidí jen X11 okna). Když neodpoví nic, hlásí se „Dostupný“
      a do logu jde varování. Ověřeno jen X11/MATE; Wayland zdroje neověřeny (není kde).
      Při ukončení aplikace se stav neodhlašuje, na serveru vyprší sám.
-   - ⏳ **Krok 3:** registrace v registraru → okamžité zprávy a „píše…“ místo 5s obnovy.
+   - 🟡 **Krok 3, okamžité zprávy (2026-11-11, „pokračuj dalším krokem, okamžité zprávy
+     přes trouter“):** registrace adresy trouteru v registraru (skypetoken, obnova po
+     45 min; server ji přijal, `202`). Oznámení o nové nebo změněné zprávě spustí hned
+     obnovu seznamu chatů (a otevřeného vlákna), takže zprávy, nepřečtené i notifikace
+     jdou stávající cestou. „píše…“ v seznamu chatů a v hlavičce chatu (mizí po 8 s nebo
+     s `ClearTyping`). Se živým kanálem se seznam dotazuje jen jednou za 30 s jako
+     pojistka (dřív 5 s); při výpadku kanálu se vrací 5s obnova. Registrace a řidší
+     dotazování ověřeny naživo; **skutečné doručení zprávy a „píše…“ zatím ne** (během
+     testu nikdo nenapsal) → ověří uživatel.
 2. ✅ **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
    Hotovo (2026-11-04), ověřeno uživatelem 2026-11-05: otevřený chat se nahlásí jako přečtený, když
    má okno fokus a není skryté (při návratu do okna hned). Přečtení se teď i lokálně počítá

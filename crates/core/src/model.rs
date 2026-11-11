@@ -317,6 +317,13 @@ pub enum Event {
     Typing {
         conversation_id: ConversationId,
         user: Option<UserId>,
+        /// `false` = uživatel psát přestal (`Control/ClearTyping`).
+        active: bool,
+    },
+    /// Real-time kanál je připojený; `messaging` = server na něj posílá i oznámení o zprávách
+    /// (jinak jen stavy uživatelů a zprávy je třeba dál zjišťovat dotazem).
+    Connected {
+        messaging: bool,
     },
     /// Změna stavu (přítomnosti) uživatelů.
     Presence(Vec<(UserId, crate::Presence)>),

@@ -547,10 +547,18 @@ fn print_event(e: &Event) {
         Event::Typing {
             conversation_id,
             user,
+            active,
         } => println!(
-            "· {} píše v {conversation_id}",
-            user.as_ref().map(|u| u.as_str()).unwrap_or("někdo")
+            "· {} {} v {conversation_id}",
+            user.as_ref().map(|u| u.as_str()).unwrap_or("někdo"),
+            if *active { "píše" } else { "dopsal" }
         ),
+        Event::Connected { messaging } => {
+            println!(
+                "· připojeno (oznámení o zprávách: {})",
+                if *messaging { "ano" } else { "ne" }
+            )
+        }
         Event::Unknown { resource_type, .. } => {
             tracing::debug!(%resource_type, "neznámá událost");
         }
