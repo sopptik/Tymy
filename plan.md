@@ -225,9 +225,12 @@ samostatného commitu“)
 
 ### Fáze 1b: potřebuje odchyt provozu (HAR z web klienta)
 1. **Trouter (WebSocket):** okamžité doručování zpráv, „píše…“, přítomnost. Nahradí 5s obnovu.
-   ⏸ **Odloženo na později** (rozhodnutí uživatele 2026-11-04); potřeba HAR záznam z web klienta
-   včetně WebSocket rámců (postup v `docs/protocol/README.md`). Nejpozději před fází 2
-   (příchozí hovory chodí přes trouter).
+   ⏸ Odloženo 2026-11-04 do pořízení HAR. 🔬 **HAR 2026-11-11 obsahuje celý protokol**
+   (`docs/protocol/README.md` § 4): WebSocket `go-eu.trouter…/v4/c`, přihlášení tokenem
+   `ic3.teams.office.com`, rámce socket.io 0.9, registrace adresy v registraru, odběr
+   přítomnosti; zprávy chodí jako stejná `EventMessage` jako u long-pollu, takže je
+   zpracuje stávající parser. Připraveno k implementaci; registrace se hlásí šablonou
+   oficiálního klienta (`TeamsCDLWebWorker_2.7`) → potřeba souhlas uživatele.
 2. ✅ **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
    Hotovo (2026-11-04), ověřeno uživatelem 2026-11-05: otevřený chat se nahlásí jako přečtený, když
    má okno fokus a není skryté (při návratu do okna hned). Přečtení se teď i lokálně počítá
@@ -280,6 +283,12 @@ samostatného commitu“)
    Záznam neobsahoval WebSocket (bez F5) ani tokeny (sanitized); potřeba nový záznam:
    F5 + testovací hovor, export „with sensitive data“. Echo bot je ideální protistrana
    pro prototyp (nikoho neruší).
+   🔬 **Druhý HAR (2026-11-11, s trouterem):** SDP odpověď mediálního serveru přichází
+   v události `call/acceptance` (relay kandidáti na portu 3478, `setup:passive`), TURN
+   údaje dává `trap/tokens`, průběh hovoru hlásí `conversationUpdate`/`rosterUpdate`/`call/end`.
+   Signalizace je tím popsaná celá; neznámá zůstává autorizace (záznam opět sanitized,
+   vyzkouší se) a kompatibilita médií: SDP je dialekt Microsoftu (`RTP/SAVP`, `x-data`,
+   `x-ssrc-range`), `webrtc-rs` ho bez úprav nevezme.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

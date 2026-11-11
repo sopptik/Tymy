@@ -126,6 +126,53 @@ Současný web klient používá WebSocket **trouter** (`*.trouter.teams.microso
 Pokud long-poll nebude fungovat, je trouter další krok (stejně ho budeme potřebovat
 pro příchozí hovory ve fázi 2).
 
+### Trouter 🔬 (HAR 2026-11-11, zatím neimplementováno)
+
+Web klient drží **dvě** spojení: jedno pro chat a přítomnost (`ua: TeamsCDL`, registrace
+`TeamsCDLWebWorker`), druhé pro hovory (`ua: SkypeSpaces`, registrace `SkypeSpacesWeb`).
+Každé má vlastní `epid` (náhodné UUID koncového bodu).
+
+1. Volitelně `GET https://go-eu.trouter.teams.microsoft.com/?check=<ms>&cor_id=<uuid>&epid=<uuid>&tc=<json>`
+   → `200 "Trouter"` (kontrola dostupnosti).
+2. WebSocket `wss://go-eu.trouter.teams.microsoft.com/v4/c?tc=<json>&timeout=40&epid=<uuid>&ccid=&cor_id=<uuid>&con_num=<ms>_<n>`,
+   `tc = {"cv":"<verze trouter klienta>","ua":"TeamsCDL","hr":"","v":"<verze klienta>"}`,
+   `Origin: https://teams.cloud.microsoft`. Při opětovném připojení jde klient rovnou na
+   `reconnectUrl` a přidá `connectparams` z minula.
+3. Rámce mají tvar socket.io 0.9 (`typ:id:endpoint:data`):
+   - `1::` ← server: spojeno;
+   - `5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer <token>","X-MS-Migration":"True"}}]}`
+     → klient; token má `aud=https://ic3.teams.office.com`, `scp=Teams.AccessAsUser.All`;
+   - `5:1::{"name":"trouter.connected","args":[{id, ccid, url, surl, curlb, healthUrl, reconnectUrl, registrarUrl, socketio, ttl, connectparams:{sr,sp,se,st,sig,…}}]}`
+     ← server; `surl` (`https://<pub>-f.trouter…:3443/v4/f/<id>/`) je veřejná adresa klienta;
+   - `5:N::{"name":"trouter.message_loss","args":[{droppedIndicators:[{tag,etag}]}]}` ← server,
+     klient potvrdí `5:N+::{"name":"trouter.processed_message_loss",…}` (stejná data);
+   - `5:N+::{"name":"ping"}` → `6:::N+["pong"]` (klient pinguje po každé zprávě a po ~15 s klidu);
+   - `5:N+::{"name":"user.activity","args":[{state, cv}]}` → `6:::N+[]`;
+   - `3:::{"id":<n>,"method":"POST","url":"/v4/f/<id>/<cesta>","headers":{…},"body":"<text>"}`
+     ← server: doručený požadavek; klient odpoví
+     `3:::{"id":<n>,"status":200,"headers":{"MS-CV":…,"trouter-request":<kopie>,"trouter-client":"{\"cd\":<ms>}"},"body":""}`.
+     Hlavička `X-Microsoft-Skype-Content-Encoding: gzip` = tělo je gzip v base64.
+4. Registrace adresy: `POST https://teams.cloud.microsoft/registrar/prod/V2/registrations` → 202
+   ```json
+   {"clientDescription": {"appId": "TeamsCDLWebWorker", "aesKey": "", "languageId": "en-US",
+      "platform": "edge", "templateKey": "TeamsCDLWebWorker_2.7", "platformUIVersion": "<verze>"},
+    "registrationId": "<epid>", "nodeId": "",
+    "transports": {"TROUTER": [{"context": "", "path": "<surl>", "ttl": 3600}]}}
+   ```
+   (hovory: `appId: SkypeSpacesWeb`, `templateKey: SkypeSpacesWeb_2.6`, `platform: edgeChromium`).
+   Autorizace není v záznamu (sanitized); `trouter.connected` uvádí i novější
+   `registrarUrl` (`communications.svc.cloud.microsoft/registrar/eu/v3/registrations`).
+5. Přítomnost: `POST /ups/emea/v1/pubsub/subscriptions/<epid>`
+   `{"trouterUri": "<surl>unifiedPresenceService", "shouldPurgePreviousSubscriptions": true,
+   "subscriptionsToAdd": [{"mri": "8:orgid:…", "source": "ups"}], "subscriptionsToRemove": []}`.
+
+Doručované cesty:
+- `…/messaging`: tělo je stejná `EventMessage` jako u starého long-pollu
+  (`{time, type: "EventMessage", resourceType: "NewMessage", resourceLink, resource: {…zpráva chatsvc…}}`),
+  takže ji zpracuje stávající parser zpráv;
+- `…/unifiedPresenceService`: `{"presence": [{mri, etag, source, presence: {availability, activity, deviceType, calendarData}}], "isSnapshot": bool}`;
+- `…/callAgent/<uuid>/<náhodné>/conversation|call/<událost>/`: události hovoru, viz § 9.
+
 ### Reakce ✅
 
 `properties.emotions` (pole, případně JSON řetězec s polem):
@@ -345,9 +392,31 @@ Zjištění:
 - Klient používá upravené WebRTC ve web workeru (`precompiled-webrtc-web-worker`) a WASM
   zpracování zvuku (`wasmvqe`).
 
-Chybí (další záznam): WebSocket trouteru včetně rámců s `mediaAnswer` a dalšími událostmi
-hovoru, odkud klient bere relay/TURN servery a jak posílá trickle ICE kandidáty, a `aud`
-tokenu pro flightproxy (export „with sensitive data“).
+Druhý záznam (2026-11-11, s trouterem) doplnil průběh na straně serveru. Události chodí
+na trouter adresy z `epconv` (těla gzip + base64):
+
+| Čas | Událost | Obsah |
+|---|---|---|
+| +0,7 s | `conversation/conversationUpdate` (opakovaně) | stav konverzace a `links` (stejné jako odpověď `epconv`) |
+| +1,0 s | `call/acceptance` | `callAcceptance.links` (callLeg, mediaRenegotiation, hold, updateCallState, applyChannelParameters, …), `callKeepAliveInterval` a **`mediaContent.blob` = SDP odpověď** |
+| | odpověď klienta na `acceptance` | `200` s tělem `callAcceptanceAcknowledgement.links` (mediaRenegotiation, transfer, replacement, controlVideoStreaming, updateMediaDescriptions: další trouter adresy) |
+| +1,5 s | `conversation/rosterUpdate` (opakovaně) | `participants.<mri>` (`state`, `details`, `endpoints.<id>.call.mediaStreams[]`), `participantCounts` |
+| +3,6 s | `conversation/addParticipantSuccess` | `participants`, `participantInfos[]` (echo bot připojen) |
+| konec | `call/end` | `callEnd` (`reason`, `phrase`, `sender`); klient už hovor nezná → `404` |
+
+SDP odpověď mediálního serveru: stejných 13 m-řádků, `a=setup:passive` (DTLS klient jsme my),
+vlastní `ice-ufrag/pwd` a `fingerprint` na každém řádku, **4 relay kandidáti** (2× UDP,
+2× `tcp-pass`, port 3478) a rozšíření `x-source-streamid`, `x-mediabw`, `x-plaza-msi-range`.
+Samostatná událost `mediaAnswer` u testovacího hovoru nepřišla, odpověď je v `acceptance`.
+
+Přihlašovací údaje k relay (TURN): `GET https://teams.microsoft.com/trap/tokens`
+(`api-version: 2`) → `{"tokens": [{"realm": "\"rtcmedia\"", "username", "password"}], "expires": 604800}`.
+Po spojení přijde do chatu zpráva `messagetype: Event/Call` (`properties.s2spartnername: concore_gvc`).
+
+Zbývá zjistit: autorizaci flightproxy, registraru a `trap/tokens` (záznam je opět
+„sanitized“; půjde vyzkoušet s tokenem `ic3.teams.office.com` nebo skypetokenem) a jak
+klient posílá vlastní ICE kandidáty (v HTTP ani v trouteru nejsou; nejspíš stačí kandidáti
+serveru + STUN/TURN vazby).
 
 ## Jak odchytit provoz (HAR)
 
