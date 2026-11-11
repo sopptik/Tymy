@@ -256,6 +256,14 @@ samostatného commitu“)
      stav má ✓. Volání `me/forceavailability/` nebylo v HAR, ověřeno naživo na účtu
      uživatele včetně zrušení (krátce platným zástupným stavem). Hlášení automatického
      stavu zkráceno na 60 s.
+   - ✅ **Doladění (2026-11-11, „opravil bych poznatky bodu 2“):** adresy trouteru,
+     registraru a služby přítomnosti se berou z authz odpovědi pro region účtu (jen `https`
+     na doménách Microsoftu; ruční přepis v `endpoints.toml` má přednost); tečky stavu i
+     u členů skupinového chatu, ve výsledcích hledání lidí a u odesílatelů ve vlákně
+     (sledují se lidé z otevřeného chatu a hledání, pak 1:1 chaty, nejvýš 200); Tymy
+     posílá vlastní „píše…“ (`Control/Typing`, nejvýš jednou za 4 s). Stav „Na schůzce“
+     podle kalendáře se neřeší v klientu: služba přítomnosti ho odvozuje z kalendáře sama.
+     Odeslání „píše…“ neověřeno (uvidí ho jen protistrana).
    - 🟡 **Krok 3, okamžité zprávy (2026-11-11, „pokračuj dalším krokem, okamžité zprávy
      přes trouter“):** registrace adresy trouteru v registraru (skypetoken, obnova po
      45 min; server ji přijal, `202`). Oznámení o nové nebo změněné zprávě spustí hned

@@ -162,6 +162,12 @@ pub trait ChatBackend: Send + Sync {
     /// Hledání lidí mimo organizaci podle přesné e-mailové adresy.
     async fn find_external(&self, email: &str) -> Result<Vec<Person>>;
 
+    /// Oznámí ostatním v konverzaci, že uživatel právě píše.
+    async fn typing(&self, conversation: &ConversationId) -> Result<()> {
+        let _ = conversation;
+        Ok(())
+    }
+
     /// Stav (přítomnost) uživatelů. Výchozí = účet stav neposkytuje.
     async fn presence(
         &self,

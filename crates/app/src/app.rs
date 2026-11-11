@@ -291,6 +291,8 @@ pub enum Msg {
     SetStatus(Option<tymy_core::Availability>),
     /// Ruční stav nastaven (nebo ne).
     StatusSet(Result<(), Failure>),
+    /// Oznámení „píše…“ odesláno (nebo ne; chyba se jen zapíše).
+    TypingSent(Result<(), Failure>),
     /// Zjištěná nečinnost uživatele (pro hlášení vlastního stavu).
     Idle(Option<Duration>),
     /// Vlastní stav ohlášen serveru (nebo ne).
@@ -636,6 +638,7 @@ impl Msg {
             ),
             Msg::RealtimeRetry => debug!("update: RealtimeRetry"),
             Msg::Idle(_) => trace!("update: Idle"),
+            Msg::TypingSent(_) => trace!("update: TypingSent"),
             Msg::SetStatus(s) => debug!(status = ?s, "update: SetStatus"),
             Msg::StatusSet(r) => debug!(result = ok(r.is_ok()), "update: StatusSet"),
             Msg::PresencePublished(a, r) => {
@@ -839,6 +842,8 @@ const STATUS_SETTLE: Duration = Duration::from_secs(8);
 const LIVE_REFRESH: Duration = Duration::from_secs(30);
 /// Jak dlouho ukazovat „píše…“ od posledního oznámení (Teams ho opakuje po pár sekundách).
 const TYPING_TTL: Duration = Duration::from_secs(8);
+/// Jak často při psaní opakovat oznámení „píše…“ (web klient ~ po 4 s).
+const TYPING_RESEND: Duration = Duration::from_secs(4);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const MIN_PEOPLE_QUERY: usize = 2;
 
@@ -1018,6 +1023,9 @@ pub struct App {
     messaging_live: bool,
     /// Kdy jsme naposledy spustili obnovu seznamu chatů.
     last_refresh: Option<std::time::Instant>,
+    /// Kde a kdy jsme naposledy oznámili, že píšeme (oznámení se opakuje nejvýš po
+    /// [`TYPING_RESEND`]).
+    typing_sent: Option<(ConversationId, std::time::Instant)>,
     /// Chaty, ve kterých právě někdo píše, a kdy to přišlo naposledy.
     typing: HashMap<ConversationId, std::time::Instant>,
     searching_people: bool,
@@ -1241,6 +1249,7 @@ impl App {
             messaging_live: false,
             last_refresh: None,
             typing: HashMap::new(),
+            typing_sent: None,
             searching_people: false,
             people_note: None,
             draft_chats: vec![],
@@ -1550,6 +1559,32 @@ impl App {
         )
     }
 
+    /// Dá ostatním v otevřeném chatu vědět, že píšu (ne u prázdného pole, ne u nového
+    /// chatu bez vlákna a nejvýš jednou za [`TYPING_RESEND`]).
+    fn announce_typing(&mut self) -> Task<Msg> {
+        let Some(conv) = self.selected.clone() else {
+            return Task::none();
+        };
+        if self.composer.text().trim().is_empty() || self.is_draft(&conv) {
+            return Task::none();
+        }
+        if self
+            .typing_sent
+            .as_ref()
+            .is_some_and(|(c, at)| *c == conv && at.elapsed() < TYPING_RESEND)
+        {
+            return Task::none();
+        }
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        self.typing_sent = Some((conv.clone(), std::time::Instant::now()));
+        Task::perform(
+            async move { backend.typing(&conv).await.map_err(Failure::from) },
+            Msg::TypingSent,
+        )
+    }
+
     /// Načte ze serveru vlastní stav (po `delay`).
     fn load_my_presence(&self, delay: Duration) -> Task<Msg> {
         let Some(session) = self.session() else {
@@ -1644,12 +1679,35 @@ impl App {
             return Task::none();
         };
         let backend = session.backend.clone();
-        let mut users = vec![my_mri(&session.profile)];
+        let me = my_mri(&session.profile);
+        // nejdřív lidé, kteří jsou právě vidět: otevřený chat (členové, odesílatelé)
+        // a výsledky hledání; pak protistrany 1:1 chatů od nejnovějších
+        let open = self.selected.as_ref();
+        let roster = open
+            .and_then(|id| self.rosters.get(id))
+            .into_iter()
+            .flatten()
+            .map(|p| &p.mri);
+        let senders = open
+            .and_then(|id| self.messages.get(id))
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m.sender.as_ref());
+        let found = self.people.iter().map(|p| &p.mri);
+        let mut seen: HashSet<&UserId> = HashSet::from([&me]);
+        let mut users = vec![me.clone()];
+        for u in roster.chain(senders).chain(found) {
+            // jen lidé (ne boti `28:` ani konektory)
+            if users.len() < PRESENCE_WATCH_MAX && u.as_str().starts_with("8:") && seen.insert(u) {
+                users.push(u.clone());
+            }
+        }
+        let seen: HashSet<UserId> = users.iter().cloned().collect();
         for c in &self.conversations {
             if users.len() >= PRESENCE_WATCH_MAX {
                 break;
             }
-            if let Some(peer) = self.peer(c).filter(|p| !users.contains(p))
+            if let Some(peer) = self.peer(c).filter(|p| !seen.contains(p))
                 && self.listed(c)
             {
                 users.push(peer);
@@ -4419,8 +4477,20 @@ impl App {
                 Task::none()
             }
             Msg::Compose(action) => {
+                let edit = action.is_edit();
                 self.composer.perform(action);
-                self.refresh_mention()
+                let typing = if edit {
+                    self.announce_typing()
+                } else {
+                    Task::none()
+                };
+                Task::batch([self.refresh_mention(), typing])
+            }
+            Msg::TypingSent(r) => {
+                if let Err(e) = r {
+                    tracing::debug!(error = %e.text, "oznámení „píše“");
+                }
+                Task::none()
             }
             Msg::WeekShift(delta) => {
                 self.week = if delta == 0 {
@@ -6390,7 +6460,11 @@ impl App {
             } else if self.people.is_empty() {
                 items.push(note("Nikdo nenalezen"));
             }
-            items.extend(self.people.iter().map(person_item));
+            items.extend(
+                self.people
+                    .iter()
+                    .map(|p| person_item(p, self.presence.get(&p.mri))),
+            );
             if let Some(n) = &self.people_note {
                 items.push(note(n));
             } else if !looks_like_email(&self.search) {
@@ -6742,7 +6816,7 @@ impl App {
                 for m in list {
                     members = members.push(
                         row![
-                            avatar(&m.display_name, 28.0),
+                            avatar_with_presence(&m.display_name, 28.0, self.presence.get(&m.mri)),
                             column![
                                 text(m.display_name.clone()).size(13),
                                 text(truncate(&m.subtitle(), 48)).size(11).style(muted),
@@ -7201,6 +7275,7 @@ impl App {
                     highlighted: self.highlight.as_ref() == Some(&m.id),
                     colors,
                     bubble_max,
+                    presence: m.sender.as_ref().and_then(|u| self.presence.get(u)),
                 },
             ));
             prev = Some(m);
@@ -8173,7 +8248,7 @@ fn looks_like_email(q: &str) -> bool {
         .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.') && !q.contains(' '))
 }
 
-fn person_item(p: &Person) -> Element<'_, Msg> {
+fn person_item<'a>(p: &'a Person, presence: Option<&Presence>) -> Element<'a, Msg> {
     let mut title = row![text(truncate(&p.display_name, 24)).size(14).font(SEMIBOLD)]
         .spacing(6)
         .align_y(iced::Alignment::Center);
@@ -8183,7 +8258,7 @@ fn person_item(p: &Person) -> Element<'_, Msg> {
     let subtitle = p.subtitle();
     button(
         row![
-            avatar(&p.display_name, 34.0),
+            avatar_with_presence(&p.display_name, 34.0, presence),
             column![title, text(truncate(&subtitle, 34)).size(12).style(muted)].spacing(2),
         ]
         .spacing(10)
@@ -8232,6 +8307,8 @@ struct MessageUi<'a> {
     colors: style::Colors,
     /// Nejširší bublina (podle šířky okna).
     bubble_max: f32,
+    /// Stav odesílatele (tečka u avataru).
+    presence: Option<&'a Presence>,
 }
 
 /// Prostý text zprávy pro kopírování (bez obrázků; přílohy jako názvy).
@@ -8478,7 +8555,11 @@ fn message_view<'a>(
         row![space().width(MESSAGE_AVATAR + 40.0), col].into()
     } else {
         let side: Element<'a, Msg> = if header {
-            avatar(m.sender_name.as_deref().unwrap_or("?"), MESSAGE_AVATAR)
+            avatar_with_presence(
+                m.sender_name.as_deref().unwrap_or("?"),
+                MESSAGE_AVATAR,
+                ui.presence,
+            )
         } else {
             space().width(MESSAGE_AVATAR).into()
         };

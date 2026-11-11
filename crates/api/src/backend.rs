@@ -187,8 +187,15 @@ impl TeamsBackend {
         Ok((status, text))
     }
 
+    fn endpoints_kind(&self) -> AccountKind {
+        self.profile.kind
+    }
+
     async fn ups_base(&self) -> Result<url::Url> {
         let session = self.session().await?;
+        if let Some(ups) = session.services.ups {
+            return Ok(ups);
+        }
         let mt = session
             .middle_tier
             .as_ref()
@@ -604,8 +611,15 @@ impl ChatBackend for TeamsBackend {
         let mut guard = self.trouter.lock().await;
         if guard.is_none() {
             let token = self.scoped_token(trouter::TROUTER_SCOPE).await?;
+            // adresa pro region účtu z authz; ruční přepis v endpoints.toml má přednost
+            let services = self.session().await?.services;
+            let default = Endpoints::defaults(self.endpoints_kind()).trouter_url;
+            let url = services
+                .trouter
+                .filter(|_| self.endpoints.trouter_url == default)
+                .unwrap_or_else(|| self.endpoints.trouter_url.clone());
             let t = TlsTrouter::connect(
-                &self.endpoints.trouter_url,
+                &url,
                 &token,
                 &self.endpoints.media_client_version,
                 &self.endpoint_id,
@@ -626,9 +640,16 @@ impl ChatBackend for TeamsBackend {
         let age = self.registered_at.lock().await.map(|at| at.elapsed());
         if age.is_none_or(|a| a >= renew) {
             let session = self.session().await?;
+            let default = Endpoints::defaults(self.endpoints_kind()).registrar_url;
+            let registrar_url = session
+                .services
+                .registrar
+                .clone()
+                .filter(|_| self.endpoints.registrar_url == default)
+                .unwrap_or_else(|| self.endpoints.registrar_url.clone());
             match registrar::register(
                 &self.http,
-                &self.endpoints.registrar_url,
+                &registrar_url,
                 &session.token,
                 &t.info.epid,
                 &t.info.surl,
@@ -678,6 +699,11 @@ impl ChatBackend for TeamsBackend {
             availability,
         )
         .await
+    }
+
+    async fn typing(&self, conversation: &ConversationId) -> Result<()> {
+        self.call(|s| async move { chat::send_typing(&self.http, &s, conversation).await })
+            .await
     }
 
     async fn set_status(&self, status: Option<tymy_core::Availability>) -> Result<()> {

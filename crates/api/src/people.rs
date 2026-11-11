@@ -166,6 +166,7 @@ mod tests {
             chat_service: "https://emea.ng.msg.teams.microsoft.com".parse().unwrap(),
             bearer: "b".into(),
             middle_tier: mt.map(|u| u.parse().unwrap()),
+            services: Default::default(),
         }
     }
 

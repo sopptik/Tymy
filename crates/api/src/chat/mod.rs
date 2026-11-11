@@ -171,6 +171,38 @@ pub async fn list_messages_sized(
     Ok(MessagePage { messages, older })
 }
 
+/// Oznámí ostatním v konverzaci, že uživatel píše (`Control/Typing`); server ho
+/// nepřeposílá odesílateli a ostatním ho drží jen pár sekund.
+pub async fn send_typing(
+    http: &Http,
+    session: &SkypeSession,
+    conversation: &ConversationId,
+) -> Result<()> {
+    let url = api_url(
+        session,
+        &[
+            "v1",
+            "users",
+            "ME",
+            "conversations",
+            conversation.as_str(),
+            "messages",
+        ],
+    );
+    let body = json!({
+        "content": "",
+        "contenttype": "Application/Message",
+        "messagetype": "Control/Typing",
+    });
+    let resp = authed(http.client.post(url), session)
+        .json(&body)
+        .send_logged()
+        .await
+        .map_err(net_err)?;
+    check(resp).await?;
+    Ok(())
+}
+
 pub async fn send_html(
     http: &Http,
     session: &SkypeSession,
@@ -585,6 +617,7 @@ mod tests {
             chat_service: Url::parse(base).unwrap(),
             bearer: String::new(),
             middle_tier: None,
+            services: Default::default(),
         }
     }
 

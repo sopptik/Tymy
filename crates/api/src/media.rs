@@ -177,6 +177,7 @@ mod tests {
             chat_service: chat.parse().unwrap(),
             bearer: String::new(),
             middle_tier: None,
+            services: Default::default(),
         }
     }
 
@@ -269,6 +270,7 @@ mod tests {
             chat_service: server.uri().parse().unwrap(),
             bearer: String::new(),
             middle_tier: None,
+            services: Default::default(),
         };
         let url = format!("{}/v1/objects/o1/views/imgo", server.uri());
         assert_eq!(
