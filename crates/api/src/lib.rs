@@ -6,6 +6,7 @@
 pub mod auth;
 mod backend;
 pub mod calendar;
+pub mod calls;
 pub mod chat;
 mod endpoints;
 pub mod graph;

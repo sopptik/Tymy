@@ -11,7 +11,8 @@ mod token;
 
 pub use browser::{BrowserLogin, redeem_code, start_browser_login};
 pub use device_code::{DeviceCode, poll_device_code, refresh, start_device_code};
-pub use skype::{SkypeSession, exchange_for_skype_token};
+pub(crate) use skype::trusted;
+pub use skype::{RegionServices, SkypeSession, exchange_for_skype_token};
 pub use store::{CredentialStore, MemoryStore, SecretServiceStore};
 pub use token::{Claims, TokenSet};
 

@@ -293,6 +293,9 @@ pub enum Msg {
     StatusSet(Result<(), Failure>),
     /// Oznámení „píše…“ odesláno (nebo ne; chyba se jen zapíše).
     TypingSent(Result<(), Failure>),
+    /// Spustit testovací hovor s echo botem (zatím jen signalizace, bez zvuku).
+    TestCall,
+    TestCallDone(Result<tymy_api::calls::ProbeReport, Failure>),
     /// Zjištěná nečinnost uživatele (pro hlášení vlastního stavu).
     Idle(Option<Duration>),
     /// Vlastní stav ohlášen serveru (nebo ne).
@@ -638,6 +641,12 @@ impl Msg {
             ),
             Msg::RealtimeRetry => debug!("update: RealtimeRetry"),
             Msg::Idle(_) => trace!("update: Idle"),
+            Msg::TestCall => debug!("update: TestCall"),
+            Msg::TestCallDone(r) => debug!(
+                result = ok(r.is_ok()),
+                accepted = r.as_ref().is_ok_and(|p| p.accepted),
+                "update: TestCallDone"
+            ),
             Msg::TypingSent(_) => trace!("update: TypingSent"),
             Msg::SetStatus(s) => debug!(status = ?s, "update: SetStatus"),
             Msg::StatusSet(r) => debug!(result = ok(r.is_ok()), "update: StatusSet"),
@@ -844,6 +853,8 @@ const LIVE_REFRESH: Duration = Duration::from_secs(30);
 const TYPING_TTL: Duration = Duration::from_secs(8);
 /// Jak často při psaní opakovat oznámení „píše…“ (web klient ~ po 4 s).
 const TYPING_RESEND: Duration = Duration::from_secs(4);
+/// Jak dlouho testovací hovor čeká na přijetí serverem, než zavěsí.
+const TEST_CALL_LISTEN: Duration = Duration::from_secs(6);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const MIN_PEOPLE_QUERY: usize = 2;
 
@@ -1026,6 +1037,8 @@ pub struct App {
     /// Kde a kdy jsme naposledy oznámili, že píšeme (oznámení se opakuje nejvýš po
     /// [`TYPING_RESEND`]).
     typing_sent: Option<(ConversationId, std::time::Instant)>,
+    /// Běží testovací hovor.
+    test_call: bool,
     /// Chaty, ve kterých právě někdo píše, a kdy to přišlo naposledy.
     typing: HashMap<ConversationId, std::time::Instant>,
     searching_people: bool,
@@ -1250,6 +1263,7 @@ impl App {
             last_refresh: None,
             typing: HashMap::new(),
             typing_sent: None,
+            test_call: false,
             searching_people: false,
             people_note: None,
             draft_chats: vec![],
@@ -3283,6 +3297,50 @@ impl App {
                 }
                 // vlastní tečku hned přečíst ze serveru (může platit ručně nastavený stav)
                 self.load_my_presence(Duration::ZERO)
+            }
+            Msg::TestCall => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                if self.test_call {
+                    return Task::none();
+                }
+                self.test_call = true;
+                self.account_menu = false;
+                Task::batch([
+                    self.show_toast("Testovací hovor: spojuji se službou hovorů…"),
+                    Task::perform(
+                        async move {
+                            backend
+                                .call_probe(TEST_CALL_LISTEN)
+                                .await
+                                .map_err(Failure::from)
+                        },
+                        Msg::TestCallDone,
+                    ),
+                ])
+            }
+            Msg::TestCallDone(r) => {
+                self.test_call = false;
+                match r {
+                    Ok(report) if report.accepted => self.show_toast(
+                        "Testovací hovor: server hovor přijal. Zvuk Tymy zatím nepřenáší.",
+                    ),
+                    Ok(report) => {
+                        tracing::warn!(steps = ?report.steps, "testovací hovor nepřijat");
+                        self.error = Some(format!(
+                            "Testovací hovor se nespojil: {}",
+                            report
+                                .steps
+                                .last()
+                                .map(String::as_str)
+                                .unwrap_or("bez odpovědi")
+                        ));
+                        self.error_heals = false;
+                        Task::none()
+                    }
+                    Err(e) => self.fail(e),
+                }
             }
             Msg::SetStatus(status) => {
                 self.account_menu = false;
@@ -5656,6 +5714,20 @@ impl App {
                 .width(Length::Fill)
                 .style(|t: &Theme, st| style::list_item(t, st, false))
                 .on_press(Msg::AddAccount),
+        );
+        col = col.push(
+            button(
+                text(if self.test_call {
+                    "Testovací hovor probíhá…"
+                } else {
+                    "Testovací hovor (zatím bez zvuku)"
+                })
+                .size(13),
+            )
+            .padding([7, 10])
+            .width(Length::Fill)
+            .style(|t: &Theme, st| style::list_item(t, st, false))
+            .on_press_maybe((!self.test_call).then_some(Msg::TestCall)),
         );
         col = col.push(
             button(

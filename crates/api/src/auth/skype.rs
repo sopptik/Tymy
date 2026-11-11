@@ -38,7 +38,7 @@ pub struct RegionServices {
 }
 
 /// `https` adresa na doméně Microsoftu?
-fn trusted(u: &Url) -> bool {
+pub(crate) fn trusted(u: &Url) -> bool {
     const DOMAINS: [&str; 4] = ["microsoft.com", "cloud.microsoft", "skype.com", "live.com"];
     u.scheme() == "https"
         && u.host_str().is_some_and(|h| {

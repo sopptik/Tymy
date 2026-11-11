@@ -83,6 +83,12 @@ enum Command {
         #[arg(long)]
         reset: bool,
     },
+    /// Zkouška signalizace hovoru: testovací hovor s echo botem bez médií (nikoho neruší).
+    CallProbe {
+        /// Kolik sekund čekat na události hovoru před zavěšením.
+        #[arg(long, default_value_t = 8)]
+        listen: u64,
+    },
     /// Ladění: požadavek na službu přítomnosti (`ups`), vypíše stav a tělo odpovědi.
     Ups {
         /// GET, PUT, POST, DELETE.
@@ -294,6 +300,22 @@ async fn main() -> Result<()> {
                     p.activity
                 );
             }
+            Ok(())
+        }
+        Command::CallProbe { listen } => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let report = backend.call_probe(Duration::from_secs(listen)).await?;
+            for line in &report.steps {
+                println!("{line}");
+            }
+            println!(
+                "Výsledek: {}",
+                if report.accepted {
+                    "server hovor přijal (signalizace funguje)"
+                } else {
+                    "server hovor nepřijal"
+                }
+            );
             Ok(())
         }
         Command::Ups {

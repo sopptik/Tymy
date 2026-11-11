@@ -108,8 +108,8 @@ fn header<'a>(headers: &'a Value, name: &str) -> Option<&'a str> {
         .and_then(|(_, v)| v.as_str())
 }
 
-/// Odpověď 200 na doručený požadavek.
-fn response_frame(req: &Value) -> String {
+/// Odpověď 200 na doručený požadavek (s tělem, pokud ho protistrana čeká).
+fn response_frame(req: &Value, reply: Option<&str>) -> String {
     let headers = req.get("headers").unwrap_or(&Value::Null);
     let mut out = json!({ "trouter-client": "{\"cd\": 0}" });
     if let Some(cv) = header(headers, "MS-CV") {
@@ -118,11 +118,19 @@ fn response_frame(req: &Value) -> String {
     if let Some(tr) = header(headers, "trouter-request") {
         out["trouter-request"] = json!(tr);
     }
+    // odpověď s tělem (potvrzení přijetí hovoru) nese i identifikaci hovoru a zprávy
+    if reply.is_some() {
+        for name in ["X-Microsoft-Skype-Chain-ID", "X-Microsoft-Skype-Message-ID"] {
+            if let Some(v) = header(headers, name) {
+                out[name] = json!(v);
+            }
+        }
+    }
     let body = json!({
         "id": req.get("id").cloned().unwrap_or(Value::Null),
         "status": 200,
         "headers": out,
-        "body": "",
+        "body": reply.unwrap_or(""),
     });
     format!("3:::{body}")
 }
@@ -184,7 +192,12 @@ pub struct Trouter<S> {
     ws: WebSocketStream<S>,
     seq: u64,
     pub info: Info,
+    /// Tělo odpovědi pro požadavky, které ho vyžadují (např. přijetí hovoru).
+    responder: Option<Responder>,
 }
+
+/// Vrátí tělo odpovědi na doručený požadavek, nebo `None` pro prázdné.
+pub type Responder = Box<dyn Fn(&Delivery) -> Option<String> + Send + Sync>;
 
 pub type TlsTrouter = Trouter<tokio_rustls::client::TlsStream<TcpStream>>;
 
@@ -258,6 +271,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Trouter<S> {
         let mut t = Self {
             ws,
             seq: 0,
+            responder: None,
             info: Info {
                 surl: String::new(),
                 epid,
@@ -279,6 +293,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Trouter<S> {
                 _ => {}
             }
         }
+    }
+
+    /// Nastaví, čím odpovídat na požadavky, které čekají tělo.
+    pub fn set_responder(&mut self, responder: Responder) {
+        self.responder = Some(responder);
     }
 
     async fn send(&mut self, text: String) -> Result<()> {
@@ -316,8 +335,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Trouter<S> {
         loop {
             match self.read().await? {
                 Frame::Request(req) => {
-                    self.send(response_frame(&req)).await?;
-                    match delivery(&req) {
+                    let d = delivery(&req);
+                    let reply = d
+                        .as_ref()
+                        .zip(self.responder.as_ref())
+                        .and_then(|(d, respond)| respond(d));
+                    self.send(response_frame(&req, reply.as_deref())).await?;
+                    match d {
                         Some(d) => return Ok(d),
                         None => tracing::warn!("trouter: nečitelný požadavek"),
                     }
@@ -376,7 +400,12 @@ mod tests {
         assert_eq!(v["args"][0]["headers"]["Authorization"], "Bearer tok");
         let req = json!({"id": 42, "url": "/v4/f/abc/x", "headers": {
             "MS-CV": "cv.1", "trouter-request": "{\"id\":\"r\"}"}, "body": ""});
-        let resp: Value = serde_json::from_str(&response_frame(&req)[4..]).unwrap();
+        let resp: Value = serde_json::from_str(&response_frame(&req, None)[4..]).unwrap();
+        let with_body = response_frame(&req, Some("{\"a\":1}"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&with_body[4..]).unwrap()["body"],
+            "{\"a\":1}"
+        );
         assert_eq!(resp["id"], 42);
         assert_eq!(resp["status"], 200);
         assert_eq!(resp["headers"]["MS-CV"], "cv.1.0");

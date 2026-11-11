@@ -187,6 +187,193 @@ impl TeamsBackend {
         Ok((status, text))
     }
 
+    /// Zkouška signalizace hovoru: testovací hovor s echo botem bez médií. Otevře vlastní
+    /// spojení trouteru, založí hovor, `listen` čeká na události (přijetí serverem
+    /// s odpovědí SDP, účastníci) a zavěsí. Vrací popis jednotlivých kroků.
+    pub async fn call_probe(
+        &self,
+        listen: std::time::Duration,
+    ) -> Result<crate::calls::ProbeReport> {
+        use crate::calls::{self, Callbacks, Caller, ProbeReport};
+        let mut log = vec![];
+        let mut accepted = false;
+        let session = self.session().await?;
+        let ic3 = self.scoped_token(trouter::TROUTER_SCOPE).await?;
+        let trouter_url = session
+            .services
+            .trouter
+            .clone()
+            .unwrap_or_else(|| self.endpoints.trouter_url.clone());
+        let epid = uuid::Uuid::new_v4().to_string();
+        let mut t = TlsTrouter::connect(
+            &trouter_url,
+            &ic3,
+            &self.endpoints.media_client_version,
+            &epid,
+        )
+        .await?;
+        log.push("trouter pro hovor připojen".to_owned());
+        let cb = Callbacks::new(&t.info.surl);
+        let ack = calls::acceptance_ack(&cb).to_string();
+        t.set_responder(Box::new(move |d| {
+            (calls::event_name(&d.path).as_deref() == Some("call/acceptance")).then(|| ack.clone())
+        }));
+        let me = tymy_core::UserId(format!("8:orgid:{}", self.profile.account_id));
+        let caller = Caller {
+            mri: me,
+            display_name: self.profile.display_name.clone().unwrap_or_default(),
+            endpoint_id: epid,
+            participant_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let client = format!(
+            "SkypeSpaces/{}/os=linux; osVer=undefined; deviceType=computer; browser=chrome",
+            self.endpoints.media_client_version
+        );
+        let chain = uuid::Uuid::new_v4().to_string();
+        // autorizaci služby hovorů záznam neobsahoval: zkusit známé kombinace
+        let auths: [(&str, Option<&str>, bool); 3] = [
+            ("skypetoken", None, true),
+            (
+                "Bearer (spaces) + skypetoken",
+                Some(session.bearer.as_str()),
+                true,
+            ),
+            ("Bearer (ic3)", Some(ic3.as_str()), false),
+        ];
+        let send = |url: url::Url,
+                    body: serde_json::Value,
+                    auth: (&str, Option<&str>, bool),
+                    put: bool| {
+            let mut rb = if put {
+                self.http.client.put(url)
+            } else {
+                self.http.client.post(url)
+            };
+            rb = rb
+                .header("x-microsoft-skype-chain-id", &chain)
+                .header(
+                    "x-microsoft-skype-message-id",
+                    uuid::Uuid::new_v4().to_string(),
+                )
+                .header("x-microsoft-skype-client", &client)
+                .header("x-ms-migration", "True")
+                .json(&body);
+            if let Some(b) = auth.1 {
+                rb = rb.bearer_auth(b);
+            }
+            if auth.2 {
+                rb = rb.header("X-Skypetoken", &session.token);
+            }
+            async move {
+                let resp = rb.send().await.map_err(|e| Error::Network(e.to_string()))?;
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                Ok::<_, Error>((status, text))
+            }
+        };
+        let service = session
+            .services
+            .call_service
+            .clone()
+            .unwrap_or_else(|| calls::DEFAULT_CALL_SERVICE.to_owned());
+        let service = url::Url::parse(&service).map_err(|e| Error::Other(e.to_string()))?;
+        let sdp = calls::probe_offer();
+        let body = calls::conversation_body(&caller, &cb, &sdp, &client);
+        let mut created = None;
+        for auth in auths {
+            let (status, text) = send(service.clone(), body.clone(), auth, false).await?;
+            log.push(format!("založení hovoru [{}]: HTTP {status}", auth.0));
+            if (200..300).contains(&status) {
+                created = Some((auth, text));
+                break;
+            }
+            log.push(format!(
+                "  odpověď: {}",
+                text.chars().take(300).collect::<String>()
+            ));
+        }
+        let Some((auth, text)) = created else {
+            return Ok(ProbeReport {
+                steps: log,
+                accepted,
+            });
+        };
+        let conv: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| Error::Protocol(e.to_string()))?;
+        if let Some(kind) = conv
+            .pointer("/state/conversationType")
+            .and_then(|v| v.as_str())
+        {
+            log.push(format!("  konverzace typu {kind}"));
+        }
+        let leave = calls::link(&conv, "/links/leave")?;
+        // od této chvíle hovor existuje: ať se stane cokoli, na konci zavěsit
+        let rest = async {
+            let add = calls::link(&conv, "/links/addParticipant")?;
+            let bot = calls::ECHO_BOT.trim_start_matches("28:");
+            let thread = format!("19:{}_{bot}@unq.gbl.spaces", self.profile.account_id);
+            let body = calls::add_body(&caller, &cb, calls::ECHO_BOT, &thread);
+            let (status, text) = send(add, body, auth, false).await?;
+            log.push(format!("pozvání echo bota: HTTP {status}"));
+            if !(200..300).contains(&status) {
+                log.push(format!(
+                    "  odpověď: {}",
+                    text.chars().take(300).collect::<String>()
+                ));
+            }
+            let until = tokio::time::Instant::now() + listen;
+            while let Ok(next) = tokio::time::timeout_at(until, t.next()).await {
+                let d = next?;
+                let name = calls::event_name(&d.path).unwrap_or_else(|| d.path.clone());
+                let v: serde_json::Value = serde_json::from_str(&d.body).unwrap_or_default();
+                let detail = match name.as_str() {
+                    "call/acceptance" => v
+                        .pointer("/callAcceptance/mediaContent/blob")
+                        .and_then(|b| b.as_str())
+                        .map(|sdp| {
+                            accepted = true;
+                            format!("odpověď SDP: {}", calls::describe_sdp(sdp))
+                        })
+                        .unwrap_or_else(|| "bez SDP".into()),
+                    "call/end" | "conversation/conversationEnd" => format!(
+                        "{} {}",
+                        v.pointer("/callEnd/phrase")
+                            .or_else(|| v.pointer("/conversationEnd/phrase"))
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("?"),
+                        v.pointer("/callEnd/code")
+                            .or_else(|| v.pointer("/conversationEnd/code"))
+                            .map(|c| c.to_string())
+                            .unwrap_or_default()
+                    ),
+                    "conversation/rosterUpdate" => {
+                        let n = v
+                            .get("participants")
+                            .and_then(|p| p.as_object())
+                            .map(|p| p.len())
+                            .unwrap_or(0);
+                        format!("účastníků ve změně: {n}")
+                    }
+                    "conversation/addParticipantSuccess" => "protistrana připojena".into(),
+                    "conversation/addParticipantFailure" | "call/redirection" => {
+                        d.body.chars().take(300).collect()
+                    }
+                    _ => String::new(),
+                };
+                log.push(format!("událost {name} {detail}").trim_end().to_owned());
+            }
+            Ok::<_, Error>(())
+        }
+        .await;
+        let (status, _) = send(leave, calls::leave_body(&caller), auth, false).await?;
+        log.push(format!("zavěšení: HTTP {status}"));
+        rest?;
+        Ok(ProbeReport {
+            steps: log,
+            accepted,
+        })
+    }
+
     fn endpoints_kind(&self) -> AccountKind {
         self.profile.kind
     }

@@ -331,6 +331,16 @@ samostatného commitu“)
    Signalizace je tím popsaná celá; neznámá zůstává autorizace (záznam opět sanitized,
    vyzkouší se) a kompatibilita médií: SDP je dialekt Microsoftu (`RTP/SAVP`, `x-data`,
    `x-ssrc-range`), `webrtc-rs` ho bez úprav nevezme.
+   ✅ **Zkouška signalizace (2026-11-11, „započal bod 3 ale nechci hovory otevírat
+   v prohlížeči, jen signalizace“):** `tymy-cli call-probe` a položka „Testovací hovor
+   (zatím bez zvuku)“ v nabídce profilu (přání uživatele: „ten testovací echo hovor by měl
+   být taky dostupný“) založí hovor s echo botem, počká na přijetí serverem (odpověď SDP
+   s relay kandidáty) a zavěsí. Ověřeno naživo: autorizace skypetokenem, celý průběh
+   bez prohlížeče. Média se nepřenáší (syntetická nabídka SDP). Hovory se v prohlížeči
+   otevírat nebudou (rozhodnutí uživatele); záloha „otevřít v prohlížeči“ z bodu 3 padá.
+   Další kroky: (a) příchozí hovor: registrace `SkypeSpacesWeb` + HAR příchozího hovoru,
+   zvonění a přijetí/odmítnutí; (b) média: ICE přes relay (`trap/tokens`), DTLS-SRTP,
+   opus, tedy skutečný zvuk s echo botem; (c) 1:1 hovor s člověkem.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

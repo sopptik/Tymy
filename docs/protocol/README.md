@@ -440,8 +440,25 @@ Přihlašovací údaje k relay (TURN): `GET https://teams.microsoft.com/trap/tok
 (`api-version: 2`) → `{"tokens": [{"realm": "\"rtcmedia\"", "username", "password"}], "expires": 604800}`.
 Po spojení přijde do chatu zpráva `messagetype: Event/Call` (`properties.s2spartnername: concore_gvc`).
 
-Zbývá zjistit: autorizaci flightproxy, registraru a `trap/tokens` (záznam je opět
-„sanitized“; půjde vyzkoušet s tokenem `ic3.teams.office.com` nebo skypetokenem) a jak
+**Zkouška signalizace (✅ 2026-11-11, `tymy-cli call-probe`, `crates/api/src/calls.rs`):**
+testovací hovor s echo botem bez médií proti produkci.
+- Autorizace flightproxy (`epconv`, `add`, `leave`): stačí hlavička `X-Skypetoken`
+  (+ `x-microsoft-skype-chain-id`, `-message-id`, `-client`). Adresa služby je v authz
+  odpovědi (`regionGtms.calling_conversationServiceUrl`).
+- Stačí zkrácené tělo `epconv` (viz `conversation_body`) a nabídka SDP jen se zvukem
+  (jeden m-řádek, `callModalities: ["Audio"]`): `201`, konverzace `adHocMeeting`,
+  `add` echo bota `202`, do ~1 s `call/acceptance` s odpovědí SDP (32 řádků, 1× audio,
+  4 relay kandidáti, `setup:passive`), `leave` `204`.
+- Nabídka s portem 9 a adresou `0.0.0.0` = „vypnutá média“: server hovor ukončí
+  (`call/end` 410 `DisabledMediaNotSupported`) a `add` pak vrátí `404` (subCode 5152).
+  Náhodné ICE údaje a otisk certifikátu serveru nevadí, dokud se média nenavazují.
+- Otevřené: `call/acceptance` přijde dvakrát (server nejspíš nepovažuje potvrzení
+  `callAcceptanceAcknowledgement` za doručené) a bez navázaných médií nepřijdou
+  `rosterUpdate` ani `addParticipantSuccess`.
+- Příchozí hovor zatím nezachycen: je potřeba registrace `SkypeSpacesWeb` v registraru
+  a HAR s příchozím hovorem (tvar oznámení neznáme).
+
+Zbývá zjistit: autorizaci `trap/tokens` a jak
 klient posílá vlastní ICE kandidáty (v HTTP ani v trouteru nejsou; nejspíš stačí kandidáti
 serveru + STUN/TURN vazby).
 
