@@ -374,8 +374,14 @@ samostatného commitu“)
    Úpravy SDP, které server vyžaduje, jsou v `docs/protocol/README.md` § 9.
    K sestavení je potřeba `libgstreamer-plugins-bad1.0-dev`, ke spuštění plugin
    `gstreamer1.0-nice` (oba zatím chybí; ověřeno s lokálně rozbalenými kopiemi, CI je
-   instaluje). Další: okno hovoru (přijetí v liště, ztlumení, zavěšení, testovací hovor
-   se zvukem), pak video.
+   instaluje).
+
+   🟡 **Hovory v okně (2026-11-20):** lišta příchozího hovoru i notifikace mají tlačítko
+   **Přijmout** (mikrofon a reproduktor přes PipeWire). Při probíhajícím hovoru je nahoře
+   lišta s délkou hovoru a tlačítky **Ztlumit** a **Zavěsit**. Konec hovoru u protistrany
+   ji schová. „Testovací hovor“ v nabídce profilu teď volá echo bota se zvukem:
+   hláška, nahrání a přehrání vlastního hlasu. Ověří uživatel: testovací hovor z okna
+   a přijetí skutečného hovoru. Další: hovor s člověkem z hlavičky 1:1 chatu, video.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

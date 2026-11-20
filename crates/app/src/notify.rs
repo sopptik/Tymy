@@ -34,6 +34,7 @@ pub async fn show(title: String, body: String) -> bool {
 pub enum CallChoice {
     /// Klik na notifikaci: ukázat okno.
     Show,
+    Accept,
     Reject,
     /// Zavřeno nebo vypršelo.
     Dismissed,
@@ -51,6 +52,7 @@ pub async fn incoming_call(title: String, body: String, seconds: u32) -> CallCho
             .hint(Hint::SoundName("phone-incoming-call".into()))
             .timeout(Timeout::Milliseconds(seconds * 1000))
             .action("default", "Zobrazit")
+            .action("accept", "Přijmout")
             .action("reject", "Odmítnout")
             .show();
         match handle {
@@ -59,6 +61,7 @@ pub async fn incoming_call(title: String, body: String, seconds: u32) -> CallCho
                 h.wait_for_action(|action| {
                     choice = match action {
                         "default" => CallChoice::Show,
+                        "accept" => CallChoice::Accept,
                         "reject" => CallChoice::Reject,
                         _ => CallChoice::Dismissed,
                     }

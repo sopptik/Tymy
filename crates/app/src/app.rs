@@ -94,6 +94,30 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+/// Probíhající hovor v okně.
+#[derive(Debug)]
+struct Call {
+    /// `None`, dokud se odchozí hovor zakládá.
+    id: Option<String>,
+    title: String,
+    /// `None`, dokud se média připravují.
+    media: Option<Arc<tymy_media::GstMedia>>,
+    /// Od kdy jsme spojení (pro délku hovoru).
+    since: Option<std::time::Instant>,
+    muted: bool,
+}
+
+/// Média hovoru: mikrofon a reproduktor, relay servery Teams.
+async fn call_media(backend: Arc<TeamsBackend>) -> tymy_core::Result<Arc<tymy_media::GstMedia>> {
+    let turn = backend.turn_credentials().await?.urls();
+    let media = tymy_media::GstMedia::new(tymy_media::Config {
+        turn,
+        source: tymy_media::Source::Microphone,
+        sink: tymy_media::Sink::Speaker,
+    })?;
+    Ok(Arc::new(media))
+}
+
 #[derive(Clone)]
 pub struct Session {
     profile: Profile,
@@ -301,8 +325,16 @@ pub enum Msg {
     /// Uživatel klikl v notifikaci hovoru (id hovoru, volba).
     CallNotification(String, notify::CallChoice),
     /// Spustit testovací hovor s echo botem (zatím jen signalizace, bez zvuku).
+    /// Zkušební hovor s echo botem (se zvukem).
     TestCall,
-    TestCallDone(Result<tymy_api::calls::ProbeReport, Failure>),
+    AcceptCall(String),
+    CallAccepted(String, Result<Arc<tymy_media::GstMedia>, Failure>),
+    CallStarted(Result<(String, Arc<tymy_media::GstMedia>), Failure>),
+    ToggleMute,
+    HangUp,
+    HungUp(Result<(), Failure>),
+    /// Každou sekundu během hovoru (délka hovoru v liště).
+    CallTick,
     /// Zjištěná nečinnost uživatele (pro hlášení vlastního stavu).
     Idle(Option<Duration>),
     /// Vlastní stav ohlášen serveru (nebo ne).
@@ -653,11 +685,13 @@ impl Msg {
             Msg::DismissCall(_) => debug!("update: DismissCall"),
             Msg::CallNotification(_, c) => debug!(choice = ?c, "update: CallNotification"),
             Msg::TestCall => debug!("update: TestCall"),
-            Msg::TestCallDone(r) => debug!(
-                result = ok(r.is_ok()),
-                accepted = r.as_ref().is_ok_and(|p| p.accepted),
-                "update: TestCallDone"
-            ),
+            Msg::AcceptCall(_) => debug!("update: AcceptCall"),
+            Msg::CallAccepted(_, r) => debug!(result = ok(r.is_ok()), "update: CallAccepted"),
+            Msg::CallStarted(r) => debug!(result = ok(r.is_ok()), "update: CallStarted"),
+            Msg::ToggleMute => debug!("update: ToggleMute"),
+            Msg::HangUp => debug!("update: HangUp"),
+            Msg::HungUp(r) => debug!(result = ok(r.is_ok()), "update: HungUp"),
+            Msg::CallTick => trace!("update: CallTick"),
             Msg::TypingSent(_) => trace!("update: TypingSent"),
             Msg::SetStatus(s) => debug!(status = ?s, "update: SetStatus"),
             Msg::StatusSet(r) => debug!(result = ok(r.is_ok()), "update: StatusSet"),
@@ -867,7 +901,6 @@ const TYPING_RESEND: Duration = Duration::from_secs(4);
 /// Jak dlouho testovací hovor čeká na přijetí serverem, než zavěsí.
 /// Jak dlouho zvoní příchozí hovor v okně (server ho obvykle ukončí dřív).
 const RING_TIMEOUT: Duration = Duration::from_secs(60);
-const TEST_CALL_LISTEN: Duration = Duration::from_secs(6);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const MIN_PEOPLE_QUERY: usize = 2;
 
@@ -1053,7 +1086,8 @@ pub struct App {
     /// [`TYPING_RESEND`]).
     typing_sent: Option<(ConversationId, std::time::Instant)>,
     /// Běží testovací hovor.
-    test_call: bool,
+    /// Probíhající hovor (najednou jen jeden).
+    call: Option<Call>,
     /// Příchozí hovor, který právě zvoní.
     incoming: Option<tymy_core::IncomingCall>,
     /// Chaty, ve kterých právě někdo píše, a kdy to přišlo naposledy.
@@ -1281,7 +1315,7 @@ impl App {
             last_refresh: None,
             typing: HashMap::new(),
             typing_sent: None,
-            test_call: false,
+            call: None,
             incoming: None,
             searching_people: false,
             people_note: None,
@@ -1481,6 +1515,11 @@ impl App {
             Phase::Ready(_) => Subscription::batch(always.into_iter().chain([
                 iced::time::every(REFRESH).map(|_| Msg::Tick),
                 iced::time::every(CALENDAR_TICK).map(|_| Msg::CalendarTick),
+                if self.call.as_ref().is_some_and(|c| c.since.is_some()) {
+                    iced::time::every(Duration::from_secs(1)).map(|_| Msg::CallTick)
+                } else {
+                    Subscription::none()
+                },
                 if self.accounts.len() > 1 {
                     iced::time::every(OTHERS_REFRESH).map(|_| Msg::PollOthers)
                 } else {
@@ -3130,6 +3169,49 @@ impl App {
     }
 
     /// Zobrazí okno (i skryté v liště) a dá mu fokus.
+    /// Změna stavu probíhajícího hovoru (ze serveru).
+    fn on_call_state(&mut self, call_id: &str, state: tymy_core::CallState) -> Option<Task<Msg>> {
+        let c = self
+            .call
+            .as_mut()
+            .filter(|c| c.id.as_deref() == Some(call_id))?;
+        match state {
+            tymy_core::CallState::Connected => {
+                c.since.get_or_insert_with(std::time::Instant::now);
+                None
+            }
+            tymy_core::CallState::Ringing => None,
+            tymy_core::CallState::Ended { reason } => {
+                tracing::info!(reason, "hovor skončil");
+                if let Some(m) = &c.media {
+                    m.stop();
+                }
+                self.call = None;
+                Some(self.show_toast("Hovor skončil"))
+            }
+        }
+    }
+
+    fn hang_up_in_background(&self, call_id: String) -> Task<Msg> {
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        Task::perform(
+            async move { backend.hang_up(&call_id).await.map_err(Failure::from) },
+            Msg::HungUp,
+        )
+    }
+
+    fn call_failed(&mut self, what: &str, e: Failure) -> Task<Msg> {
+        if e.reauth {
+            return self.fail(e);
+        }
+        tracing::warn!(error = %e.text, what, "hovor");
+        self.error = Some(format!("{what}: {}", e.text));
+        self.error_heals = false;
+        Task::none()
+    }
+
     /// Příchozí hovor: lišta v okně, notifikace se zvoněním a po [`RING_TIMEOUT`] lištu skrýt.
     fn ring(&mut self, call: tymy_core::IncomingCall) -> Task<Msg> {
         let who = call
@@ -3147,12 +3229,7 @@ impl App {
         let notify_id = id.clone();
         Task::batch([
             Task::perform(
-                notify::incoming_call(
-                    title,
-                    "Tymy zatím neumí hovor přijmout: přijměte ho na jiném zařízení, nebo odmítněte."
-                        .into(),
-                    secs,
-                ),
+                notify::incoming_call(title, "Hlasový hovor".into(), secs),
                 move |choice| Msg::CallNotification(notify_id.clone(), choice),
             ),
             Task::perform(tokio::time::sleep(RING_TIMEOUT), move |_| {
@@ -3378,8 +3455,11 @@ impl App {
                                 }
                             }
                         }
-                        // probíhající hovor zatím okno nezobrazuje (média přijdou s GStreamerem)
-                        Event::CallState { .. } => {}
+                        Event::CallState { call_id, state } => {
+                            if let Some(t) = self.on_call_state(&call_id, state) {
+                                ring_tasks.push(t);
+                            }
+                        }
                         Event::Unknown { .. } => {}
                     }
                 }
@@ -3469,6 +3549,10 @@ impl App {
             }
             Msg::CallNotification(call_id, choice) => match choice {
                 notify::CallChoice::Reject => self.update(Msg::RejectCall(call_id)),
+                notify::CallChoice::Accept => {
+                    let show = self.show_window();
+                    Task::batch([show, self.update(Msg::AcceptCall(call_id))])
+                }
                 notify::CallChoice::Show => self.show_window(),
                 notify::CallChoice::Dismissed => Task::none(),
             },
@@ -3476,46 +3560,134 @@ impl App {
                 let Some(backend) = self.session().map(|s| s.backend.clone()) else {
                     return Task::none();
                 };
-                if self.test_call {
+                if self.call.is_some() {
                     return Task::none();
                 }
-                self.test_call = true;
                 self.account_menu = false;
-                Task::batch([
-                    self.show_toast("Testovací hovor: spojuji se službou hovorů…"),
-                    Task::perform(
-                        async move {
-                            backend
-                                .call_probe(TEST_CALL_LISTEN)
-                                .await
-                                .map_err(Failure::from)
-                        },
-                        Msg::TestCallDone,
-                    ),
-                ])
+                self.call = Some(Call {
+                    id: None,
+                    title: "Testovací hovor".into(),
+                    media: None,
+                    since: None,
+                    muted: false,
+                });
+                Task::perform(
+                    async move {
+                        let media = call_media(backend.clone()).await?;
+                        let id = backend
+                            .start_call(tymy_core::CallTarget::EchoBot, media.clone())
+                            .await?;
+                        Ok((id, media))
+                    },
+                    |r: tymy_core::Result<_>| Msg::CallStarted(r.map_err(Failure::from)),
+                )
             }
-            Msg::TestCallDone(r) => {
-                self.test_call = false;
-                match r {
-                    Ok(report) if report.accepted => self.show_toast(
-                        "Testovací hovor: server hovor přijal. Zvuk Tymy zatím nepřenáší.",
-                    ),
-                    Ok(report) => {
-                        tracing::warn!(steps = ?report.steps, "testovací hovor nepřijat");
-                        self.error = Some(format!(
-                            "Testovací hovor se nespojil: {}",
-                            report
-                                .steps
-                                .last()
-                                .map(String::as_str)
-                                .unwrap_or("bez odpovědi")
-                        ));
-                        self.error_heals = false;
+            Msg::CallStarted(r) => match r {
+                Ok((id, media)) => match self.call.as_mut().filter(|c| c.id.is_none()) {
+                    Some(c) => {
+                        c.id = Some(id);
+                        c.media = Some(media);
                         Task::none()
                     }
-                    Err(e) => self.fail(e),
+                    // zavěšeno ještě během zakládání
+                    None => {
+                        media.stop();
+                        self.hang_up_in_background(id)
+                    }
+                },
+                Err(e) => {
+                    self.call = None;
+                    self.call_failed("Hovor se nepodařilo zahájit", e)
+                }
+            },
+            Msg::AcceptCall(call_id) => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                if self.call.is_some() {
+                    return self.show_toast("Už probíhá jiný hovor");
+                }
+                let Some(incoming) = self.incoming.take().filter(|c| c.call_id == call_id) else {
+                    return self.show_toast("Hovor už nezvoní");
+                };
+                self.call = Some(Call {
+                    id: Some(call_id.clone()),
+                    title: incoming
+                        .from_name
+                        .clone()
+                        .unwrap_or_else(|| "Neznámý volající".into()),
+                    media: None,
+                    since: None,
+                    muted: false,
+                });
+                Task::perform(
+                    {
+                        let call_id = call_id.clone();
+                        async move {
+                            let media = call_media(backend.clone()).await?;
+                            backend.accept_call(&call_id, media.clone()).await?;
+                            Ok(media)
+                        }
+                    },
+                    move |r: tymy_core::Result<_>| {
+                        Msg::CallAccepted(call_id.clone(), r.map_err(Failure::from))
+                    },
+                )
+            }
+            Msg::CallAccepted(call_id, r) => {
+                let ours = self
+                    .call
+                    .as_ref()
+                    .is_some_and(|c| c.id.as_deref() == Some(call_id.as_str()));
+                match r {
+                    Ok(media) if ours => {
+                        let c = self.call.as_mut().expect("ověřeno výše");
+                        c.media = Some(media);
+                        c.since = Some(std::time::Instant::now());
+                        Task::none()
+                    }
+                    // zavěšeno ještě během přijímání
+                    Ok(media) => {
+                        media.stop();
+                        self.hang_up_in_background(call_id)
+                    }
+                    Err(e) => {
+                        if ours {
+                            self.call = None;
+                        }
+                        self.call_failed("Hovor se nepodařilo přijmout", e)
+                    }
                 }
             }
+            Msg::ToggleMute => {
+                if let Some(c) = self.call.as_mut() {
+                    c.muted = !c.muted;
+                    if let Some(m) = &c.media {
+                        m.set_muted(c.muted);
+                    }
+                }
+                Task::none()
+            }
+            Msg::HangUp => {
+                let Some(c) = self.call.take() else {
+                    return Task::none();
+                };
+                if let Some(m) = &c.media {
+                    m.stop();
+                }
+                // bez id se hovor teprve zakládá: zavěsí se, až založení doběhne
+                match c.id {
+                    Some(id) => self.hang_up_in_background(id),
+                    None => Task::none(),
+                }
+            }
+            Msg::HungUp(r) => {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e.text, "zavěšení hovoru");
+                }
+                Task::none()
+            }
+            Msg::CallTick => Task::none(),
             Msg::SetStatus(status) => {
                 self.account_menu = false;
                 let Some(backend) = self.session().map(|s| s.backend.clone()) else {
@@ -5683,7 +5855,11 @@ impl App {
             None => body,
         };
         let body = match &self.incoming {
-            Some(call) => column![call_banner(call), body].into(),
+            Some(call) => column![call_banner(call, self.call.is_none()), body].into(),
+            None => body,
+        };
+        let body = match &self.call {
+            Some(call) => column![active_call_bar(call), body].into(),
             None => body,
         };
         container(body)
@@ -5900,17 +6076,17 @@ impl App {
         );
         col = col.push(
             button(
-                text(if self.test_call {
-                    "Testovací hovor probíhá…"
+                text(if self.call.is_some() {
+                    "Probíhá hovor…"
                 } else {
-                    "Testovací hovor (zatím bez zvuku)"
+                    "Testovací hovor"
                 })
                 .size(13),
             )
             .padding([7, 10])
             .width(Length::Fill)
             .style(|t: &Theme, st| style::list_item(t, st, false))
-            .on_press_maybe((!self.test_call).then_some(Msg::TestCall)),
+            .on_press_maybe(self.call.is_none().then_some(Msg::TestCall)),
         );
         col = col.push(
             button(
@@ -9205,8 +9381,8 @@ fn centered<'a>(content: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
         .into()
 }
 
-/// Lišta příchozího hovoru: kdo volá, Odmítnout, Skrýt.
-fn call_banner(call: &tymy_core::IncomingCall) -> Element<'_, Msg> {
+/// Lišta příchozího hovoru: kdo volá, Přijmout (jen bez jiného hovoru), Odmítnout, Skrýt.
+fn call_banner(call: &tymy_core::IncomingCall, can_accept: bool) -> Element<'_, Msg> {
     let who = call.from_name.as_deref().unwrap_or("Neznámý volající");
     let title = if call.group {
         format!("{who} vás zve do skupinového hovoru")
@@ -9218,12 +9394,20 @@ fn call_banner(call: &tymy_core::IncomingCall) -> Element<'_, Msg> {
             text("📞").size(16).font(style::EMOJI),
             column![
                 text(title).size(14).font(BOLD),
-                text("Přijmout lze zatím jen na jiném zařízení.")
-                    .size(12)
-                    .style(muted),
+                text(if can_accept {
+                    "Hlasový hovor"
+                } else {
+                    "Probíhá jiný hovor"
+                })
+                .size(12)
+                .style(muted),
             ]
             .spacing(2),
             space::horizontal(),
+            button(text("Přijmout").size(13))
+                .padding([6, 14])
+                .style(style::primary)
+                .on_press_maybe(can_accept.then(|| Msg::AcceptCall(call.call_id.clone()))),
             button(text("Odmítnout").size(13))
                 .padding([6, 14])
                 .style(style::danger_button)
@@ -9232,6 +9416,50 @@ fn call_banner(call: &tymy_core::IncomingCall) -> Element<'_, Msg> {
                 .padding([6, 12])
                 .style(style::ghost)
                 .on_press(Msg::DismissCall(call.call_id.clone())),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([10, 16])
+    .width(Length::Fill)
+    .style(style::call_banner)
+    .into()
+}
+
+/// Lišta probíhajícího hovoru: s kým, délka, ztlumení mikrofonu, zavěsit.
+fn active_call_bar(call: &Call) -> Element<'_, Msg> {
+    let status = match (&call.id, &call.media, call.since) {
+        (_, _, Some(since)) => {
+            let secs = since.elapsed().as_secs();
+            format!("{}:{:02}", secs / 60, secs % 60)
+        }
+        (Some(_), Some(_), None) => "Vyzvání…".into(),
+        _ => "Spojuji…".into(),
+    };
+    container(
+        row![
+            text("📞").size(16).font(style::EMOJI),
+            column![
+                text(call.title.as_str()).size(14).font(BOLD),
+                text(status).size(12).style(muted),
+            ]
+            .spacing(2),
+            space::horizontal(),
+            button(
+                text(if call.muted {
+                    "Zapnout mikrofon"
+                } else {
+                    "Ztlumit"
+                })
+                .size(13)
+            )
+            .padding([6, 14])
+            .style(style::secondary)
+            .on_press_maybe(call.media.is_some().then_some(Msg::ToggleMute)),
+            button(text("Zavěsit").size(13))
+                .padding([6, 14])
+                .style(style::danger_button)
+                .on_press(Msg::HangUp),
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center),

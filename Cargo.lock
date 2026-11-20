@@ -5738,6 +5738,7 @@ dependencies = [
  "tymy-api",
  "tymy-config",
  "tymy-core",
+ "tymy-media",
  "tymy-store",
  "x11rb",
  "zbus",

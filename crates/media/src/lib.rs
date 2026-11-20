@@ -93,6 +93,15 @@ pub struct GstMedia {
     sending: Mutex<bool>,
 }
 
+impl std::fmt::Debug for GstMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GstMedia")
+            .field("source", &self.config.source)
+            .field("sink", &self.config.sink)
+            .finish_non_exhaustive()
+    }
+}
+
 fn err(what: &str, e: impl std::fmt::Display) -> Error {
     Error::Other(format!("{what}: {e}"))
 }
