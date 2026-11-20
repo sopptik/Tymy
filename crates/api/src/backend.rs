@@ -94,6 +94,8 @@ pub struct TeamsBackend {
     /// Id koncového bodu spojení pro hovory (web klient má pro každé spojení vlastní).
     calls_epid: String,
     ringing: Mutex<Vec<Ringing>>,
+    /// Přihlašovací údaje k relay serverům a do kdy je používat.
+    turn: Mutex<Option<(calls::TurnCredentials, std::time::Instant)>>,
 }
 
 impl TeamsBackend {
@@ -119,6 +121,7 @@ impl TeamsBackend {
             calls: Mutex::new(CallsState::default()),
             calls_epid: uuid::Uuid::new_v4().to_string(),
             ringing: Mutex::new(vec![]),
+            turn: Mutex::new(None),
         }
     }
 
@@ -488,6 +491,38 @@ impl TeamsBackend {
             )));
         }
         Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
+    /// Přihlašovací údaje k relay serverům médií (`trap/tokens`), uložené na dobu platnosti.
+    pub async fn turn_credentials(&self) -> Result<calls::TurnCredentials> {
+        if let Some((c, until)) = self.turn.lock().await.clone()
+            && std::time::Instant::now() < until
+        {
+            return Ok(c);
+        }
+        let session = self.session().await?;
+        let resp = self
+            .http
+            .client
+            .get(calls::TRAP_TOKENS)
+            .header("X-Skypetoken", &session.token)
+            .header("api-version", "2")
+            .header("x-ms-migration", "True")
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let v: serde_json::Value = resp.json().await.unwrap_or_default();
+        if !(200..300).contains(&status) {
+            return Err(Error::Other(format!("trap/tokens: HTTP {status}")));
+        }
+        let c = calls::parse_trap_tokens(&v)
+            .ok_or_else(|| Error::Protocol("trap/tokens bez údajů".into()))?;
+        let secs = v.get("expires").and_then(|e| e.as_u64()).unwrap_or(3600);
+        // s rezervou, ať údaje nevyprší uprostřed hovoru
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(secs / 2);
+        *self.turn.lock().await = Some((c.clone(), until));
+        Ok(c)
     }
 
     /// Udrží spojení pro hovory: připojí ho (ve vlastní úloze), zaregistruje a obnovuje

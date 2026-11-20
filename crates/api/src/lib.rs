@@ -15,6 +15,7 @@ pub mod media;
 pub mod people;
 pub mod presence;
 mod realtime;
+pub mod sdp;
 
 pub use backend::{TeamsBackend, complete_login};
 pub use endpoints::{EndpointOverrides, Endpoints};

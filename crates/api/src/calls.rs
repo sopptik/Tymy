@@ -15,6 +15,52 @@ pub const ECHO_BOT: &str = "28:cf28171e-fcfd-47e4-a1d6-79460b0b3ca0";
 pub const DEFAULT_CALL_SERVICE: &str =
     "https://api-emea.flightproxy.teams.microsoft.com/api/v2/epconv";
 
+/// Relay (TURN) servery Teams pro média; přihlašovací údaje dává `trap/tokens`.
+pub const RELAY_HOSTS: &[&str] = &[
+    "euaz.relay.teams.microsoft.com",
+    "default.relay.teams.microsoft.com",
+];
+pub const TRAP_TOKENS: &str = "https://teams.microsoft.com/trap/tokens";
+
+/// Přihlašovací údaje k relay serverům (platí `expires` sekund, typicky týden).
+#[derive(Clone, PartialEq, Eq)]
+pub struct TurnCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for TurnCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnCredentials(<skryto>)")
+    }
+}
+
+impl TurnCredentials {
+    /// Adresy `turn://` pro `webrtcbin` (UDP i TCP na každém relay serveru).
+    pub fn urls(&self) -> Vec<String> {
+        let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+        let (u, p) = (enc(&self.username), enc(&self.password));
+        RELAY_HOSTS
+            .iter()
+            .flat_map(|h| {
+                [
+                    format!("turn://{u}:{p}@{h}:3478?transport=udp"),
+                    format!("turn://{u}:{p}@{h}:443?transport=tcp"),
+                ]
+            })
+            .collect()
+    }
+}
+
+/// Rozebere odpověď `trap/tokens`: `{"tokens": [{"realm", "username", "password"}], "expires"}`.
+pub fn parse_trap_tokens(v: &Value) -> Option<TurnCredentials> {
+    let t = v.pointer("/tokens/0")?;
+    Some(TurnCredentials {
+        username: t.get("username")?.as_str()?.to_owned(),
+        password: t.get("password")?.as_str()?.to_owned(),
+    })
+}
+
 /// Výsledek zkoušky signalizace hovoru.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeReport {
@@ -491,6 +537,18 @@ mod tests {
         assert!(!ended_elsewhere(
             r#"{"callEnd":{"code":0,"phrase":"LocalUserInitiated"}}"#
         ));
+    }
+
+    #[test]
+    fn turn_credentials_from_trap_tokens() {
+        let v = json!({"tokens": [{"realm": "\"rtcmedia\"", "username": "u/1", "password": "p+2"}],
+                       "expires": 604800});
+        let c = parse_trap_tokens(&v).unwrap();
+        assert_eq!(format!("{c:?}"), "TurnCredentials(<skryto>)");
+        let urls = c.urls();
+        assert!(urls[0].starts_with("turn://u%2F1:p%2B2@euaz.relay.teams.microsoft.com:3478"));
+        assert!(urls.iter().any(|u| u.ends_with(":443?transport=tcp")));
+        assert!(parse_trap_tokens(&json!({"tokens": []})).is_none());
     }
 
     #[test]

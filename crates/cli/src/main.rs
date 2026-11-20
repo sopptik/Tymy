@@ -89,6 +89,8 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         listen: u64,
     },
+    /// Ladění: získá přihlašovací údaje k relay serverům médií (vypíše jen, zda se to povedlo).
+    Turn,
     /// Ladění: požadavek na službu přítomnosti (`ups`), vypíše stav a tělo odpovědi.
     Ups {
         /// GET, PUT, POST, DELETE.
@@ -316,6 +318,12 @@ async fn main() -> Result<()> {
                     "server hovor nepřijal"
                 }
             );
+            Ok(())
+        }
+        Command::Turn => {
+            let backend = backend(&config, cli.account.as_deref()).await?;
+            let c = backend.turn_credentials().await?;
+            println!("údaje k relay serverům získány ({} adres)", c.urls().len());
             Ok(())
         }
         Command::Ups {
