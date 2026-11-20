@@ -346,7 +346,15 @@ samostatného commitu“)
    médií: zvonění v Tymy (notifikace, kdo volá), „vyzvání“ u volajícího, odmítnutí;
    přijetí až s médii (b). Druhá registrace znamená vystupovat i jako `SkypeSpacesWeb`
    (potřeba souhlasu uživatele).
-   Další kroky: (a) příchozí hovor: registrace `SkypeSpacesWeb` + HAR příchozího hovoru,
+   🟡 **Příchozí hovory bez médií (2026-11-20, „mám nový záznam hovoru“ → volba „Ano,
+   zvonění + odmítnutí“, souhlas s identifikací jako `SkypeSpacesWeb_2.6`):** druhé spojení
+   trouteru (`SkypeSpaces`, vlastní epid, běží ve vlastní úloze) + registrace
+   `SkypeSpacesWeb`; oznámení → `attach` + `progress: ringing` → lišta „Volá …“ v okně
+   (Odmítnout / Skrýt) a notifikace se zvukem `phone-incoming-call` (Zobrazit / Odmítnout).
+   Odmítnutí = `DELETE callLeg` s `callEnd` 603 (z JS web klienta, v HAR není). Konec
+   hovoru (`call/end`, i „přijato jinde“) lištu schová. Ověřeno naživo: připojení
+   a registrace (202). Neověřeno: skutečné zvonění a odmítnutí (potřeba, aby někdo zavolal).
+   Další kroky: (a) ✅ zvonění a odmítnutí, přijetí až s médii,
    zvonění a přijetí/odmítnutí; (b) média: ICE přes relay (`trap/tokens`), DTLS-SRTP,
    opus, tedy skutečný zvuk s echo botem; (c) 1:1 hovor s člověkem.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;

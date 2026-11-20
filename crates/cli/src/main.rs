@@ -629,6 +629,16 @@ fn print_event(e: &Event) {
                 if *messaging { "ano" } else { "ne" }
             )
         }
+        Event::IncomingCall(c) => println!(
+            "· 📞 volá {} ({}){}",
+            c.from_name.as_deref().unwrap_or("?"),
+            c.from,
+            if c.group { ", skupinový hovor" } else { "" }
+        ),
+        Event::CallEnded { elsewhere, .. } => println!(
+            "· hovor skončil{}",
+            if *elsewhere { " (přijat jinde)" } else { "" }
+        ),
         Event::Unknown { resource_type, .. } => {
             tracing::debug!(%resource_type, "neznámá událost");
         }

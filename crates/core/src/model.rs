@@ -327,11 +327,30 @@ pub enum Event {
     },
     /// Změna stavu (přítomnosti) uživatelů.
     Presence(Vec<(UserId, crate::Presence)>),
+    /// Někdo volá (zvoní).
+    IncomingCall(IncomingCall),
+    /// Hovor skončil, než ho uživatel vyřídil (volající zavěsil, přijato jinde, vypršelo).
+    CallEnded {
+        call_id: String,
+        /// Přijato na jiném zařízení uživatele.
+        elsewhere: bool,
+    },
     /// Událost, kterou zatím neumíme interpretovat. Necháváme surová data kvůli ladění protokolu.
     Unknown {
         resource_type: String,
         raw: serde_json::Value,
     },
+}
+
+/// Příchozí hovor, který právě zvoní.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncomingCall {
+    /// Id hovoru (pro odmítnutí a spárování s koncem).
+    pub call_id: String,
+    pub from: UserId,
+    pub from_name: Option<String>,
+    /// Skupinový hovor (pozvánka do hovoru více lidí).
+    pub group: bool,
 }
 
 /// Výsledek odeslání zprávy.

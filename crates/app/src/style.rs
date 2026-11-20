@@ -210,6 +210,16 @@ pub fn error_banner(t: &Theme) -> container::Style {
     }
 }
 
+/// Lišta příchozího hovoru nad oknem.
+pub fn call_banner(t: &Theme) -> container::Style {
+    let c = colors(t);
+    container::Style {
+        background: Some(c.primary_soft.into()),
+        text_color: Some(c.text),
+        ..Default::default()
+    }
+}
+
 /// Štítek dne ve vláknu.
 pub fn day_pill(t: &Theme) -> container::Style {
     let c = colors(t);

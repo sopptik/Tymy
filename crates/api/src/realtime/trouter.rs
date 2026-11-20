@@ -29,6 +29,23 @@ const PING_AFTER: Duration = Duration::from_secs(15);
 /// Bez jakéhokoli rámce (ani odpovědi na ping) považujeme spojení za mrtvé.
 const DEAD_AFTER: Duration = Duration::from_secs(50);
 
+/// Za koho se spojení představí. Web klient Teams má dvě spojení: chat a stavy
+/// (`TeamsCDL`) a hovory (`SkypeSpaces`); oznámení o příchozím hovoru chodí jen na druhé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Client {
+    Chat,
+    Calls,
+}
+
+impl Client {
+    fn ua(self) -> &'static str {
+        match self {
+            Client::Chat => "TeamsCDL",
+            Client::Calls => "SkypeSpaces",
+        }
+    }
+}
+
 /// Co server sdělil po přihlášení.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
@@ -169,22 +186,23 @@ fn ws_err(e: impl std::fmt::Display) -> Error {
 }
 
 /// Adresa WebSocketu s parametry klienta.
-fn connect_url(base: &str, epid: &str, client_version: &str) -> Result<Url> {
+fn connect_url(base: &str, epid: &str, client_version: &str, client: Client) -> Result<Url> {
     let tc =
-        json!({ "cv": TROUTER_CLIENT_VERSION, "ua": "TeamsCDL", "hr": "", "v": client_version });
+        json!({ "cv": TROUTER_CLIENT_VERSION, "ua": client.ua(), "hr": "", "v": client_version });
     let now = chrono::Utc::now().timestamp_millis();
-    Url::parse_with_params(
-        base,
-        &[
-            ("tc", tc.to_string()),
-            ("timeout", "40".into()),
-            ("epid", epid.to_owned()),
-            ("ccid", String::new()),
-            ("cor_id", uuid::Uuid::new_v4().to_string()),
-            ("con_num", format!("{now}_0")),
-        ],
-    )
-    .map_err(|e| Error::Other(format!("adresa trouteru {base}: {e}")))
+    let mut params = vec![
+        ("tc", tc.to_string()),
+        ("timeout", "40".into()),
+        ("epid", epid.to_owned()),
+        ("ccid", String::new()),
+        ("cor_id", uuid::Uuid::new_v4().to_string()),
+    ];
+    if client == Client::Calls {
+        params.push(("dom", "teams.cloud.microsoft".into()));
+    }
+    params.push(("con_num", format!("{now}_0")));
+    Url::parse_with_params(base, &params)
+        .map_err(|e| Error::Other(format!("adresa trouteru {base}: {e}")))
 }
 
 /// Otevřené spojení.
@@ -208,9 +226,10 @@ impl TlsTrouter {
         token: &str,
         client_version: &str,
         epid: &str,
+        client: Client,
     ) -> Result<Self> {
         let epid = epid.to_owned();
-        let url = connect_url(base, &epid, client_version)?;
+        let url = connect_url(base, &epid, client_version, client)?;
         if url.scheme() != "wss" {
             return Err(Error::Other("trouter vyžaduje wss://".into()));
         }
@@ -434,13 +453,27 @@ mod tests {
 
     #[test]
     fn connect_url_carries_client_params() {
-        let url = connect_url("wss://trouter.example/v4/c", "ep-1", "1415/1").unwrap();
+        let url =
+            connect_url("wss://trouter.example/v4/c", "ep-1", "1415/1", Client::Chat).unwrap();
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(q["epid"], "ep-1");
         assert_eq!(q["timeout"], "40");
+        assert!(!q.contains_key("dom"));
         let tc: Value = serde_json::from_str(&q["tc"]).unwrap();
         assert_eq!(tc["ua"], "TeamsCDL");
         assert_eq!(tc["v"], "1415/1");
+        // spojení pro hovory se představí jinak a nese doménu klienta
+        let url = connect_url(
+            "wss://trouter.example/v4/c",
+            "ep-2",
+            "1415/1",
+            Client::Calls,
+        )
+        .unwrap();
+        let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(q["dom"], "teams.cloud.microsoft");
+        let tc: Value = serde_json::from_str(&q["tc"]).unwrap();
+        assert_eq!(tc["ua"], "SkypeSpaces");
     }
 
     /// Celý průběh proti místnímu WebSocket serveru: přihlášení, doručení, potvrzení.

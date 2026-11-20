@@ -29,6 +29,52 @@ pub async fn show(title: String, body: String) -> bool {
     .unwrap_or(false)
 }
 
+/// Co uživatel udělal s notifikací příchozího hovoru.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallChoice {
+    /// Klik na notifikaci: ukázat okno.
+    Show,
+    Reject,
+    /// Zavřeno nebo vypršelo.
+    Dismissed,
+}
+
+/// Notifikace příchozího hovoru se zvukem zvonění; zmizí po `seconds`.
+pub async fn incoming_call(title: String, body: String, seconds: u32) -> CallChoice {
+    tokio::task::spawn_blocking(move || {
+        let handle = Notification::new()
+            .appname("Tymy")
+            .summary(&title)
+            .body(&escape_markup(&body))
+            .icon("call-start")
+            .hint(Hint::Category("x-tymy.call".into()))
+            .hint(Hint::SoundName("phone-incoming-call".into()))
+            .timeout(Timeout::Milliseconds(seconds * 1000))
+            .action("default", "Zobrazit")
+            .action("reject", "Odmítnout")
+            .show();
+        match handle {
+            Ok(h) => {
+                let mut choice = CallChoice::Dismissed;
+                h.wait_for_action(|action| {
+                    choice = match action {
+                        "default" => CallChoice::Show,
+                        "reject" => CallChoice::Reject,
+                        _ => CallChoice::Dismissed,
+                    }
+                });
+                choice
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "notifikaci hovoru nelze zobrazit");
+                CallChoice::Dismissed
+            }
+        }
+    })
+    .await
+    .unwrap_or(CallChoice::Dismissed)
+}
+
 /// Co uživatel udělal s připomínkou události.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderChoice {

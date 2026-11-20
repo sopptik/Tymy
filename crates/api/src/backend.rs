@@ -15,12 +15,56 @@ use tymy_core::{
 };
 
 use crate::auth::{self, CredentialStore, SkypeSession};
+use crate::calls;
 use crate::realtime::registrar;
 use crate::realtime::trouter::{self, Delivery, TlsTrouter};
 use crate::{Endpoints, chat, http::Http, media};
 
 /// Za jak dlouho zkusit registraci trouteru znovu, když se nepovedla.
 const REGISTER_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Za jak dlouho se znovu připojit spojením pro hovory, když spadlo.
+const CALLS_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Zvonící hovor, o jehož konci nepřišla zpráva, po této době zapomeneme.
+const RINGING_MAX: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Co hlásí úloha, která drží spojení trouteru pro hovory.
+enum CallsFeed {
+    Connected(trouter::Info),
+    Delivery(Delivery),
+    Failed(Error),
+}
+
+/// Spojení trouteru pro hovory (`SkypeSpaces`). Běží ve vlastní úloze, aby čekání na zprávy
+/// chatu nepřerušovalo jeho čtení (a naopak); doručení předává kanálem.
+struct CallsLink {
+    rx: tokio::sync::mpsc::Receiver<CallsFeed>,
+    task: tokio::task::JoinHandle<()>,
+    info: Option<trouter::Info>,
+    registered_at: Option<std::time::Instant>,
+}
+
+impl Drop for CallsLink {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Default)]
+struct CallsState {
+    link: Option<CallsLink>,
+    /// Dřív se znovu nepřipojovat (po výpadku).
+    retry_at: Option<std::time::Instant>,
+}
+
+/// Příchozí hovor, který u nás právě zvoní.
+struct Ringing {
+    call_id: String,
+    /// `<uuid>` adres pro události tohoto hovoru (viz [`calls::Callbacks::id`]).
+    agent: String,
+    reject: url::Url,
+    since: std::time::Instant,
+}
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
 const REFRESH_MARGIN_MINUTES: i64 = 5;
@@ -45,6 +89,11 @@ pub struct TeamsBackend {
     endpoint_id: String,
     /// Uživatelé, jejichž stav odebíráme.
     presence_watch: Mutex<Vec<tymy_core::UserId>>,
+    /// Druhé spojení trouteru, na které chodí oznámení o příchozích hovorech.
+    calls: Mutex<CallsState>,
+    /// Id koncového bodu spojení pro hovory (web klient má pro každé spojení vlastní).
+    calls_epid: String,
+    ringing: Mutex<Vec<Ringing>>,
 }
 
 impl TeamsBackend {
@@ -67,6 +116,9 @@ impl TeamsBackend {
             endpoint_id: uuid::Uuid::new_v4().to_string(),
             presence_watch: Mutex::new(vec![]),
             registered_at: Mutex::new(None),
+            calls: Mutex::new(CallsState::default()),
+            calls_epid: uuid::Uuid::new_v4().to_string(),
+            ringing: Mutex::new(vec![]),
         }
     }
 
@@ -210,6 +262,7 @@ impl TeamsBackend {
             &ic3,
             &self.endpoints.media_client_version,
             &epid,
+            trouter::Client::Chat,
         )
         .await?;
         log.push("trouter pro hovor připojen".to_owned());
@@ -372,6 +425,280 @@ impl TeamsBackend {
             steps: log,
             accepted,
         })
+    }
+
+    /// Adresa trouteru pro region účtu z authz; ruční přepis v endpoints.toml má přednost.
+    fn trouter_url(&self, services: &crate::auth::RegionServices) -> String {
+        let default = Endpoints::defaults(self.endpoints_kind()).trouter_url;
+        services
+            .trouter
+            .clone()
+            .filter(|_| self.endpoints.trouter_url == default)
+            .unwrap_or_else(|| self.endpoints.trouter_url.clone())
+    }
+
+    fn registrar_url(&self, services: &crate::auth::RegionServices) -> String {
+        let default = Endpoints::defaults(self.endpoints_kind()).registrar_url;
+        services
+            .registrar
+            .clone()
+            .filter(|_| self.endpoints.registrar_url == default)
+            .unwrap_or_else(|| self.endpoints.registrar_url.clone())
+    }
+
+    /// Klient v hlavičce `x-microsoft-skype-client` požadavků signalizace.
+    fn call_client(&self) -> String {
+        format!(
+            "SkypeSpaces/{}/os=linux; osVer=undefined; deviceType=computer; browser=chrome",
+            self.endpoints.media_client_version
+        )
+    }
+
+    /// Požadavek signalizace hovoru `call_id` (autorizace skypetokenem jako u zkoušky).
+    async fn call_signal(
+        &self,
+        method: reqwest::Method,
+        url: url::Url,
+        body: &serde_json::Value,
+        call_id: &str,
+    ) -> Result<serde_json::Value> {
+        let session = self.session().await?;
+        let resp = self
+            .http
+            .client
+            .request(method, url)
+            .header("X-Skypetoken", &session.token)
+            .header("x-microsoft-skype-chain-id", call_id)
+            .header(
+                "x-microsoft-skype-message-id",
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .header("x-microsoft-skype-client", self.call_client())
+            .header("x-ms-migration", "True")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if !(200..300).contains(&status) {
+            return Err(Error::Other(format!(
+                "signalizace hovoru: HTTP {status} {}",
+                text.chars().take(200).collect::<String>()
+            )));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
+    /// Udrží spojení pro hovory: připojí ho (ve vlastní úloze), zaregistruje a obnovuje
+    /// registraci. Chyby jen zaloguje: chat i stavy běží dál i bez hovorů.
+    async fn keep_calls_link(&self, state: &mut CallsState) {
+        let now = std::time::Instant::now();
+        if state.link.is_none() && state.retry_at.is_none_or(|t| now >= t) {
+            match self.spawn_calls_link().await {
+                Ok(link) => state.link = Some(link),
+                Err(e) => {
+                    tracing::warn!(error = %e, "spojení pro hovory");
+                    state.retry_at = Some(now + CALLS_RETRY);
+                }
+            }
+        }
+        let Some(link) = state.link.as_mut() else {
+            return;
+        };
+        let Some(info) = link.info.clone() else {
+            return;
+        };
+        let renew = std::time::Duration::from_secs(registrar::TTL_SECS * 3 / 4);
+        if link.registered_at.is_some_and(|at| at.elapsed() < renew) {
+            return;
+        }
+        let result = async {
+            let session = self.session().await?;
+            registrar::register(
+                &self.http,
+                registrar::Template::Calls,
+                &self.registrar_url(&session.services),
+                &session.token,
+                &info.epid,
+                &info.surl,
+                &self.endpoints.media_client_version,
+            )
+            .await
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                tracing::info!("trouter zaregistrován pro příchozí hovory");
+                link.registered_at = Some(std::time::Instant::now());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "registrace pro příchozí hovory");
+                link.registered_at = Some(std::time::Instant::now() - renew + REGISTER_RETRY);
+            }
+        }
+    }
+
+    async fn spawn_calls_link(&self) -> Result<CallsLink> {
+        let token = self.scoped_token(trouter::TROUTER_SCOPE).await?;
+        let url = self.trouter_url(&self.session().await?.services);
+        let version = self.endpoints.media_client_version.clone();
+        let epid = self.calls_epid.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let task = tokio::spawn(async move {
+            let mut t =
+                match TlsTrouter::connect(&url, &token, &version, &epid, trouter::Client::Calls)
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.send(CallsFeed::Failed(e)).await;
+                        return;
+                    }
+                };
+            if tx.send(CallsFeed::Connected(t.info.clone())).await.is_err() {
+                return;
+            }
+            loop {
+                let feed = match t.next().await {
+                    Ok(d) => CallsFeed::Delivery(d),
+                    Err(e) => CallsFeed::Failed(e),
+                };
+                let failed = matches!(feed, CallsFeed::Failed(_));
+                if tx.send(feed).await.is_err() || failed {
+                    return;
+                }
+            }
+        });
+        Ok(CallsLink {
+            rx,
+            task,
+            info: None,
+            registered_at: None,
+        })
+    }
+
+    /// Zpracuje zprávu ze spojení pro hovory.
+    async fn on_calls_feed(&self, state: &mut CallsState, feed: Option<CallsFeed>) -> Vec<Event> {
+        match feed {
+            Some(CallsFeed::Connected(info)) => {
+                tracing::info!(epid = %info.epid, "trouter pro hovory připojen");
+                if let Some(link) = state.link.as_mut() {
+                    link.info = Some(info);
+                    link.registered_at = None;
+                }
+                vec![]
+            }
+            Some(CallsFeed::Delivery(d)) => {
+                let surl = state
+                    .link
+                    .as_ref()
+                    .and_then(|l| l.info.as_ref())
+                    .map(|i| i.surl.clone());
+                self.call_events(d, surl.as_deref()).await
+            }
+            Some(CallsFeed::Failed(e)) => {
+                tracing::warn!(error = %e, "spojení pro hovory spadlo");
+                state.link = None;
+                state.retry_at = Some(std::time::Instant::now() + CALLS_RETRY);
+                vec![]
+            }
+            None => {
+                state.link = None;
+                state.retry_at = Some(std::time::Instant::now() + CALLS_RETRY);
+                vec![]
+            }
+        }
+    }
+
+    /// Doručení na spojení pro hovory: oznámení o příchozím hovoru (na kořen adresy) nebo
+    /// událost zvonícího hovoru (`callAgent/<uuid>/…`).
+    async fn call_events(&self, d: Delivery, surl: Option<&str>) -> Vec<Event> {
+        let path = d.path.trim_end_matches('/');
+        let mut ringing = self.ringing.lock().await;
+        ringing.retain(|r| r.since.elapsed() < RINGING_MAX);
+        if path.is_empty() {
+            let Some(invite) = calls::parse_invite(&d.body) else {
+                tracing::debug!("spojení pro hovory: neznámé oznámení");
+                return vec![];
+            };
+            if ringing.iter().any(|r| r.call_id == invite.call_id) {
+                return vec![];
+            }
+            let event = Event::IncomingCall(tymy_core::IncomingCall {
+                call_id: invite.call_id.clone(),
+                from: invite.from.clone(),
+                from_name: invite.from_name.clone(),
+                group: invite.group,
+            });
+            // ohlásit se a rozezvonit u volajícího; když to nevyjde, aspoň zobrazit
+            let rung = match surl {
+                Some(surl) => self.ring(&invite, surl).await,
+                None => Err(Error::Other("spojení pro hovory nemá adresu".into())),
+            };
+            let (agent, reject) = match rung {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ohlášení příchozího hovoru");
+                    (String::new(), invite.reject.clone())
+                }
+            };
+            ringing.push(Ringing {
+                call_id: invite.call_id,
+                agent,
+                reject,
+                since: std::time::Instant::now(),
+            });
+            return vec![event];
+        }
+        let Some(agent) = calls::agent_id(path) else {
+            return vec![];
+        };
+        if calls::event_name(path).as_deref() != Some("call/end") {
+            return vec![];
+        }
+        let Some(i) = ringing.iter().position(|r| r.agent == agent) else {
+            return vec![];
+        };
+        let r = ringing.remove(i);
+        vec![Event::CallEnded {
+            call_id: r.call_id,
+            elsewhere: calls::ended_elsewhere(&d.body),
+        }]
+    }
+
+    /// `attach` + `progress: ringing`. Vrací `<uuid>` adres hovoru a odkaz pro odmítnutí.
+    async fn ring(&self, invite: &calls::Invite, surl: &str) -> Result<(String, url::Url)> {
+        let cb = calls::Callbacks::new(surl);
+        let resp = self
+            .call_signal(
+                reqwest::Method::POST,
+                invite.attach.clone(),
+                &calls::attach_body(&cb),
+                &invite.call_id,
+            )
+            .await?;
+        let reject = calls::link(&resp, "/callInvitation/links/callLeg")
+            .unwrap_or_else(|_| invite.reject.clone());
+        let me = calls::Caller {
+            mri: tymy_core::UserId(format!("8:orgid:{}", self.profile.account_id)),
+            display_name: self.profile.display_name.clone().unwrap_or_default(),
+            endpoint_id: self.calls_epid.clone(),
+            participant_id: invite.participant_id.clone(),
+        };
+        if let Ok(progress) = calls::link(&resp, "/callInvitation/links/progress")
+            && let Err(e) = self
+                .call_signal(
+                    reqwest::Method::POST,
+                    progress,
+                    &calls::progress_body(&me),
+                    &invite.call_id,
+                )
+                .await
+        {
+            tracing::warn!(error = %e, "hlášení zvonění");
+        }
+        Ok((cb.id().to_owned(), reject))
     }
 
     fn endpoints_kind(&self) -> AccountKind {
@@ -798,18 +1125,13 @@ impl ChatBackend for TeamsBackend {
         let mut guard = self.trouter.lock().await;
         if guard.is_none() {
             let token = self.scoped_token(trouter::TROUTER_SCOPE).await?;
-            // adresa pro region účtu z authz; ruční přepis v endpoints.toml má přednost
-            let services = self.session().await?.services;
-            let default = Endpoints::defaults(self.endpoints_kind()).trouter_url;
-            let url = services
-                .trouter
-                .filter(|_| self.endpoints.trouter_url == default)
-                .unwrap_or_else(|| self.endpoints.trouter_url.clone());
+            let url = self.trouter_url(&self.session().await?.services);
             let t = TlsTrouter::connect(
                 &url,
                 &token,
                 &self.endpoints.media_client_version,
                 &self.endpoint_id,
+                trouter::Client::Chat,
             )
             .await?;
             *self.trouter_info.lock().await = Some(t.info.clone());
@@ -827,16 +1149,10 @@ impl ChatBackend for TeamsBackend {
         let age = self.registered_at.lock().await.map(|at| at.elapsed());
         if age.is_none_or(|a| a >= renew) {
             let session = self.session().await?;
-            let default = Endpoints::defaults(self.endpoints_kind()).registrar_url;
-            let registrar_url = session
-                .services
-                .registrar
-                .clone()
-                .filter(|_| self.endpoints.registrar_url == default)
-                .unwrap_or_else(|| self.endpoints.registrar_url.clone());
             match registrar::register(
                 &self.http,
-                &registrar_url,
+                registrar::Template::Chat,
+                &self.registrar_url(&session.services),
                 &session.token,
                 &t.info.epid,
                 &t.info.surl,
@@ -858,20 +1174,69 @@ impl ChatBackend for TeamsBackend {
                 }
             }
         }
+        let mut calls = self.calls.lock().await;
+        self.keep_calls_link(&mut calls).await;
+        // probudit se i kvůli obnově spojení nebo registrace pro hovory
+        let calls_due = match (&calls.link, calls.retry_at) {
+            (Some(l), _) => l
+                .registered_at
+                .map(|at| renew.saturating_sub(at.elapsed()))
+                .unwrap_or(REGISTER_RETRY),
+            (None, Some(at)) => at.saturating_duration_since(std::time::Instant::now()),
+            (None, None) => CALLS_RETRY,
+        };
         let wait = renew
             .saturating_sub(age.unwrap_or_default())
+            .min(calls_due)
             .max(std::time::Duration::from_secs(1));
-        match tokio::time::timeout(wait, t.next()).await {
+        enum Got {
+            Chat(std::result::Result<Result<Delivery>, tokio::time::error::Elapsed>),
+            Calls(Option<CallsFeed>),
+        }
+        let got = {
+            let calls_rx = calls.link.as_mut().map(|l| &mut l.rx);
+            let calls_next = async {
+                match calls_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                r = tokio::time::timeout(wait, t.next()) => Got::Chat(r),
+                f = calls_next => Got::Calls(f),
+            }
+        };
+        match got {
+            Got::Calls(feed) => Ok(self.on_calls_feed(&mut calls, feed).await),
             // čas obnovit registraci
-            Err(_) => Ok(vec![]),
-            Ok(Ok(d)) => Ok(events_from(d)),
-            Ok(Err(e)) => {
+            Got::Chat(Err(_)) => Ok(vec![]),
+            Got::Chat(Ok(Ok(d))) => Ok(events_from(d)),
+            Got::Chat(Ok(Err(e))) => {
                 // příští volání se připojí znovu
                 *guard = None;
                 *self.trouter_info.lock().await = None;
                 Err(e)
             }
         }
+    }
+
+    async fn reject_call(&self, call_id: &str) -> Result<()> {
+        let r = {
+            let mut ringing = self.ringing.lock().await;
+            let i = ringing
+                .iter()
+                .position(|r| r.call_id == call_id)
+                .ok_or_else(|| Error::Other("hovor už nezvoní".into()))?;
+            ringing.remove(i)
+        };
+        self.call_signal(
+            reqwest::Method::DELETE,
+            r.reject,
+            &calls::reject_body(),
+            &r.call_id,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn publish_presence(&self, availability: tymy_core::Availability) -> Result<()> {

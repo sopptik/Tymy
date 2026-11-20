@@ -1,6 +1,6 @@
-//! Signalizace hovorů (`docs/protocol/README.md` § 9). Zatím jen zkouška spojení
-//! s echo botem Teams („testovací hovor“): založení, přijetí serverem, ukončení.
-//! Média (zvuk, obraz) se nepřenáší: nabídka SDP je syntetická a nikam nevede.
+//! Signalizace hovorů (`docs/protocol/README.md` § 9): zkouška spojení s echo botem Teams
+//! („testovací hovor“: založení, přijetí serverem, ukončení) a příchozí hovory (zvonění,
+//! odmítnutí). Média (zvuk, obraz) se nepřenáší: nabídka SDP je syntetická a nikam nevede.
 
 use rand::RngExt;
 use serde_json::{Value, json};
@@ -51,13 +51,21 @@ impl Caller {
 pub struct Callbacks {
     /// `<surl>callAgent/<uuid>/`
     base: String,
+    id: String,
 }
 
 impl Callbacks {
     pub fn new(surl: &str) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
         Self {
-            base: format!("{surl}callAgent/{}/", uuid::Uuid::new_v4()),
+            base: format!("{surl}callAgent/{id}/"),
+            id,
         }
+    }
+
+    /// `<uuid>` z adres: podle něj se pozná, ke kterému hovoru doručená událost patří.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// Adresa pro událost `kind/name` (např. `call/acceptance`); každá má vlastní náhodný úsek.
@@ -83,6 +91,104 @@ pub fn event_name(path: &str) -> Option<String> {
     let kind = parts.next()?;
     path.starts_with("callAgent/")
         .then(|| format!("{kind}/{name}"))
+}
+
+/// `<uuid>` z cesty doručení `callAgent/<uuid>/…` (viz [`Callbacks::id`]).
+pub fn agent_id(path: &str) -> Option<&str> {
+    path.strip_prefix("callAgent/")?.split('/').next()
+}
+
+/// Oznámení o příchozím hovoru.
+#[derive(Debug, Clone)]
+pub struct Invite {
+    /// Id hovoru (`debugContent.callId`), zároveň `x-microsoft-skype-chain-id` všech požadavků.
+    pub call_id: String,
+    pub from: UserId,
+    pub from_name: Option<String>,
+    /// Volaný účastník (my) tak, jak ho uvádí server: `participantId` použijeme v odpovědích.
+    pub participant_id: String,
+    pub group: bool,
+    pub attach: Url,
+    /// Odmítnutí před `attach` (po něm platí `callInvitation.links.callLeg`).
+    pub reject: Url,
+}
+
+/// Rozebere doručení na kořen adresy spojení pro hovory: `{"evt": 107, "gp": base64(JSON)}`.
+/// Jiné události (a nečitelná těla) vrací `None`.
+pub fn parse_invite(body: &str) -> Option<Invite> {
+    use base64::Engine;
+    let v: Value = serde_json::from_str(body).ok()?;
+    if v.get("evt")?.as_i64()? != 107 {
+        return None;
+    }
+    let raw = v.get("gp")?.as_str()?.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(raw)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw))
+        .ok()?;
+    let gp: Value = serde_json::from_slice(&bytes).ok()?;
+    let n = gp.get("callNotification")?;
+    let from = n.pointer("/from/id")?.as_str()?;
+    Some(Invite {
+        call_id: gp
+            .pointer("/debugContent/callId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        from: UserId(from.to_owned()),
+        from_name: n
+            .pointer("/from/displayName")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned),
+        participant_id: n
+            .pointer("/to/participantId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        group: gp
+            .pointer("/conversationInvitation/isMultiParty")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        attach: link(n, "/links/attach").ok()?,
+        reject: link(n, "/links/reject").ok()?,
+    })
+}
+
+/// Tělo `POST <links.attach>`: volaný se ohlásí jako koncový bod, který může hovor přijmout.
+/// Bez médií (`requireMediaContent: false`); `end` = kam server pošle konec hovoru.
+pub fn attach_body(cb: &Callbacks) -> Value {
+    json!({
+        "attach": {
+            "requireMediaContent": false,
+            "links": { "end": cb.link("call", "end") },
+            "locationContent": null,
+            "networkContent": null,
+            "areaContent": null,
+        },
+        "capabilities": null,
+        "endpointCapabilities": 73463,
+    })
+}
+
+/// Tělo `POST <callInvitation.links.progress>`: u nás zvoní (volající slyší vyzvánění).
+pub fn progress_body(me: &Caller) -> Value {
+    json!({ "callProgress": { "sender": me.json(), "status": "ringing", "phrase": "ringing" } })
+}
+
+/// Tělo `DELETE <callLeg / reject>`: odmítnutí příchozího hovoru (kód 603 jako web klient).
+pub fn reject_body() -> Value {
+    json!({ "callEnd": {
+        "code": 603, "subCode": 0, "phrase": "LocalUserInitiated", "resultCategories": ["Success"],
+    } })
+}
+
+/// Konec hovoru z události `call/end`: `true` = přijato na jiném zařízení uživatele.
+pub fn ended_elsewhere(body: &str) -> bool {
+    let v: Value = serde_json::from_str(body).unwrap_or_default();
+    let end = v.get("callEnd").unwrap_or(&Value::Null);
+    end.get("acceptedElsewhereBy").is_some_and(|b| !b.is_null())
+        || end.get("code").and_then(Value::as_i64) == Some(450)
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -326,6 +432,65 @@ mod tests {
             describe_sdp(&a).split(',').nth(1).unwrap().trim(),
             "média [audio]"
         );
+    }
+
+    fn invite_body(gp: &Value) -> String {
+        use base64::Engine;
+        let gp = base64::engine::general_purpose::STANDARD.encode(gp.to_string());
+        json!({ "evt": 107, "gp": gp }).to_string()
+    }
+
+    #[test]
+    fn parses_incoming_call_notification() {
+        let fp = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc.example/cc/v1/forked/c1";
+        let gp = json!({
+            "callNotification": {
+                "from": { "id": "8:orgid:bbbb", "displayName": "Eva Svobodová", "participantId": "p-from" },
+                "to": { "id": "8:orgid:aaaa", "participantId": "p-to" },
+                "links": { "attach": format!("{fp}/attach"), "progress": format!("{fp}/progress"),
+                           "reject": format!("{fp}/reject"), "mediaAnswer": "cc://ma" },
+            },
+            "conversationInvitation": { "isMultiParty": false },
+            "debugContent": { "callId": "call-1" },
+        });
+        let inv = parse_invite(&invite_body(&gp)).unwrap();
+        assert_eq!(inv.call_id, "call-1");
+        assert_eq!(inv.from.as_str(), "8:orgid:bbbb");
+        assert_eq!(inv.from_name.as_deref(), Some("Eva Svobodová"));
+        assert_eq!(inv.participant_id, "p-to");
+        assert!(!inv.group);
+        assert!(inv.attach.as_str().ends_with("/attach"));
+        assert!(inv.reject.as_str().ends_with("/reject"));
+        // jiná událost, cizí odkaz nebo nečitelné tělo = žádný hovor
+        assert!(parse_invite(&json!({"evt": 108, "gp": ""}).to_string()).is_none());
+        assert!(parse_invite("<xml/>").is_none());
+        let mut evil = gp.clone();
+        evil["callNotification"]["links"]["attach"] = json!("https://evil.example/attach");
+        assert!(parse_invite(&invite_body(&evil)).is_none());
+    }
+
+    #[test]
+    fn incoming_call_bodies() {
+        let cb = Callbacks::new("https://pub.example/v4/f/abc/");
+        let attach = attach_body(&cb);
+        let end = attach["attach"]["links"]["end"].as_str().unwrap();
+        assert!(end.ends_with("/call/end/"));
+        let path = end.strip_prefix("https://pub.example/v4/f/abc/").unwrap();
+        assert_eq!(agent_id(path), Some(cb.id()));
+        assert_eq!(agent_id("messaging"), None);
+        let p = progress_body(&caller());
+        assert_eq!(p["callProgress"]["status"], "ringing");
+        assert_eq!(p["callProgress"]["sender"]["id"], "8:orgid:aaaa");
+        assert_eq!(reject_body()["callEnd"]["code"], 603);
+        assert!(ended_elsewhere(
+            r#"{"callEnd":{"code":450,"acceptedElsewhereBy":null}}"#
+        ));
+        assert!(ended_elsewhere(
+            r#"{"callEnd":{"code":0,"acceptedElsewhereBy":{"id":"8:orgid:aaaa"}}}"#
+        ));
+        assert!(!ended_elsewhere(
+            r#"{"callEnd":{"code":0,"phrase":"LocalUserInitiated"}}"#
+        ));
     }
 
     #[test]

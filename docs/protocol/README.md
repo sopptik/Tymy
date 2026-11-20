@@ -487,6 +487,15 @@ testovací hovor s echo botem bez médií proti produkci.
   těla neznáme. Bez přijetí oznámení vyprší (zvonění na ostatních zařízeních pokračuje).
 - Přijetí vyžaduje SDP odpověď, tedy skutečná média; bez nich jde jen zvonění,
   `progress: ringing` a odmítnutí/ignorování.
+- Odmítnutí (z JS web klienta `calling-pluginless`, `rejectIncomingCall`): `DELETE` na
+  `callInvitation.links.callLeg` z odpovědi `attach` (před `attach` na
+  `callNotification.links.reject`), tělo `{"callEnd": {"code": 603, "subCode": 0,
+  "phrase": "LocalUserInitiated", "resultCategories": ["Success"]}}`.
+- Tymy (2026-11-20): druhé spojení `SkypeSpaces` + registrace `SkypeSpacesWeb_2.6`
+  (`crates/api/src/backend.rs` `keep_calls_link`), oznámení → `attach` bez médií
+  (`requireMediaContent: false`, jen `links.end`) → `progress: ringing`; v okně lišta
+  a notifikace, odmítnutí přes `callLeg`. Připojení a registrace ověřeny (202), zvonění
+  zatím ne.
 
 Zbývá zjistit: autorizaci `trap/tokens` a jak
 klient posílá vlastní ICE kandidáty (v HTTP ani v trouteru nejsou; nejspíš stačí kandidáti

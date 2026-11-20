@@ -191,6 +191,12 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Odmítne příchozí hovor `call_id` (z [`crate::Event::IncomingCall`]).
+    async fn reject_call(&self, call_id: &str) -> Result<()> {
+        let _ = call_id;
+        Err(crate::Error::Other("účet neumí odmítnout hovor".into()))
+    }
+
     /// Ručně nastaví vlastní stav (má přednost před hlášeným automaticky);
     /// `None` = zrušit ruční stav a vrátit se k automatickému.
     async fn set_status(&self, status: Option<crate::Availability>) -> Result<()> {

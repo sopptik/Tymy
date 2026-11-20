@@ -11,16 +11,36 @@ use crate::http::{Http, SendLogged, check, net_err};
 /// Platnost registrace v sekundách (web klient posílá 3600).
 pub const TTL_SECS: u64 = 3600;
 
-/// Tělo registrace; `appId` a `templateKey` určují, jaká oznámení a v jakém tvaru server
-/// posílá (šablona web klienta Teams pro chat).
-pub fn body(epid: &str, surl: &str, client_version: &str) -> Value {
+/// Šablona registrace: `appId` a `templateKey` určují, jaká oznámení a v jakém tvaru server
+/// posílá. Web klient Teams registruje dvě (každou pro vlastní spojení trouteru).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Template {
+    /// Zprávy a „píše…“ (`TeamsCDLWebWorker`).
+    Chat,
+    /// Příchozí hovory (`SkypeSpacesWeb`).
+    Calls,
+}
+
+impl Template {
+    /// `(appId, templateKey, platform)` jako v HAR web klienta.
+    fn ids(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Template::Chat => ("TeamsCDLWebWorker", "TeamsCDLWebWorker_2.7", "edge"),
+            Template::Calls => ("SkypeSpacesWeb", "SkypeSpacesWeb_2.6", "edgeChromium"),
+        }
+    }
+}
+
+/// Tělo registrace adresy `surl` spojení `epid`.
+pub fn body(template: Template, epid: &str, surl: &str, client_version: &str) -> Value {
+    let (app_id, template_key, platform) = template.ids();
     json!({
         "clientDescription": {
-            "appId": "TeamsCDLWebWorker",
+            "appId": app_id,
             "aesKey": "",
             "languageId": "en-US",
-            "platform": "edge",
-            "templateKey": "TeamsCDLWebWorker_2.7",
+            "platform": platform,
+            "templateKey": template_key,
             "platformUIVersion": client_version,
         },
         "registrationId": epid,
@@ -31,6 +51,7 @@ pub fn body(epid: &str, surl: &str, client_version: &str) -> Value {
 
 pub async fn register(
     http: &Http,
+    template: Template,
     url: &str,
     skypetoken: &str,
     epid: &str,
@@ -41,7 +62,7 @@ pub async fn register(
         .client
         .post(url)
         .header("X-Skypetoken", skypetoken)
-        .json(&body(epid, surl, client_version))
+        .json(&body(template, epid, surl, client_version))
         .send_logged()
         .await
         .map_err(net_err)?;
@@ -81,6 +102,7 @@ mod tests {
         let url = format!("{}/registrar/prod/V2/registrations", server.uri());
         register(
             &Http::new().unwrap(),
+            Template::Chat,
             &url,
             "st",
             "ep-1",
@@ -89,5 +111,18 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn calls_template_matches_web_client() {
+        let b = body(
+            Template::Calls,
+            "ep-2",
+            "https://pub.example/v4/f/def/",
+            "1415/1",
+        );
+        assert_eq!(b["clientDescription"]["appId"], "SkypeSpacesWeb");
+        assert_eq!(b["clientDescription"]["templateKey"], "SkypeSpacesWeb_2.6");
+        assert_eq!(b["registrationId"], "ep-2");
     }
 }
