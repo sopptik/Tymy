@@ -643,6 +643,7 @@ fn print_event(e: &Event) {
             c.from,
             if c.group { ", skupinový hovor" } else { "" }
         ),
+        Event::CallState { state, .. } => println!("· hovor: {state:?}"),
         Event::CallEnded { elsewhere, .. } => println!(
             "· hovor skončil{}",
             if *elsewhere { " (přijat jinde)" } else { "" }

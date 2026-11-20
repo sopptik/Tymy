@@ -3301,6 +3301,8 @@ impl App {
                                 }
                             }
                         }
+                        // probíhající hovor zatím okno nezobrazuje (média přijdou s GStreamerem)
+                        Event::CallState { .. } => {}
                         Event::Unknown { .. } => {}
                     }
                 }

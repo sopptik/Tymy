@@ -6,6 +6,7 @@
 mod backend;
 mod calendar;
 mod error;
+mod media;
 mod model;
 mod presence;
 pub mod text;
@@ -13,5 +14,6 @@ pub mod text;
 pub use backend::{ChatBackend, ConversationPage, MessagePage};
 pub use calendar::{CalendarEvent, EventReply, EventResponse, MeetingAttendee, NewMeeting, ShowAs};
 pub use error::{Error, Result};
+pub use media::Media;
 pub use model::*;
 pub use presence::{Availability, Presence};

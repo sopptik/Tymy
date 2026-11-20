@@ -335,11 +335,36 @@ pub enum Event {
         /// Přijato na jiném zařízení uživatele.
         elsewhere: bool,
     },
+    /// Změna stavu probíhajícího hovoru (odchozího nebo přijatého).
+    CallState {
+        call_id: String,
+        state: CallState,
+    },
     /// Událost, kterou zatím neumíme interpretovat. Necháváme surová data kvůli ladění protokolu.
     Unknown {
         resource_type: String,
         raw: serde_json::Value,
     },
+}
+
+/// Stav probíhajícího hovoru podle signalizace (stav médií hlásí implementace [`crate::Media`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallState {
+    /// Odchozí: u protistrany zvoní.
+    Ringing,
+    /// Protistrana hovor přijala, média se spojují nebo běží.
+    Connected,
+    /// Konec; `reason` = popis pro uživatele (prázdný = běžné zavěšení).
+    Ended { reason: String },
+}
+
+/// Koho volat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallTarget {
+    /// Testovací hovor s echo botem Teams.
+    EchoBot,
+    /// 1:1 hovor s člověkem (MRI).
+    Person(UserId),
 }
 
 /// Příchozí hovor, který právě zvoní.

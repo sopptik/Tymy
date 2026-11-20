@@ -191,6 +191,32 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Zahájí hovor; vrací id hovoru (průběh hlásí [`crate::Event::CallState`]).
+    async fn start_call(
+        &self,
+        target: crate::CallTarget,
+        media: std::sync::Arc<dyn crate::Media>,
+    ) -> Result<String> {
+        let _ = (target, media);
+        Err(crate::Error::Other("účet neumí volat".into()))
+    }
+
+    /// Přijme zvonící hovor `call_id`.
+    async fn accept_call(
+        &self,
+        call_id: &str,
+        media: std::sync::Arc<dyn crate::Media>,
+    ) -> Result<()> {
+        let _ = (call_id, media);
+        Err(crate::Error::Other("účet neumí přijmout hovor".into()))
+    }
+
+    /// Zavěsí probíhající hovor.
+    async fn hang_up(&self, call_id: &str) -> Result<()> {
+        let _ = call_id;
+        Ok(())
+    }
+
     /// Odmítne příchozí hovor `call_id` (z [`crate::Event::IncomingCall`]).
     async fn reject_call(&self, call_id: &str) -> Result<()> {
         let _ = call_id;

@@ -64,6 +64,31 @@ struct Ringing {
     agent: String,
     reject: url::Url,
     since: std::time::Instant,
+    /// Přijetí (`callInvitation.links.acceptance` z odpovědi `attach`).
+    acceptance: Option<url::Url>,
+    /// Nabídka SDP volajícího (dialekt Microsoftu) a `mediaLegId`.
+    offer: Option<(String, String)>,
+    participant_id: String,
+}
+
+/// Jak zavěsit probíhající hovor.
+enum Hangup {
+    /// Odchozí: odejít z konverzace (`links.leave`).
+    Leave(url::Url),
+    /// Přijatý: `DELETE` na `callLeg`.
+    CallLeg(url::Url),
+}
+
+/// Probíhající hovor (odchozí nebo přijatý).
+struct ActiveCall {
+    call_id: String,
+    agent: String,
+    media: Arc<dyn tymy_core::Media>,
+    me: calls::Caller,
+    media_leg_id: String,
+    /// Odpověď SDP protistrany už máme (u odchozího).
+    answered: bool,
+    hangup: Hangup,
 }
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
@@ -94,6 +119,9 @@ pub struct TeamsBackend {
     /// Id koncového bodu spojení pro hovory (web klient má pro každé spojení vlastní).
     calls_epid: String,
     ringing: Mutex<Vec<Ringing>>,
+    active: Mutex<Vec<ActiveCall>>,
+    /// Adresa spojení pro hovory (kopie mimo zámek `calls`, který drží čekání na události).
+    calls_info: Mutex<Option<trouter::Info>>,
     /// Přihlašovací údaje k relay serverům a do kdy je používat.
     turn: Mutex<Option<(calls::TurnCredentials, std::time::Instant)>>,
 }
@@ -121,6 +149,8 @@ impl TeamsBackend {
             calls: Mutex::new(CallsState::default()),
             calls_epid: uuid::Uuid::new_v4().to_string(),
             ringing: Mutex::new(vec![]),
+            active: Mutex::new(vec![]),
+            calls_info: Mutex::new(None),
             turn: Mutex::new(None),
         }
     }
@@ -334,7 +364,14 @@ impl TeamsBackend {
             .unwrap_or_else(|| calls::DEFAULT_CALL_SERVICE.to_owned());
         let service = url::Url::parse(&service).map_err(|e| Error::Other(e.to_string()))?;
         let sdp = calls::probe_offer();
-        let body = calls::conversation_body(&caller, &cb, &sdp, &client);
+        let body = calls::conversation_body(
+            &caller,
+            &cb,
+            &sdp,
+            &client,
+            Some("UserInitiatedTestCall"),
+            false,
+        );
         let mut created = None;
         for auth in auths {
             let (status, text) = send(service.clone(), body.clone(), auth, false).await?;
@@ -594,6 +631,16 @@ impl TeamsBackend {
             if tx.send(CallsFeed::Connected(t.info.clone())).await.is_err() {
                 return;
             }
+            // přijetí odchozího hovoru server potvrzuje tělem odpovědi s dalšími adresami
+            let surl = t.info.surl.clone();
+            t.set_responder(Box::new(move |d| {
+                if calls::event_name(&d.path).as_deref() != Some("call/acceptance") {
+                    return None;
+                }
+                let agent = calls::agent_id(&d.path)?;
+                let cb = calls::Callbacks::with_id(&surl, agent);
+                Some(calls::acceptance_ack(&cb).to_string())
+            }));
             loop {
                 let feed = match t.next().await {
                     Ok(d) => CallsFeed::Delivery(d),
@@ -618,6 +665,7 @@ impl TeamsBackend {
         match feed {
             Some(CallsFeed::Connected(info)) => {
                 tracing::info!(epid = %info.epid, "trouter pro hovory připojen");
+                *self.calls_info.lock().await = Some(info.clone());
                 if let Some(link) = state.link.as_mut() {
                     link.info = Some(info);
                     link.registered_at = None;
@@ -634,11 +682,13 @@ impl TeamsBackend {
             }
             Some(CallsFeed::Failed(e)) => {
                 tracing::warn!(error = %e, "spojení pro hovory spadlo");
+                *self.calls_info.lock().await = None;
                 state.link = None;
                 state.retry_at = Some(std::time::Instant::now() + CALLS_RETRY);
                 vec![]
             }
             None => {
+                *self.calls_info.lock().await = None;
                 state.link = None;
                 state.retry_at = Some(std::time::Instant::now() + CALLS_RETRY);
                 vec![]
@@ -647,63 +697,165 @@ impl TeamsBackend {
     }
 
     /// Doručení na spojení pro hovory: oznámení o příchozím hovoru (na kořen adresy) nebo
-    /// událost zvonícího hovoru (`callAgent/<uuid>/…`).
+    /// událost hovoru (`callAgent/<uuid>/…`).
     async fn call_events(&self, d: Delivery, surl: Option<&str>) -> Vec<Event> {
         let path = d.path.trim_end_matches('/');
-        let mut ringing = self.ringing.lock().await;
-        ringing.retain(|r| r.since.elapsed() < RINGING_MAX);
         if path.is_empty() {
-            let Some(invite) = calls::parse_invite(&d.body) else {
-                tracing::debug!("spojení pro hovory: neznámé oznámení");
-                return vec![];
-            };
-            if ringing.iter().any(|r| r.call_id == invite.call_id) {
-                return vec![];
-            }
-            let event = Event::IncomingCall(tymy_core::IncomingCall {
-                call_id: invite.call_id.clone(),
-                from: invite.from.clone(),
-                from_name: invite.from_name.clone(),
-                group: invite.group,
-            });
-            // ohlásit se a rozezvonit u volajícího; když to nevyjde, aspoň zobrazit
-            let rung = match surl {
-                Some(surl) => self.ring(&invite, surl).await,
-                None => Err(Error::Other("spojení pro hovory nemá adresu".into())),
-            };
-            let (agent, reject) = match rung {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "ohlášení příchozího hovoru");
-                    (String::new(), invite.reject.clone())
+            return self.on_invite(&d.body, surl).await;
+        }
+        let (Some(agent), Some(name)) = (calls::agent_id(path), calls::event_name(path)) else {
+            return vec![];
+        };
+        let ended = matches!(name.as_str(), "call/end" | "conversation/conversationEnd");
+        {
+            let mut ringing = self.ringing.lock().await;
+            if let Some(i) = ringing.iter().position(|r| r.agent == agent) {
+                if !ended {
+                    return vec![];
                 }
-            };
-            ringing.push(Ringing {
-                call_id: invite.call_id,
-                agent,
-                reject,
-                since: std::time::Instant::now(),
-            });
-            return vec![event];
+                let r = ringing.remove(i);
+                return vec![Event::CallEnded {
+                    call_id: r.call_id,
+                    elsewhere: calls::ended_elsewhere(&d.body),
+                }];
+            }
         }
-        let Some(agent) = calls::agent_id(path) else {
+        let mut active = self.active.lock().await;
+        let Some(i) = active.iter().position(|c| c.agent == agent) else {
             return vec![];
         };
-        if calls::event_name(path).as_deref() != Some("call/end") {
-            return vec![];
+        if ended {
+            let c = active.remove(i);
+            return vec![Event::CallState {
+                call_id: c.call_id,
+                state: tymy_core::CallState::Ended {
+                    reason: calls::end_reason(&d.body),
+                },
+            }];
         }
-        let Some(i) = ringing.iter().position(|r| r.agent == agent) else {
-            return vec![];
-        };
-        let r = ringing.remove(i);
-        vec![Event::CallEnded {
-            call_id: r.call_id,
-            elsewhere: calls::ended_elsewhere(&d.body),
-        }]
+        let call = &mut active[i];
+        let v: serde_json::Value = serde_json::from_str(&d.body).unwrap_or_default();
+        match name.as_str() {
+            "call/progress" => vec![Event::CallState {
+                call_id: call.call_id.clone(),
+                state: tymy_core::CallState::Ringing,
+            }],
+            "call/acceptance" | "call/mediaAnswer" => {
+                let pointer = if name == "call/acceptance" {
+                    "/callAcceptance/mediaContent"
+                } else {
+                    "/mediaAnswer/mediaContent"
+                };
+                if !call.answered
+                    && let Some((sdp, _)) = calls::offer_of(&v, pointer)
+                {
+                    match call.media.accept_answer(&crate::sdp::from_ms(&sdp)).await {
+                        Ok(()) => call.answered = true,
+                        Err(e) => tracing::warn!(error = %e, "odpověď SDP protistrany"),
+                    }
+                }
+                if name == "call/acceptance" {
+                    vec![Event::CallState {
+                        call_id: call.call_id.clone(),
+                        state: tymy_core::CallState::Connected,
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            "call/mediaRenegotiation" => {
+                if let Err(e) = self.renegotiate(call, &v, surl).await {
+                    tracing::warn!(error = %e, "přeVyjednání médií");
+                }
+                vec![]
+            }
+            _ => vec![],
+        }
     }
 
-    /// `attach` + `progress: ringing`. Vrací `<uuid>` adres hovoru a odkaz pro odmítnutí.
-    async fn ring(&self, invite: &calls::Invite, surl: &str) -> Result<(String, url::Url)> {
+    /// Server nabízí nová média (např. protistrana zapnula kameru): odpovědět.
+    async fn renegotiate(
+        &self,
+        call: &mut ActiveCall,
+        v: &serde_json::Value,
+        surl: Option<&str>,
+    ) -> Result<()> {
+        let (offer, leg) = calls::offer_of(v, "/mediaNegotiation/mediaContent")
+            .ok_or_else(|| Error::Protocol("přeVyjednání bez SDP".into()))?;
+        let link = calls::link(v, "/mediaNegotiation/links/mediaAnswer")?;
+        let answer = call.media.answer(&crate::sdp::from_ms(&offer)).await?;
+        let surl = surl.ok_or_else(|| Error::Other("spojení pro hovory nemá adresu".into()))?;
+        let cb = calls::Callbacks::with_id(surl, &call.agent);
+        call.media_leg_id = leg;
+        let body = calls::media_answer_body(
+            &call.me,
+            &cb,
+            &crate::sdp::to_ms(&answer),
+            &call.media_leg_id,
+            call.media.sends_video(),
+        );
+        self.call_signal(reqwest::Method::POST, link, &body, &call.call_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// My jako účastník hovoru (`participant_id` přidělený serverem nebo nový).
+    fn me_in_call(&self, participant_id: &str) -> calls::Caller {
+        calls::Caller {
+            mri: tymy_core::UserId(format!("8:orgid:{}", self.profile.account_id)),
+            display_name: self.profile.display_name.clone().unwrap_or_default(),
+            endpoint_id: self.calls_epid.clone(),
+            participant_id: participant_id.to_owned(),
+        }
+    }
+
+    async fn on_invite(&self, body: &str, surl: Option<&str>) -> Vec<Event> {
+        let Some(invite) = calls::parse_invite(body) else {
+            tracing::debug!("spojení pro hovory: neznámé oznámení");
+            return vec![];
+        };
+        let mut ringing = self.ringing.lock().await;
+        ringing.retain(|r| r.since.elapsed() < RINGING_MAX);
+        if ringing.iter().any(|r| r.call_id == invite.call_id) {
+            return vec![];
+        }
+        let event = Event::IncomingCall(tymy_core::IncomingCall {
+            call_id: invite.call_id.clone(),
+            from: invite.from.clone(),
+            from_name: invite.from_name.clone(),
+            group: invite.group,
+        });
+        // ohlásit se a rozezvonit u volajícího; když to nevyjde, aspoň zobrazit
+        let rung = match surl {
+            Some(surl) => self.ring(&invite, surl).await,
+            None => Err(Error::Other("spojení pro hovory nemá adresu".into())),
+        };
+        let (agent, reject, acceptance) = match rung {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "ohlášení příchozího hovoru");
+                (String::new(), invite.reject.clone(), None)
+            }
+        };
+        ringing.push(Ringing {
+            call_id: invite.call_id,
+            agent,
+            reject,
+            since: std::time::Instant::now(),
+            acceptance,
+            offer: invite.offer,
+            participant_id: invite.participant_id,
+        });
+        vec![event]
+    }
+
+    /// `attach` + `progress: ringing`. Vrací `<uuid>` adres hovoru, odkaz pro odmítnutí
+    /// (a zavěšení) a odkaz pro přijetí.
+    async fn ring(
+        &self,
+        invite: &calls::Invite,
+        surl: &str,
+    ) -> Result<(String, url::Url, Option<url::Url>)> {
         let cb = calls::Callbacks::new(surl);
         let resp = self
             .call_signal(
@@ -715,12 +867,8 @@ impl TeamsBackend {
             .await?;
         let reject = calls::link(&resp, "/callInvitation/links/callLeg")
             .unwrap_or_else(|_| invite.reject.clone());
-        let me = calls::Caller {
-            mri: tymy_core::UserId(format!("8:orgid:{}", self.profile.account_id)),
-            display_name: self.profile.display_name.clone().unwrap_or_default(),
-            endpoint_id: self.calls_epid.clone(),
-            participant_id: invite.participant_id.clone(),
-        };
+        let acceptance = calls::link(&resp, "/callInvitation/links/acceptance").ok();
+        let me = self.me_in_call(&invite.participant_id);
         if let Ok(progress) = calls::link(&resp, "/callInvitation/links/progress")
             && let Err(e) = self
                 .call_signal(
@@ -733,7 +881,7 @@ impl TeamsBackend {
         {
             tracing::warn!(error = %e, "hlášení zvonění");
         }
-        Ok((cb.id().to_owned(), reject))
+        Ok((cb.id().to_owned(), reject, acceptance))
     }
 
     fn endpoints_kind(&self) -> AccountKind {
@@ -1253,6 +1401,143 @@ impl ChatBackend for TeamsBackend {
                 Err(e)
             }
         }
+    }
+
+    async fn start_call(
+        &self,
+        target: tymy_core::CallTarget,
+        media: Arc<dyn tymy_core::Media>,
+    ) -> Result<String> {
+        let surl = self
+            .calls_info
+            .lock()
+            .await
+            .clone()
+            .map(|i| i.surl)
+            .ok_or_else(|| Error::Other("služba hovorů zatím není připojená".into()))?;
+        let session = self.session().await?;
+        let call_id = uuid::Uuid::new_v4().to_string();
+        let cb = calls::Callbacks::new(&surl);
+        let me = self.me_in_call(&uuid::Uuid::new_v4().to_string());
+        let video = media.sends_video();
+        let offer = crate::sdp::to_ms(&media.offer().await?);
+        let (to, scenario) = match &target {
+            tymy_core::CallTarget::EchoBot => {
+                (calls::ECHO_BOT.to_owned(), Some("UserInitiatedTestCall"))
+            }
+            tymy_core::CallTarget::Person(p) => (p.as_str().to_owned(), None),
+        };
+        let service = session
+            .services
+            .call_service
+            .clone()
+            .unwrap_or_else(|| calls::DEFAULT_CALL_SERVICE.to_owned());
+        let service = url::Url::parse(&service).map_err(|e| Error::Other(e.to_string()))?;
+        let body = calls::conversation_body(&me, &cb, &offer, &self.call_client(), scenario, video);
+        let conv = self
+            .call_signal(reqwest::Method::POST, service, &body, &call_id)
+            .await?;
+        let leave = calls::link(&conv, "/links/leave")?;
+        let add = calls::link(&conv, "/links/addParticipant")?;
+        self.active.lock().await.push(ActiveCall {
+            call_id: call_id.clone(),
+            agent: cb.id().to_owned(),
+            media,
+            me: me.clone(),
+            media_leg_id: String::new(),
+            answered: false,
+            hangup: Hangup::Leave(leave),
+        });
+        // 1:1 chat má id ze dvou MRI bez prefixu, seřazených
+        let mut ids = [
+            self.profile.account_id.to_string(),
+            to.rsplit(':').next().unwrap_or(&to).to_owned(),
+        ];
+        if matches!(target, tymy_core::CallTarget::Person(_)) {
+            ids.sort();
+        }
+        let thread = format!("19:{}_{}@unq.gbl.spaces", ids[0], ids[1]);
+        let body = calls::add_body(&me, &cb, &to, &thread);
+        if let Err(e) = self
+            .call_signal(reqwest::Method::POST, add, &body, &call_id)
+            .await
+        {
+            let _ = self.hang_up(&call_id).await;
+            return Err(e);
+        }
+        Ok(call_id)
+    }
+
+    async fn accept_call(&self, call_id: &str, media: Arc<dyn tymy_core::Media>) -> Result<()> {
+        let r = {
+            let mut ringing = self.ringing.lock().await;
+            let i = ringing
+                .iter()
+                .position(|r| r.call_id == call_id)
+                .ok_or_else(|| Error::Other("hovor už nezvoní".into()))?;
+            ringing.remove(i)
+        };
+        let surl = self
+            .calls_info
+            .lock()
+            .await
+            .clone()
+            .map(|i| i.surl)
+            .ok_or_else(|| Error::Other("služba hovorů není připojená".into()))?;
+        let acceptance = r
+            .acceptance
+            .clone()
+            .ok_or_else(|| Error::Protocol("hovor nejde přijmout (chybí odkaz)".into()))?;
+        let (offer, leg) = r
+            .offer
+            .clone()
+            .ok_or_else(|| Error::Protocol("příchozí hovor bez nabídky SDP".into()))?;
+        let answer = crate::sdp::to_ms(&media.answer(&crate::sdp::from_ms(&offer)).await?);
+        let cb = calls::Callbacks::with_id(&surl, &r.agent);
+        let me = self.me_in_call(&r.participant_id);
+        let body = calls::acceptance_body(&me, &cb, &answer, &leg, media.sends_video());
+        let resp = self
+            .call_signal(reqwest::Method::POST, acceptance, &body, call_id)
+            .await?;
+        let call_leg = calls::link(&resp, "/callAcceptance/links/callLeg")
+            .or_else(|_| calls::link(&resp, "/links/callLeg"))
+            .unwrap_or(r.reject);
+        self.active.lock().await.push(ActiveCall {
+            call_id: r.call_id,
+            agent: r.agent,
+            media,
+            me,
+            media_leg_id: leg,
+            answered: true,
+            hangup: Hangup::CallLeg(call_leg),
+        });
+        Ok(())
+    }
+
+    async fn hang_up(&self, call_id: &str) -> Result<()> {
+        let c = {
+            let mut active = self.active.lock().await;
+            match active.iter().position(|c| c.call_id == call_id) {
+                Some(i) => active.remove(i),
+                None => return Ok(()),
+            }
+        };
+        match c.hangup {
+            Hangup::Leave(url) => {
+                self.call_signal(
+                    reqwest::Method::POST,
+                    url,
+                    &calls::leave_body(&c.me),
+                    call_id,
+                )
+                .await
+            }
+            Hangup::CallLeg(url) => {
+                self.call_signal(reqwest::Method::DELETE, url, &calls::hangup_body(), call_id)
+                    .await
+            }
+        }
+        .map(|_| ())
     }
 
     async fn reject_call(&self, call_id: &str) -> Result<()> {

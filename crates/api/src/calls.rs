@@ -109,6 +109,14 @@ impl Callbacks {
         }
     }
 
+    /// Adresy se známým `<uuid>` (další události téhož hovoru).
+    pub fn with_id(surl: &str, id: &str) -> Self {
+        Self {
+            base: format!("{surl}callAgent/{id}/"),
+            id: id.to_owned(),
+        }
+    }
+
     /// `<uuid>` z adres: podle něj se pozná, ke kterému hovoru doručená událost patří.
     pub fn id(&self) -> &str {
         &self.id
@@ -155,6 +163,8 @@ pub struct Invite {
     pub participant_id: String,
     pub group: bool,
     pub attach: Url,
+    /// Nabídka SDP volajícího (dialekt Microsoftu) a její `mediaLegId`.
+    pub offer: Option<(String, String)>,
     /// Odmítnutí před `attach` (po něm platí `callInvitation.links.callLeg`).
     pub reject: Url,
 }
@@ -197,6 +207,7 @@ pub fn parse_invite(body: &str) -> Option<Invite> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         attach: link(n, "/links/attach").ok()?,
+        offer: offer_of(n, "/mediaContent"),
         reject: link(n, "/links/reject").ok()?,
     })
 }
@@ -296,7 +307,14 @@ pub fn probe_offer() -> String {
 }
 
 /// Tělo `POST …/epconv`: založí konverzaci hovoru a rovnou nabídne média.
-pub fn conversation_body(caller: &Caller, cb: &Callbacks, sdp: &str, client: &str) -> Value {
+pub fn conversation_body(
+    caller: &Caller,
+    cb: &Callbacks,
+    sdp: &str,
+    client: &str,
+    scenario: Option<&str>,
+    video: bool,
+) -> Value {
     json!({
         "conversationRequest": {
             "conversationType": null,
@@ -314,12 +332,12 @@ pub fn conversation_body(caller: &Caller, cb: &Callbacks, sdp: &str, client: &st
                 "addParticipantSuccess", "addParticipantFailure", "addModalitySuccess",
                 "addModalityFailure", "confirmUnmute", "receiveMessage",
             ]),
-            "scenario": "UserInitiatedTestCall",
+            "scenario": scenario,
         },
         "participants": { "from": caller.json(), "to": [] },
         "endpointMetadata": {},
         "callInvitation": {
-            "callModalities": ["Audio"],
+            "callModalities": modalities(video),
             "links": cb.links("call", &["progress", "mediaAnswer", "acceptance", "redirection", "end"]),
             "clientContentForMediaController": {
                 "controlVideoStreaming": cb.link("call", "controlVideoStreaming"),
@@ -333,6 +351,102 @@ pub fn conversation_body(caller: &Caller, cb: &Callbacks, sdp: &str, client: &st
             },
         },
     })
+}
+
+/// Druhy médií hovoru, jak je uvádí signalizace.
+fn modalities(video: bool) -> Value {
+    if video {
+        json!(["Audio", "Video"])
+    } else {
+        json!(["Audio"])
+    }
+}
+
+fn media_content(sdp: &str, media_leg_id: &str) -> Value {
+    json!({
+        "blob": sdp,
+        "contentType": "application/sdp-ngc-1.0",
+        "mediaLegId": media_leg_id,
+    })
+}
+
+/// Tělo `POST <callInvitation.links.acceptance>`: přijetí příchozího hovoru s odpovědí SDP.
+pub fn acceptance_body(
+    me: &Caller,
+    cb: &Callbacks,
+    sdp: &str,
+    media_leg_id: &str,
+    video: bool,
+) -> Value {
+    json!({ "callAcceptance": {
+        "acceptedBy": me.json(),
+        "acceptedCallModalities": modalities(video),
+        "capabilities": null,
+        "endpointCapabilities": 73463,
+        "links": cb.links("call", &[
+            "mediaRenegotiation", "transfer", "replacement", "balanceUpdate",
+            "retargetCompletion", "controlVideoStreaming", "updateMediaDescriptions",
+        ]),
+        "clientContentForMediaController": {
+            "controlVideoStreaming": cb.link("call", "controlVideoStreaming"),
+            "csrcInfo": cb.link("call", "csrcInfo"),
+        },
+        "mediaContent": media_content(sdp, media_leg_id),
+    } })
+}
+
+/// Tělo `POST <mediaNegotiation.links.mediaAnswer>`: odpověď na přeVyjednání médií.
+pub fn media_answer_body(
+    me: &Caller,
+    cb: &Callbacks,
+    sdp: &str,
+    media_leg_id: &str,
+    video: bool,
+) -> Value {
+    json!({ "mediaAnswer": {
+        "callModalities": modalities(video),
+        "sender": me.json(),
+        "links": { "mediaAcknowledgement": cb.link("call", "mediaAcknowledgement") },
+        "clientContentForMediaController": {
+            "controlVideoStreaming": cb.link("call", "controlVideoStreaming"),
+            "csrcInfo": cb.link("call", "csrcInfo"),
+        },
+        "mediaContent": media_content(sdp, media_leg_id),
+    } })
+}
+
+/// Tělo `DELETE <callLeg>`: zavěšení přijatého hovoru.
+pub fn hangup_body() -> Value {
+    json!({ "callEnd": {
+        "code": 0, "subCode": 0, "phrase": "LocalUserInitiated", "resultCategories": ["Success"],
+    } })
+}
+
+/// SDP nabídka a `mediaLegId` z `…/mediaContent`.
+pub fn offer_of(v: &Value, pointer: &str) -> Option<(String, String)> {
+    let mc = v.pointer(pointer)?;
+    Some((
+        mc.get("blob")?.as_str()?.to_owned(),
+        mc.get("mediaLegId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| random_hex(16)),
+    ))
+}
+
+/// Proč hovor skončil (pro uživatele), z `call/end` nebo `conversation/conversationEnd`.
+pub fn end_reason(body: &str) -> String {
+    let v: Value = serde_json::from_str(body).unwrap_or_default();
+    let phrase = v
+        .pointer("/callEnd/phrase")
+        .or_else(|| v.get("phrase"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match phrase {
+        "" | "LocalUserInitiated" | "CallEndReasonLocalUserInitiated" => String::new(),
+        p if p.starts_with("This conversation has ended") => String::new(),
+        p => p.to_owned(),
+    }
 }
 
 /// Tělo `POST <links.addParticipant>`: pozve protistranu do hovoru v 1:1 chatu `thread`.
@@ -438,7 +552,19 @@ mod tests {
     fn builds_conversation_request() {
         let cb = Callbacks::new("https://pub.example/v4/f/abc/");
         let sdp = probe_offer();
-        let b = conversation_body(&caller(), &cb, &sdp, "klient");
+        let b = conversation_body(
+            &caller(),
+            &cb,
+            &sdp,
+            "klient",
+            Some("UserInitiatedTestCall"),
+            false,
+        );
+        assert_eq!(
+            b["conversationRequest"]["scenario"],
+            "UserInitiatedTestCall"
+        );
+        assert_eq!(b["callInvitation"]["callModalities"], json!(["Audio"]));
         assert_eq!(b["participants"]["from"]["id"], "8:orgid:aaaa");
         assert_eq!(b["participants"]["from"]["endpointId"], "ep-1");
         assert_eq!(
@@ -495,6 +621,7 @@ mod tests {
                 "to": { "id": "8:orgid:aaaa", "participantId": "p-to" },
                 "links": { "attach": format!("{fp}/attach"), "progress": format!("{fp}/progress"),
                            "reject": format!("{fp}/reject"), "mediaAnswer": "cc://ma" },
+                "mediaContent": { "blob": "v=0", "mediaLegId": "LEG1" },
             },
             "conversationInvitation": { "isMultiParty": false },
             "debugContent": { "callId": "call-1" },
@@ -507,6 +634,7 @@ mod tests {
         assert!(!inv.group);
         assert!(inv.attach.as_str().ends_with("/attach"));
         assert!(inv.reject.as_str().ends_with("/reject"));
+        assert_eq!(inv.offer, Some(("v=0".into(), "LEG1".into())));
         // jiná událost, cizí odkaz nebo nečitelné tělo = žádný hovor
         assert!(parse_invite(&json!({"evt": 108, "gp": ""}).to_string()).is_none());
         assert!(parse_invite("<xml/>").is_none());
@@ -528,6 +656,29 @@ mod tests {
         assert_eq!(p["callProgress"]["status"], "ringing");
         assert_eq!(p["callProgress"]["sender"]["id"], "8:orgid:aaaa");
         assert_eq!(reject_body()["callEnd"]["code"], 603);
+        assert_eq!(hangup_body()["callEnd"]["code"], 0);
+        let acc = acceptance_body(&caller(), &cb, "v=0", "LEG", true);
+        assert_eq!(
+            acc["callAcceptance"]["acceptedCallModalities"],
+            json!(["Audio", "Video"])
+        );
+        assert_eq!(acc["callAcceptance"]["mediaContent"]["mediaLegId"], "LEG");
+        assert!(acc["callAcceptance"]["links"]["mediaRenegotiation"].is_string());
+        let ans = media_answer_body(&caller(), &cb, "v=0", "LEG", false);
+        assert_eq!(ans["mediaAnswer"]["mediaContent"]["blob"], "v=0");
+        assert_eq!(
+            end_reason(r#"{"callEnd":{"phrase":"LocalUserInitiated"}}"#),
+            ""
+        );
+        assert_eq!(
+            end_reason(r#"{"callEnd":{"phrase":"CallTimeout"}}"#),
+            "CallTimeout"
+        );
+        let same = Callbacks::with_id("https://pub.example/v4/f/abc/", cb.id());
+        assert!(same.link("call", "end").starts_with(&format!(
+            "https://pub.example/v4/f/abc/callAgent/{}/",
+            cb.id()
+        )));
         assert!(ended_elsewhere(
             r#"{"callEnd":{"code":450,"acceptedElsewhereBy":null}}"#
         ));
