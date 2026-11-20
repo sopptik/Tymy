@@ -101,6 +101,13 @@ fn candidate_from_ms(line: &str) -> Option<String> {
 /// SDP ze serveru Teams → SDP pro `webrtcbin`.
 pub fn from_ms(sdp: &str) -> String {
     let mut secs = sections(sdp);
+    let is_direction = |l: &str| DIRECTIONS.contains(&l);
+    // směr chybějící u média platí ze session, jinak výchozí sendrecv (RFC 4566);
+    // `webrtcbin` ho ale vyžaduje u média (jinak hlásí „Cannot intersect dtls setup“)
+    let session_direction = secs
+        .first()
+        .and_then(|s| s.lines.iter().find(|l| is_direction(l)).cloned())
+        .unwrap_or_else(|| "a=sendrecv".to_owned());
     for (i, sec) in secs.iter_mut().enumerate() {
         if i == 0 {
             sec.lines.retain(|l| !l.starts_with("a=x-"));
@@ -182,10 +189,15 @@ pub fn from_ms(sdp: &str) -> String {
             }
             lines.push(l.clone());
         }
+        if !lines.iter().any(|l| is_direction(l)) {
+            lines.push(session_direction.clone());
+        }
         sec.lines = lines;
     }
     join(&secs)
 }
+
+const DIRECTIONS: &[&str] = &["a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive"];
 
 /// Výchozí kandidát sekce (komponenta 1, nejlépe relay, pak srflx, pak host): `(adresa, port)`.
 fn default_candidate(lines: &[String]) -> Option<(String, String)> {
@@ -209,6 +221,19 @@ fn default_candidate(lines: &[String]) -> Option<(String, String)> {
         }
     }
     best.map(|(_, a, p)| (a, p))
+}
+
+/// Kandidát pro server Microsoftu (`a=candidate:…`), nebo `None`, pokud ho nepřijme:
+/// jen UDP přes IPv4, protokol malými písmeny.
+fn ms_candidate(c: &str) -> Option<String> {
+    let f: Vec<&str> = c.split(' ').collect();
+    let (proto, addr) = (f.get(2)?, f.get(4)?);
+    if !proto.eq_ignore_ascii_case("udp") || addr.parse::<std::net::Ipv4Addr>().is_err() {
+        return None;
+    }
+    let mut f = f.clone();
+    f[2] = "udp";
+    Some(format!("a=candidate:{}", f.join(" ")))
 }
 
 /// SDP z `webrtcbin` (po sběru kandidátů) → SDP pro server Teams.
@@ -255,7 +280,29 @@ pub fn to_ms(sdp: &str) -> String {
                 continue;
             }
             // RTCP na stejném portu (rtcp-mux); odlišný port by server mohl brát vážně
-            if l.starts_with("a=rtcp:") || l.starts_with("a=end-of-candidates") {
+            if l.starts_with("a=rtcp:")
+                || l.starts_with("a=end-of-candidates")
+                || l.starts_with("a=rtcp-mux-only")
+            {
+                continue;
+            }
+            if let Some(c) = l.strip_prefix("a=candidate:") {
+                // server bere jen UDP přes IPv4 (TCP zapisuje po svém, `tcp-act`)
+                if let Some(c) = ms_candidate(c) {
+                    lines.push(c);
+                }
+                continue;
+            }
+            if let Some(map) = l.strip_prefix("a=rtpmap:")
+                && let Some((pt, codec)) = map.split_once(' ')
+                && codec.to_ascii_lowercase().starts_with("opus/48000")
+            {
+                // jako web klient: malými písmeny, s počtem kanálů a s FEC
+                lines.push(format!("a=rtpmap:{pt} opus/48000/2"));
+                let fmtp = format!("a=fmtp:{pt} ");
+                if !sec.lines.iter().any(|l| l.starts_with(&fmtp)) {
+                    lines.push(format!("{fmtp}minptime=10;useinbandfec=1"));
+                }
                 continue;
             }
             lines.push(l.clone());
@@ -350,6 +397,10 @@ a=rtpmap:127 x-data/90000\r\n";
         assert!(!s.contains("TCP-PASS") && !s.contains("MTURNID"));
         assert!(s.contains("a=fingerprint:sha-256 AA:BB") && s.contains("a=setup:actpass"));
         assert!(s.contains("a=group:BUNDLE audio_0 video_1"));
+        // směr: u zvuku chyběl → sendrecv, u videa zůstane jen recvonly
+        let audio = s.split("m=video").next().unwrap();
+        assert!(audio.contains("a=sendrecv\r\n"), "{audio}");
+        assert!(!s.split("m=video").nth(1).unwrap().contains("a=sendrecv"));
     }
 
     /// Odpověď ve stylu `webrtcbin` po sběru kandidátů.
@@ -371,6 +422,9 @@ a=rtpmap:102 OPUS/48000/2\r\n\
 a=ssrc:4000000001 cname:x\r\n\
 a=candidate:1 1 UDP 2015363327 192.168.1.20 40000 typ host\r\n\
 a=candidate:2 1 UDP 1015021823 203.0.113.9 41000 typ srflx raddr 192.168.1.20 rport 40000\r\n\
+a=candidate:3 1 TCP 1015021823 192.168.1.20 9 typ host tcptype active\r\n\
+a=candidate:4 1 UDP 2015364095 fe80::1 50065 typ host\r\n\
+a=rtcp-mux-only\r\n\
 a=end-of-candidates\r\n\
 m=video 9 UDP/TLS/RTP/SAVPF 107 99\r\n\
 c=IN IP4 0.0.0.0\r\n\
@@ -403,6 +457,12 @@ a=mid:data_2\r\n";
         assert!(s.contains("a=label:main-video"));
         assert!(!s.contains("end-of-candidates"));
         assert!(!s.contains(" 9 UDP/TLS"));
+        // server bere jen UDP přes IPv4; Opus zapisuje jako web klient
+        assert!(s.contains("a=candidate:1 1 udp 2015363327 192.168.1.20 40000 typ host\r\n"));
+        assert!(!s.contains("tcptype") && !s.contains("fe80") && !s.contains("rtcp-mux-only"));
+        assert!(
+            s.contains("a=rtpmap:102 opus/48000/2\r\na=fmtp:102 minptime=10;useinbandfec=1\r\n")
+        );
     }
 
     #[test]

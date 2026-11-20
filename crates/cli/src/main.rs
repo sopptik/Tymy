@@ -91,6 +91,19 @@ enum Command {
     },
     /// Ladění: získá přihlašovací údaje k relay serverům médií (vypíše jen, zda se to povedlo).
     Turn,
+    /// Zkušební hovor s echo botem i se zvukem: posílá testovací tón (nebo mikrofon)
+    /// a měří, co se vrací. Nikoho neruší.
+    EchoCall {
+        /// Délka hovoru v sekundách.
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// Mikrofon a reproduktor místo testovacího tónu a měření.
+        #[arg(long)]
+        live: bool,
+        /// Nevolat, jen vypsat nabídku SDP v podobě pro server (obsahuje vlastní IP adresy).
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Ladění: požadavek na službu přítomnosti (`ups`), vypíše stav a tělo odpovědi.
     Ups {
         /// GET, PUT, POST, DELETE.
@@ -326,6 +339,25 @@ async fn main() -> Result<()> {
             println!("údaje k relay serverům získány ({} adres)", c.urls().len());
             Ok(())
         }
+        Command::EchoCall {
+            seconds,
+            live,
+            dry_run,
+        } => {
+            let backend = Arc::new(backend(&config, cli.account.as_deref()).await?);
+            if dry_run {
+                use tymy_core::Media;
+                let turn = backend.turn_credentials().await?.urls();
+                let media = tymy_media::GstMedia::new(tymy_media::Config {
+                    turn,
+                    source: tymy_media::Source::TestTone,
+                    sink: tymy_media::Sink::Meter,
+                })?;
+                print!("{}", tymy_api::sdp::to_ms(&media.offer().await?));
+                return Ok(());
+            }
+            echo_call(backend, Duration::from_secs(seconds), live).await
+        }
         Command::Ups {
             method,
             path,
@@ -493,6 +525,92 @@ async fn resolve_chat(backend: &TeamsBackend, chat: &str) -> Result<Conversation
         bail!("{chat:?} není id konverzace (např. 19:…@thread.v2) ani pořadí");
     }
     Ok(chat.into())
+}
+
+/// Zkušební hovor s echo botem se skutečnými médii (viz `Command::EchoCall`).
+async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> Result<()> {
+    use tymy_media::{Config, GstMedia, Sink, Source};
+    let turn = backend.turn_credentials().await?.urls();
+    let (source, sink) = if live {
+        (Source::Microphone, Sink::Speaker)
+    } else {
+        (Source::TestTone, Sink::Meter)
+    };
+    let media = Arc::new(GstMedia::new(Config { turn, source, sink })?);
+    // události (odpověď serveru, stav hovoru) chodí trouterem; ten musí běžet celou dobu
+    let poller = {
+        let backend = backend.clone();
+        tokio::spawn(async move {
+            loop {
+                match backend.poll_events().await {
+                    Ok(events) => {
+                        for e in events.iter().filter(|e| {
+                            matches!(e, Event::CallState { .. } | Event::CallEnded { .. })
+                        }) {
+                            print_event(e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("trouter: {e}");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        })
+    };
+    // spojení pro hovory naběhne až po spojení pro zprávy
+    let started = std::time::Instant::now();
+    while !backend.calls_ready().await {
+        if started.elapsed() > Duration::from_secs(20) {
+            poller.abort();
+            bail!("služba hovorů se nepřipojila");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let call_id = match backend
+        .start_call(tymy_core::CallTarget::EchoBot, media.clone())
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            poller.abort();
+            return Err(e.into());
+        }
+    };
+    println!(
+        "hovor zahájen, trvá {} s (Ctrl+C dřív zavěsí)",
+        length.as_secs()
+    );
+    let end = tokio::time::Instant::now() + length;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end) => break,
+            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                let s = media.stats().await;
+                println!(
+                    "odesláno {} paketů, přijato {}, hlasitost přijatého zvuku {}",
+                    s.packets_sent,
+                    s.packets_received,
+                    s.recent_db.map_or("ticho".into(), |d| format!("{d:.0} dB"))
+                );
+            }
+        }
+    }
+    let s = media.stats().await;
+    if let Err(e) = backend.hang_up(&call_id).await {
+        eprintln!("zavěšení: {e}");
+    }
+    media.stop();
+    poller.abort();
+    println!(
+        "Výsledek: odesláno {} paketů, přijato {}, slyšitelný zvuk {} × 100 ms",
+        s.packets_sent, s.packets_received, s.loud_samples
+    );
+    if s.packets_received == 0 || s.loud_samples == 0 {
+        bail!("ze serveru nepřišel žádný zvuk");
+    }
+    Ok(())
 }
 
 async fn watch(backend: &TeamsBackend, json: bool) -> Result<()> {

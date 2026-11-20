@@ -15,6 +15,7 @@ tymy-core.workspace = true
 tymy-api.workspace = true
 tymy-config.workspace = true
 tymy-store.workspace = true
+tymy-media.workspace = true
 directories.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

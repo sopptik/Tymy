@@ -1,0 +1,19 @@
+[package]
+name = "tymy-media"
+description = "Média hovorů (zvuk, obraz) nad GStreamerem webrtcbin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tymy-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+gst = { package = "gstreamer", version = "0.25" }
+gst-webrtc = { package = "gstreamer-webrtc", version = "0.25" }
+gst-sdp = { package = "gstreamer-sdp", version = "0.25" }
+
+[dev-dependencies]
+tokio = { workspace = true }

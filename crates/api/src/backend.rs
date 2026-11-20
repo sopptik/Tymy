@@ -531,6 +531,11 @@ impl TeamsBackend {
     }
 
     /// Přihlašovací údaje k relay serverům médií (`trap/tokens`), uložené na dobu platnosti.
+    /// Spojení pro hovory je připojené (lze volat a přijímat).
+    pub async fn calls_ready(&self) -> bool {
+        self.calls_info.lock().await.is_some()
+    }
+
     pub async fn turn_credentials(&self) -> Result<calls::TurnCredentials> {
         if let Some((c, until)) = self.turn.lock().await.clone()
             && std::time::Instant::now() < until
@@ -749,7 +754,9 @@ impl TeamsBackend {
                 if !call.answered
                     && let Some((sdp, _)) = calls::offer_of(&v, pointer)
                 {
-                    match call.media.accept_answer(&crate::sdp::from_ms(&sdp)).await {
+                    let answer = crate::sdp::from_ms(&sdp);
+                    tracing::trace!(sdp = %sdp, "odpověď SDP serveru");
+                    match call.media.accept_answer(&answer).await {
                         Ok(()) => call.answered = true,
                         Err(e) => tracing::warn!(error = %e, "odpověď SDP protistrany"),
                     }
@@ -1421,6 +1428,7 @@ impl ChatBackend for TeamsBackend {
         let me = self.me_in_call(&uuid::Uuid::new_v4().to_string());
         let video = media.sends_video();
         let offer = crate::sdp::to_ms(&media.offer().await?);
+        tracing::trace!(sdp = %offer, "nabídka SDP");
         let (to, scenario) = match &target {
             tymy_core::CallTarget::EchoBot => {
                 (calls::ECHO_BOT.to_owned(), Some("UserInitiatedTestCall"))

@@ -497,9 +497,24 @@ testovací hovor s echo botem bez médií proti produkci.
   a notifikace, odmítnutí přes `callLeg`. Připojení a registrace ověřeny (202), zvonění
   zatím ne.
 
-Zbývá zjistit: autorizaci `trap/tokens` a jak
-klient posílá vlastní ICE kandidáty (v HTTP ani v trouteru nejsou; nejspíš stačí kandidáti
-serveru + STUN/TURN vazby).
+**Média (✅ 2026-11-20, `tymy-cli echo-call`, `crates/media`):** zvuk oběma směry
+s echo botem přes produkci. Engine je GStreamer `webrtcbin` (ICE přes libnice, DTLS-SRTP,
+Opus). Relay servery z `trap/tokens` jsou zadané jako `turn://` (UDP 3478 i TCP 443). Kandidáti jdou celí
+v nabídce (bez trickle), výchozí adresa m-řádku je relay. Průběh hovoru s testovacím tónem:
+spojení ICE a DTLS ~0,5 s po `call/acceptance`, 0–9 s hláška bota, ~12 s ticho (nahrává),
+pak se vrací náš tón (−14 dB, odesláno −13 dB).
+
+Co server vyžaduje od nabídky (jinak `call/end` s `SdpParsingError … Attribute badly
+formatted` nebo `CannotSupportAnyMedia`), řeší `sdp::to_ms`:
+- kandidáti jen UDP přes IPv4, protokol malými písmeny (IPv6 link-local a TCP `tcptype`
+  odmítne; web klient píše TCP jako `tcp-act`);
+- `a=rtpmap:<pt> opus/48000/2` (malými, s počtem kanálů) a `a=fmtp … useinbandfec=1`;
+- bez `a=rtcp-mux-only`; `a=ssrc` + `a=x-ssrc-range` s pevným SSRC odesílače.
+
+Odpověď serveru nemá atribut směru (`a=sendrecv`). `webrtcbin` ji pak odmítne zavádějící
+chybou „Cannot intersect dtls setup attributes“, `sdp::from_ms` proto směr doplňuje.
+Statistika přijatého proudu (`inbound-rtp`) se po hlášce bota přestane zvyšovat, i když zvuk
+dál chodí (přehrávání má zřejmě jiný proud). Úspěch se proto měří hlasitostí (`level`).
 
 ## Jak odchytit provoz (HAR)
 

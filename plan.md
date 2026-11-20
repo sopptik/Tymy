@@ -363,8 +363,19 @@ samostatného commitu“)
    hovoru (`call/end`, i „přijato jinde“) lištu schová. Ověřeno naživo: připojení
    a registrace (202). Neověřeno: skutečné zvonění a odmítnutí (potřeba, aby někdo zavolal).
    Další kroky: (a) ✅ zvonění a odmítnutí, přijetí až s médii,
-   zvonění a přijetí/odmítnutí; (b) média: ICE přes relay (`trap/tokens`), DTLS-SRTP,
-   opus, tedy skutečný zvuk s echo botem; (c) 1:1 hovor s člověkem.
+   zvonění a přijetí/odmítnutí; (b) ✅ média, viz níže; (c) 1:1 hovor s člověkem.
+
+   ✅ **Zvuk (2026-11-20, „dodělej i zvuk a video“, „balíčky jsou nainstalované, pokračuj
+   se zvukem“):** nový crate `tymy-media` s enginem GStreamer `webrtcbin`. Uživatel
+   se ptal „a jak to dělá pwa?“: prohlížeč má engine WebRTC zabudovaný, nativní klient
+   si ho musí přinést sám. ICE vede přes relay servery Teams, dál DTLS-SRTP a Opus
+   z mikrofonu do reproduktoru. Zkouška `tymy-cli echo-call` (testovací tón, měření
+   hlasitosti) **ověřena naživo s echo botem: zvuk oběma směry**, bot vrátil náš tón.
+   Úpravy SDP, které server vyžaduje, jsou v `docs/protocol/README.md` § 9.
+   K sestavení je potřeba `libgstreamer-plugins-bad1.0-dev`, ke spuštění plugin
+   `gstreamer1.0-nice` (oba zatím chybí; ověřeno s lokálně rozbalenými kopiemi, CI je
+   instaluje). Další: okno hovoru (přijetí v liště, ztlumení, zavěšení, testovací hovor
+   se zvukem), pak video.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**
