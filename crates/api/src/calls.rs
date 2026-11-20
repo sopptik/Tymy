@@ -61,6 +61,11 @@ pub fn parse_trap_tokens(v: &Value) -> Option<TurnCredentials> {
     })
 }
 
+/// Počet účastníků z `conversation/rosterUpdate` (`participantCounts.totalParticipants`).
+pub fn participant_count(v: &Value) -> Option<u64> {
+    v.pointer("/participantCounts/totalParticipants")?.as_u64()
+}
+
 /// Výsledek zkoušky signalizace hovoru.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeReport {
@@ -726,5 +731,19 @@ mod tests {
         );
         let ack = acceptance_ack(&cb);
         assert!(ack["callAcceptanceAcknowledgement"]["links"]["mediaRenegotiation"].is_string());
+    }
+
+    #[test]
+    fn counts_participants_from_roster() {
+        let v = serde_json::json!({
+            "participants": {"8:orgid:aaaa": {"state": "inactive", "endpoints": {}}},
+            "type": "Delta",
+            "participantCounts": {"totalParticipants": 1, "lobbyParticipants": 0}
+        });
+        assert_eq!(participant_count(&v), Some(1));
+        assert_eq!(
+            participant_count(&serde_json::json!({"participants": {}})),
+            None
+        );
     }
 }

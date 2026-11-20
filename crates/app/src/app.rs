@@ -105,6 +105,8 @@ struct Call {
     /// Od kdy jsme spojení (pro délku hovoru).
     since: Option<std::time::Instant>,
     muted: bool,
+    /// Stavy, které přišly dřív, než zahájení hovoru vrátilo jeho id (server odpovídá rychle).
+    early: Vec<(String, tymy_core::CallState)>,
 }
 
 /// Média hovoru: mikrofon a reproduktor, relay servery Teams.
@@ -3171,10 +3173,15 @@ impl App {
     /// Zobrazí okno (i skryté v liště) a dá mu fokus.
     /// Změna stavu probíhajícího hovoru (ze serveru).
     fn on_call_state(&mut self, call_id: &str, state: tymy_core::CallState) -> Option<Task<Msg>> {
-        let c = self
-            .call
-            .as_mut()
-            .filter(|c| c.id.as_deref() == Some(call_id))?;
+        let c = self.call.as_mut()?;
+        match c.id.as_deref() {
+            Some(id) if id == call_id => {}
+            Some(_) => return None,
+            None => {
+                c.early.push((call_id.to_owned(), state));
+                return None;
+            }
+        }
         match state {
             tymy_core::CallState::Connected => {
                 c.since.get_or_insert_with(std::time::Instant::now);
@@ -3570,6 +3577,7 @@ impl App {
                     media: None,
                     since: None,
                     muted: false,
+                    early: vec![],
                 });
                 Task::perform(
                     async move {
@@ -3585,9 +3593,15 @@ impl App {
             Msg::CallStarted(r) => match r {
                 Ok((id, media)) => match self.call.as_mut().filter(|c| c.id.is_none()) {
                     Some(c) => {
-                        c.id = Some(id);
+                        c.id = Some(id.clone());
                         c.media = Some(media);
-                        Task::none()
+                        let early = std::mem::take(&mut c.early);
+                        let tasks: Vec<_> = early
+                            .into_iter()
+                            .filter(|(i, _)| *i == id)
+                            .filter_map(|(i, state)| self.on_call_state(&i, state))
+                            .collect();
+                        Task::batch(tasks)
                     }
                     // zavěšeno ještě během zakládání
                     None => {
@@ -3619,6 +3633,7 @@ impl App {
                     media: None,
                     since: None,
                     muted: false,
+                    early: vec![],
                 });
                 Task::perform(
                     {

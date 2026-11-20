@@ -69,6 +69,7 @@ struct Ringing {
     /// Nabídka SDP volajícího (dialekt Microsoftu) a `mediaLegId`.
     offer: Option<(String, String)>,
     participant_id: String,
+    group: bool,
 }
 
 /// Jak zavěsit probíhající hovor.
@@ -89,6 +90,10 @@ struct ActiveCall {
     /// Odpověď SDP protistrany už máme (u odchozího).
     answered: bool,
     hangup: Hangup,
+    /// Skupinový hovor: odchodem ostatních nekončí.
+    group: bool,
+    /// V hovoru byl někdo další (počet účastníků aspoň 2).
+    joined: bool,
 }
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
@@ -531,6 +536,27 @@ impl TeamsBackend {
     }
 
     /// Přihlašovací údaje k relay serverům médií (`trap/tokens`), uložené na dobu platnosti.
+    /// Odhlásí nás z hovoru (odchozí: `leave`, přijatý: `DELETE callLeg`).
+    async fn send_hangup(&self, c: ActiveCall) -> Result<()> {
+        let call_id = c.call_id.as_str();
+        match c.hangup {
+            Hangup::Leave(url) => {
+                self.call_signal(
+                    reqwest::Method::POST,
+                    url,
+                    &calls::leave_body(&c.me),
+                    call_id,
+                )
+                .await
+            }
+            Hangup::CallLeg(url) => {
+                self.call_signal(reqwest::Method::DELETE, url, &calls::hangup_body(), call_id)
+                    .await
+            }
+        }
+        .map(|_| ())
+    }
+
     /// Spojení pro hovory je připojené (lze volat a přijímat).
     pub async fn calls_ready(&self) -> bool {
         self.calls_info.lock().await.is_some()
@@ -705,6 +731,11 @@ impl TeamsBackend {
     /// událost hovoru (`callAgent/<uuid>/…`).
     async fn call_events(&self, d: Delivery, surl: Option<&str>) -> Vec<Event> {
         let path = d.path.trim_end_matches('/');
+        tracing::debug!(
+            event = calls::event_name(path).as_deref().unwrap_or(path),
+            "událost hovoru"
+        );
+        tracing::trace!(body = %d.body, "tělo události hovoru");
         if path.is_empty() {
             return self.on_invite(&d.body, surl).await;
         }
@@ -740,6 +771,27 @@ impl TeamsBackend {
         }
         let call = &mut active[i];
         let v: serde_json::Value = serde_json::from_str(&d.body).unwrap_or_default();
+        if name == "conversation/rosterUpdate"
+            && let Some(n) = calls::participant_count(&v)
+        {
+            call.joined |= n >= 2;
+            // 1:1 (i echo bot): protistrana odešla a my bychom zůstali na schůzce sami
+            if n <= 1 && call.joined && !call.group {
+                let c = active.remove(i);
+                drop(active);
+                let call_id = c.call_id.clone();
+                if let Err(e) = self.send_hangup(c).await {
+                    tracing::warn!(error = %e, "zavěšení po odchodu protistrany");
+                }
+                return vec![Event::CallState {
+                    call_id,
+                    state: tymy_core::CallState::Ended {
+                        reason: "protistrana odešla".into(),
+                    },
+                }];
+            }
+            return vec![];
+        }
         match name.as_str() {
             "call/progress" => vec![Event::CallState {
                 call_id: call.call_id.clone(),
@@ -852,6 +904,7 @@ impl TeamsBackend {
             acceptance,
             offer: invite.offer,
             participant_id: invite.participant_id,
+            group: invite.group,
         });
         vec![event]
     }
@@ -1455,6 +1508,8 @@ impl ChatBackend for TeamsBackend {
             media_leg_id: String::new(),
             answered: false,
             hangup: Hangup::Leave(leave),
+            group: false,
+            joined: false,
         });
         // 1:1 chat má id ze dvou MRI bez prefixu, seřazených
         let mut ids = [
@@ -1518,6 +1573,8 @@ impl ChatBackend for TeamsBackend {
             media_leg_id: leg,
             answered: true,
             hangup: Hangup::CallLeg(call_leg),
+            group: r.group,
+            joined: false,
         });
         Ok(())
     }
@@ -1530,24 +1587,8 @@ impl ChatBackend for TeamsBackend {
                 None => return Ok(()),
             }
         };
-        match c.hangup {
-            Hangup::Leave(url) => {
-                self.call_signal(
-                    reqwest::Method::POST,
-                    url,
-                    &calls::leave_body(&c.me),
-                    call_id,
-                )
-                .await
-            }
-            Hangup::CallLeg(url) => {
-                self.call_signal(reqwest::Method::DELETE, url, &calls::hangup_body(), call_id)
-                    .await
-            }
-        }
-        .map(|_| ())
+        self.send_hangup(c).await
     }
-
     async fn reject_call(&self, call_id: &str) -> Result<()> {
         let r = {
             let mut ringing = self.ringing.lock().await;

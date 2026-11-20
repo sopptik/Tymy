@@ -516,6 +516,13 @@ chybou „Cannot intersect dtls setup attributes“, `sdp::from_ms` proto směr 
 Statistika přijatého proudu (`inbound-rtp`) se po hlášce bota přestane zvyšovat, i když zvuk
 dál chodí (přehrávání má zřejmě jiný proud). Úspěch se proto měří hlasitostí (`level`).
 
+Konec testovacího hovoru: echo bot neposílá `call/end`. Asi 50 s po spojení jen odejde:
+přijde `conversation/rosterUpdate` (`type: Delta`), bot má v něm `state: inactive`
+a `participantCounts.totalParticipants` klesne na 1. Klient by na schůzce zůstal sám.
+Tymy proto u hovoru 1:1 zavěsí sám, když počet účastníků klesne na 1 poté, co už
+byl aspoň 2. `call/acceptance` (a tím i `Connected`) navíc přijde dřív, než doběhne
+`addParticipant`, tedy dřív, než volající zná id hovoru.
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce

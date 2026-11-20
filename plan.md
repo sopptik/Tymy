@@ -382,6 +382,11 @@ samostatného commitu“)
    ji schová. „Testovací hovor“ v nabídce profilu teď volá echo bota se zvukem:
    hláška, nahrání a přehrání vlastního hlasu. Ověří uživatel: testovací hovor z okna
    a přijetí skutečného hovoru. Další: hovor s člověkem z hlavičky 1:1 chatu, video.
+   Připomínka uživatele (2026-11-20): „celou dobu hovoru v liště svítí ‚vyzvání‘
+   a po skončení testovacího hovoru se nezavěsí“. Příčiny:
+   - stav „spojeno“ přišel dřív, než okno znalo id hovoru, a zahodil se; teď si ho okno podrží;
+   - echo bot konec neohlásí, jen odejde (`rosterUpdate`, 1 účastník); hovor 1:1 se teď
+     v takovém případě zavěsí sám (ověřeno v CLI: konec ~48 s po spojení).
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

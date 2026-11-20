@@ -538,8 +538,10 @@ async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> 
     };
     let media = Arc::new(GstMedia::new(Config { turn, source, sink })?);
     // události (odpověď serveru, stav hovoru) chodí trouterem; ten musí běžet celou dobu
+    let ended = Arc::new(tokio::sync::Notify::new());
     let poller = {
         let backend = backend.clone();
+        let ended = ended.clone();
         tokio::spawn(async move {
             loop {
                 match backend.poll_events().await {
@@ -548,6 +550,15 @@ async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> 
                             matches!(e, Event::CallState { .. } | Event::CallEnded { .. })
                         }) {
                             print_event(e);
+                            if matches!(
+                                e,
+                                Event::CallState {
+                                    state: tymy_core::CallState::Ended { .. },
+                                    ..
+                                }
+                            ) {
+                                ended.notify_one();
+                            }
                         }
                     }
                     Err(e) => {
@@ -586,6 +597,7 @@ async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> 
         tokio::select! {
             _ = tokio::time::sleep_until(end) => break,
             _ = tokio::signal::ctrl_c() => break,
+            _ = ended.notified() => break,
             _ = tokio::time::sleep(Duration::from_secs(3)) => {
                 let s = media.stats().await;
                 println!(
