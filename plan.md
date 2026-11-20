@@ -273,6 +273,14 @@ samostatného commitu“)
      pojistka (dřív 5 s); při výpadku kanálu se vrací 5s obnova. Registrace a řidší
      dotazování ověřeny naživo; **skutečné doručení zprávy a „píše…“ zatím ne** (během
      testu nikdo nenapsal) → ověří uživatel.
+   - 🟡 **Zprávy přímo z trouteru (2026-11-20, „zprávy v tymy chodí pomaleji než wpa“,
+     „chtěl jsi využívat trouter“):** oznámení nese celou zprávu, ale okno ho bralo jen
+     jako podnět k dotazu: seznam chatů (každých 5 min i několik stránek) a teprve pak
+     vlákno, tedy dva dotazy za sebou. Navíc se oznámení během běžícího dotazu zahodilo
+     a zpráva se ukázala až při pojistném dotazu za 30 s. Teď se zpráva z trouteru hned
+     vloží do vlákna, posune chat nahoru, aktualizuje náhled a spustí notifikaci. Dotaz
+     zůstává jen u neznámého chatu a po úpravě či reakci v otevřeném chatu. Událost,
+     která přijde během dotazu, ho po jeho skončení zopakuje. Ověří uživatel.
 2. ✅ **Hlášení přečtení** serveru (consumption horizon), aby se nepřečtené shodovaly s web klientem.
    Hotovo (2026-11-04), ověřeno uživatelem 2026-11-05: otevřený chat se nahlásí jako přečtený, když
    má okno fokus a není skryté (při návratu do okna hned). Přečtení se teď i lokálně počítá

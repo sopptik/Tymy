@@ -1001,6 +1001,8 @@ pub struct App {
     composer: text_editor::Content,
     sending: bool,
     refreshing: bool,
+    /// Během běžícího dotazu na seznam chatů přišla událost: zopakovat ho po dokončení.
+    refresh_again: bool,
     loading_older: bool,
     /// Je vlákno posunuté na konec (nejnovější zprávy)?
     at_bottom: bool,
@@ -1208,6 +1210,7 @@ impl App {
             composer: text_editor::Content::new(),
             sending: false,
             refreshing: false,
+            refresh_again: false,
             loading_older: false,
             at_bottom: true,
             new_below: false,
@@ -2072,6 +2075,73 @@ impl App {
                 }
             })
         }))
+    }
+
+    /// Zpráva doručená trouterem: hned ji promítne do seznamu chatů (u `new` i s notifikací)
+    /// a do načteného vlákna. `None` = chat neznáme nebo seznam ještě není načtený, je třeba
+    /// se zeptat serveru.
+    fn apply_live_message(&mut self, m: Message, new: bool) -> Option<Task<Msg>> {
+        let session = self.session().cloned()?;
+        // před prvním seznamem chatů by notifikace nebyly s čím porovnat
+        if !self.notify_ready {
+            return None;
+        }
+        let conv = m.conversation_id.clone();
+        let pos = self.conversations.iter().position(|c| c.id == conv)?;
+        let mut tasks = vec![];
+        let listed = self.conversations[pos]
+            .last_message
+            .as_ref()
+            .map(|l| msg_num(&l.id));
+        let is_last = listed.is_none_or(|n| msg_num(&m.id) >= n);
+        if is_last && (new || listed == Some(msg_num(&m.id))) {
+            let previous: HashMap<ConversationId, u64> = self
+                .conversations
+                .iter()
+                .filter_map(|c| Some((c.id.clone(), msg_num(&c.last_message.as_ref()?.id))))
+                .collect();
+            let mut c = self.conversations.remove(pos);
+            if new {
+                c.last_activity = m.arrived_at.or_else(|| Some(chrono::Utc::now()));
+            }
+            c.last_message = Some(m.clone());
+            // nahoru (koncepty nových chatů zůstávají první)
+            let at = self
+                .conversations
+                .iter()
+                .position(|o| !self.is_draft(&o.id) && o.last_activity <= c.last_activity)
+                .unwrap_or(self.conversations.len());
+            self.conversations.insert(at, c);
+            self.peers.learn(&session.profile, std::iter::once(&m));
+            if new {
+                tasks.push(self.notify_new(&session, &previous));
+            }
+        }
+        // vlákno, které už máme načtené (otevřené nebo z dřívějška); jinak se načte při otevření
+        if self.messages.contains_key(&conv) {
+            if let Some(store) = &session.store
+                && let Err(e) =
+                    store.save_messages(&session.profile.account_id, std::slice::from_ref(&m))
+            {
+                tracing::warn!(error = %e, "uložení zprávy do cache");
+            }
+            tasks.push(self.fetch_media_for(std::slice::from_ref(&m)));
+            let shown = displayable(&m);
+            let list = self.messages.entry(conv.clone()).or_default();
+            let fresh = shown && !list.iter().any(|o| o.id == m.id);
+            merge_messages(list, vec![m]);
+            if self.selected.as_ref() == Some(&conv) {
+                self.mark_read(&conv);
+                if fresh {
+                    if self.at_bottom {
+                        tasks.push(operation::snap_to_end(MESSAGES));
+                    } else {
+                        self.new_below = true;
+                    }
+                }
+            }
+        }
+        Some(Task::batch(tasks))
     }
 
     fn find_message(&self, id: &MessageId) -> Option<&Message> {
@@ -3271,12 +3341,19 @@ impl App {
                         }
                         Event::NewMessage(m) => {
                             self.typing.remove(&m.conversation_id);
-                            refresh = true;
+                            // obsah přišel trouterem: ukázat hned, dotaz jen u neznámého chatu
+                            match self.apply_live_message(m, true) {
+                                Some(task) => ring_tasks.push(task),
+                                None => refresh = true,
+                            }
                         }
                         Event::MessageUpdated(m) => {
-                            // úprava, smazání nebo reakce u starší zprávy seznam chatů nezmění
+                            // úprava, smazání nebo reakce: přepsat hned, ze serveru pro jistotu
+                            // dočíst otevřený chat (reakce nemusí nést celou zprávu)
                             reload_open |= self.selected.as_ref() == Some(&m.conversation_id);
-                            refresh = true;
+                            if let Some(task) = self.apply_live_message(m, false) {
+                                ring_tasks.push(task);
+                            }
                         }
                         Event::ConversationUpdated(_) => refresh = true,
                         Event::Typing {
@@ -3308,8 +3385,13 @@ impl App {
                 }
                 let mut tasks = vec![self.listen_realtime()];
                 tasks.extend(ring_tasks);
-                if refresh && !self.refreshing {
-                    tasks.push(self.fetch_conversations());
+                if refresh {
+                    if self.refreshing {
+                        // běžící dotaz už událost minul: zopakovat hned po něm
+                        self.refresh_again = true;
+                    } else {
+                        tasks.push(self.fetch_conversations());
+                    }
                 }
                 if let Some(sel) = self.selected.clone().filter(|_| reload_open) {
                     tasks.push(self.fetch_messages(sel, None));
@@ -3655,6 +3737,11 @@ impl App {
             }
             Msg::Conversations(Ok(page), full) => {
                 self.refreshing = false;
+                let again = if std::mem::take(&mut self.refresh_again) {
+                    self.fetch_conversations()
+                } else {
+                    Task::none()
+                };
                 self.healed();
                 let Some(session) = self.session().cloned() else {
                     return Task::none();
@@ -3718,7 +3805,7 @@ impl App {
                         .iter()
                         .filter_map(|c| c.last_message.as_ref()),
                 );
-                let mut tasks = vec![self.notify_new(&session, &previous)];
+                let mut tasks = vec![again, self.notify_new(&session, &previous)];
                 // Nová zpráva v otevřeném chatu → načíst ji.
                 if let Some(sel) = self.selected.clone() {
                     let server_last = self
