@@ -338,6 +338,14 @@ samostatného commitu“)
    s relay kandidáty) a zavěsí. Ověřeno naživo: autorizace skypetokenem, celý průběh
    bez prohlížeče. Média se nepřenáší (syntetická nabídka SDP). Hovory se v prohlížeči
    otevírat nebudou (rozhodnutí uživatele); záloha „otevřít v prohlížeči“ z bodu 3 padá.
+   🔬 **Třetí HAR (2026-11-20, příchozí hovor přijatý ve web klientu):** oznámení přichází
+   přes **druhé trouter spojení** s registrací `SkypeSpacesWeb_2.6` (ne přes stávající
+   `TeamsCDLWebWorker`), tělo `{"evt":107,"gp":base64}` s volajícím, SDP nabídkou a odkazy
+   `attach`/`progress`/`reject`. Volaný pošle `attach` → `progress: ringing` → při přijetí
+   `acceptance` se SDP odpovědí. Rozbor v `docs/protocol/README.md` § 9. Realizovatelné bez
+   médií: zvonění v Tymy (notifikace, kdo volá), „vyzvání“ u volajícího, odmítnutí;
+   přijetí až s médii (b). Druhá registrace znamená vystupovat i jako `SkypeSpacesWeb`
+   (potřeba souhlasu uživatele).
    Další kroky: (a) příchozí hovor: registrace `SkypeSpacesWeb` + HAR příchozího hovoru,
    zvonění a přijetí/odmítnutí; (b) média: ICE přes relay (`trap/tokens`), DTLS-SRTP,
    opus, tedy skutečný zvuk s echo botem; (c) 1:1 hovor s člověkem.

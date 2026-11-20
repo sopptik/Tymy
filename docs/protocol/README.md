@@ -455,8 +455,38 @@ testovací hovor s echo botem bez médií proti produkci.
 - Otevřené: `call/acceptance` přijde dvakrát (server nejspíš nepovažuje potvrzení
   `callAcceptanceAcknowledgement` za doručené) a bez navázaných médií nepřijdou
   `rosterUpdate` ani `addParticipantSuccess`.
-- Příchozí hovor zatím nezachycen: je potřeba registrace `SkypeSpacesWeb` v registraru
-  a HAR s příchozím hovorem (tvar oznámení neznáme).
+
+**Příchozí hovor (🔬 HAR 2026-11-20, 1:1 hovor od kolegy, přijat, ~40 min, zavěsil volající):**
+- Oznámení **nechodí** přes registraci `TeamsCDLWebWorker`. Web klient má **druhé trouter
+  spojení** (`tc.ua: "SkypeSpaces"`, navíc parametr `dom=teams.cloud.microsoft`) a pro jeho
+  `surl` druhou registraci v registraru: `appId: SkypeSpacesWeb`,
+  `templateKey: SkypeSpacesWeb_2.6`, `platform: edgeChromium`, jinak stejné tělo i TTL 3600.
+- Doručení: `POST <surl>` (bez podcesty, `user-agent: Skype-NotificationHub`,
+  `content-type: text/xml`, ale tělo je JSON), `{"evt": 107, "gp": "<base64 JSON>"}`.
+  `gp` obsahuje:
+  - `callNotification.from` / `.to`: `id` (MRI), `displayName`, `endpointId`, `participantId`,
+    `tenantId`;
+  - `callNotification.links`: `attach`, `progress`, `reject` (flightproxy URL),
+    `mediaAnswer: cc://ma`, `udpTransport`;
+  - `callNotification.mediaContent`: SDP nabídka (`application/sdp-ngc-0.5`) s `mediaLegId`;
+  - `conversationInvitation.conversationController`, `isMultiParty`;
+  - `debugContent.callId` (= `x-microsoft-skype-chain-id` celého hovoru), `callStartTime`.
+- Průběh na straně volaného (vše `POST` přes flightproxy se `X-Skypetoken` a hlavičkami
+  `x-microsoft-skype-chain-id/-message-id/-client`):
+
+| čas | požadavek | tělo → odpověď |
+|---|---|---|
+| 0 s | `links.attach` (`…/cc/v1/forked/…/attach`) | `attach.links.end` + `additionalActions[0]` (připojení ke konverzaci: `roster.rosterUpdate`, `links.conversationEnd/…`, `participants.from`), callbacky = trouter `<surl>callAgent/<uuid>/<tag>/…` → `200`, `callInvitation.links` (`progress`, `acceptance`, `mediaAnswer`, `redirection`, `newOffer`, `callLeg`, `subscribe`), `callModalities`, roster a `links` konverzace (`leave`, `mute`, …) |
+| +0,6 s | `callInvitation.links.progress` | `{"callProgress": {"sender", "status": "ringing", "phrase": "ringing"}}` → `202` (protistrana slyší vyzvánění) |
+| +0,6 s | broker `subscribe` (GET, každých 20 s) | `202` |
+| +14 s | `callInvitation.links.acceptance` (`…/accept`) | `callAcceptance`: `acceptedBy`, `acceptedCallModalities: ["Audio"]`, `links` (trouter callbacky `mediaRenegotiation`, `transfer`, `replacement`, …), `mediaContent` = **SDP odpověď** (`application/sdp-ngc-1.0`, `mediaLegId` z oznámení) → `200` |
+| +14 s | `conv/…/updateEndpointMetadata`, `updateParticipantProperties`, `negotiations/…/answer` | doplňkové; `answer` odpovídá na `call/mediaRenegotiation` z trouteru |
+| konec | trouter `call/end` + `conversation/conversationEnd` | `callEnd.phrase: "LocalUserInitiated"` (zavěsil volající), `subCode 5002` |
+
+- Odmítnutí se v záznamu nevyskytuje: odkaz `callNotification.links.reject` existuje, tvar
+  těla neznáme. Bez přijetí oznámení vyprší (zvonění na ostatních zařízeních pokračuje).
+- Přijetí vyžaduje SDP odpověď, tedy skutečná média; bez nich jde jen zvonění,
+  `progress: ringing` a odmítnutí/ignorování.
 
 Zbývá zjistit: autorizaci `trap/tokens` a jak
 klient posílá vlastní ICE kandidáty (v HTTP ani v trouteru nejsou; nejspíš stačí kandidáti
