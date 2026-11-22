@@ -320,6 +320,11 @@ samostatného commitu“)
 2. ✅ Test instalace na čistém Ubuntu 24.04 (Docker, 2026-11-04): instalace bez chybějících
    knihoven, okno pod Xvfb běží (přihlašovací obrazovka).
 3. Volitelně Flatpak později.
+4. ✅ **Verze 0.2.0 (2026-11-22):** „pushni to a udělej build deb baličku, a nějak otaguj verzi
+   aby se upgradnul“. Verze ve `[workspace.package]` zvednuta na 0.2.0 (hovory), git tag
+   `v0.2.0`; balíček nově závisí na pluginech GStreameru, které se načítají za běhu
+   (`gstreamer1.0-plugins-base/good/bad`, `gstreamer1.0-nice`). Další vydání: zvednout
+   verzi, `packaging/build-deb.sh`, tag `vX.Y.Z`.
 
 ### Fáze 2: hovory a videohovory (výzkum s rozhodovacím bodem)
 1. Výzkum (časově omezený, cca 2–4 týdny): odchyt signalizace 1:1 hovoru z web klienta.

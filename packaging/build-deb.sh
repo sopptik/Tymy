@@ -62,7 +62,8 @@ depends=$(
 )
 # Okno (winit, wgpu) načítá knihovny X11/Wayland a grafiky až za běhu (dlopen), takže je
 # dpkg-shlibdeps nevidí. Bez GPU ovladačů iced kreslí softwarově, proto jsou jen doporučené.
-depends="$depends, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, fonts-dejavu-core | fonts-noto-core"
+# Hovory: pluginy GStreameru (webrtcbin, libnice, opus, pulse, level) se načítají za běhu.
+depends="$depends, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, fonts-dejavu-core | fonts-noto-core"
 recommends="xdg-utils, gnome-keyring | kwalletmanager, libvulkan1, mesa-vulkan-drivers | libegl1"
 size=$(du -sk --exclude=DEBIAN "$stage" | cut -f1)
 
@@ -78,7 +79,7 @@ Section: net
 Priority: optional
 Description: Lehký klient Microsoft Teams pro Linux
  Nativní klient Microsoft Teams: chaty, kanály týmů, hledání ve zprávách,
- notifikace a ikona v liště. Používá interní API Teams web klienta.
+ notifikace, ikona v liště a hlasové hovory. Používá interní API Teams web klienta.
  Projekt není nijak spojen s Microsoftem.
 EOF
 
