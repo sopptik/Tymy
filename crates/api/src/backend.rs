@@ -792,6 +792,22 @@ impl TeamsBackend {
             }
             return vec![];
         }
+        // protistranu se nepodařilo přizvat (odmítla, nezvedá, je offline): v 1:1 hovoru
+        // bychom zůstali sami, tak hovor ukončit
+        if name == "conversation/addParticipantFailure" && !call.group && !call.joined {
+            let c = active.remove(i);
+            drop(active);
+            let call_id = c.call_id.clone();
+            if let Err(e) = self.send_hangup(c).await {
+                tracing::warn!(error = %e, "zavěšení po neúspěšném vyzvání");
+            }
+            return vec![Event::CallState {
+                call_id,
+                state: tymy_core::CallState::Ended {
+                    reason: calls::add_failure_reason(&v),
+                },
+            }];
+        }
         match name.as_str() {
             "call/progress" => vec![Event::CallState {
                 call_id: call.call_id.clone(),

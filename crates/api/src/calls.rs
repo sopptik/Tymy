@@ -454,6 +454,22 @@ pub fn end_reason(body: &str) -> String {
     }
 }
 
+/// Proč se protistranu nepodařilo přizvat (`conversation/addParticipantFailure`), česky.
+/// Tvar těla není z odchytu známý, proto se hledá kód SIP na několika místech.
+pub fn add_failure_reason(v: &Value) -> String {
+    let code = ["/addParticipantFailure/code", "/code", "/callEnd/code"]
+        .iter()
+        .find_map(|p| v.pointer(p).and_then(Value::as_u64));
+    match code {
+        Some(486) => "protistrana má obsazeno".into(),
+        Some(603) => "protistrana hovor odmítla".into(),
+        Some(480 | 408) => "protistrana nezvedá".into(),
+        Some(404) => "protistrana není dostupná".into(),
+        Some(c) => format!("protistranu se nepodařilo zavolat (kód {c})"),
+        None => "protistranu se nepodařilo zavolat".into(),
+    }
+}
+
 /// Tělo `POST <links.addParticipant>`: pozve protistranu do hovoru v 1:1 chatu `thread`.
 pub fn add_body(caller: &Caller, cb: &Callbacks, to: &str, thread: &str) -> Value {
     json!({
@@ -744,6 +760,23 @@ mod tests {
         assert_eq!(
             participant_count(&serde_json::json!({"participants": {}})),
             None
+        );
+    }
+
+    #[test]
+    fn add_failure_reasons() {
+        let r = |v| add_failure_reason(&v);
+        assert_eq!(
+            r(serde_json::json!({"addParticipantFailure": {"code": 603}})),
+            "protistrana hovor odmítla"
+        );
+        assert_eq!(
+            r(serde_json::json!({"code": 486})),
+            "protistrana má obsazeno"
+        );
+        assert_eq!(
+            r(serde_json::json!({})),
+            "protistranu se nepodařilo zavolat"
         );
     }
 }

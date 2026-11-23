@@ -523,6 +523,12 @@ Tymy proto u hovoru 1:1 zavěsí sám, když počet účastníků klesne na 1 po
 byl aspoň 2. `call/acceptance` (a tím i `Connected`) navíc přijde dřív, než doběhne
 `addParticipant`, tedy dřív, než volající zná id hovoru.
 
+Hovor s člověkem (1:1): stejný postup jako s echo botem, jen `to` je MRI protistrany,
+bez `scenario` a `groupChat.threadId` je id 1:1 chatu (`19:<oid1>_<oid2>@unq.gbl.spaces`,
+seřazená). Když protistranu nejde přizvat, čeká se `conversation/addParticipantFailure`.
+Její tělo zatím nemáme z odchytu. Tymy v ní hledá kód SIP (486 obsazeno, 603 odmítnuto,
+480/408 nezvedá) a hovor ukončí.
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce

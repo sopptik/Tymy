@@ -392,6 +392,10 @@ samostatného commitu“)
    - stav „spojeno“ přišel dřív, než okno znalo id hovoru, a zahodil se; teď si ho okno podrží;
    - echo bot konec neohlásí, jen odejde (`rosterUpdate`, 1 účastník); hovor 1:1 se teď
      v takovém případě zavěsí sám (ověřeno v CLI: konec ~48 s po spojení).
+   Požadavek uživatele (2026-11-23): „pokračuj s voláním z hlavičky chatu“. Hlavička 1:1
+   chatu má tlačítko **Zavolat** (hlasový hovor, stejná lišta jako u testovacího hovoru).
+   Odmítnutí nebo nedostupnost protistrany (`addParticipantFailure`) hovor ukončí s důvodem;
+   tvar této události zatím není z odchytu ověřený. Ověří uživatel hovorem s kolegou.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

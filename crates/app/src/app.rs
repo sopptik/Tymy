@@ -329,6 +329,8 @@ pub enum Msg {
     /// Spustit testovací hovor s echo botem (zatím jen signalizace, bez zvuku).
     /// Zkušební hovor s echo botem (se zvukem).
     TestCall,
+    /// Zavolat protistraně 1:1 chatu (MRI, jméno do lišty hovoru).
+    CallPerson(UserId, String),
     AcceptCall(String),
     CallAccepted(String, Result<Arc<tymy_media::GstMedia>, Failure>),
     CallStarted(Result<(String, Arc<tymy_media::GstMedia>), Failure>),
@@ -687,6 +689,7 @@ impl Msg {
             Msg::DismissCall(_) => debug!("update: DismissCall"),
             Msg::CallNotification(_, c) => debug!(choice = ?c, "update: CallNotification"),
             Msg::TestCall => debug!("update: TestCall"),
+            Msg::CallPerson(..) => debug!("update: CallPerson"),
             Msg::AcceptCall(_) => debug!("update: AcceptCall"),
             Msg::CallAccepted(_, r) => debug!(result = ok(r.is_ok()), "update: CallAccepted"),
             Msg::CallStarted(r) => debug!(result = ok(r.is_ok()), "update: CallStarted"),
@@ -3209,6 +3212,32 @@ impl App {
         )
     }
 
+    /// Odchozí hovor: lišta hned ukáže „Vyzvání…“, média a signalizace běží na pozadí.
+    fn start_outgoing(&mut self, target: tymy_core::CallTarget, title: String) -> Task<Msg> {
+        let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+            return Task::none();
+        };
+        if self.call.is_some() {
+            return self.show_toast("Už probíhá jiný hovor");
+        }
+        self.call = Some(Call {
+            id: None,
+            title,
+            media: None,
+            since: None,
+            muted: false,
+            early: vec![],
+        });
+        Task::perform(
+            async move {
+                let media = call_media(backend.clone()).await?;
+                let id = backend.start_call(target, media.clone()).await?;
+                Ok((id, media))
+            },
+            |r: tymy_core::Result<_>| Msg::CallStarted(r.map_err(Failure::from)),
+        )
+    }
+
     fn call_failed(&mut self, what: &str, e: Failure) -> Task<Msg> {
         if e.reauth {
             return self.fail(e);
@@ -3564,31 +3593,11 @@ impl App {
                 notify::CallChoice::Dismissed => Task::none(),
             },
             Msg::TestCall => {
-                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
-                    return Task::none();
-                };
-                if self.call.is_some() {
-                    return Task::none();
-                }
                 self.account_menu = false;
-                self.call = Some(Call {
-                    id: None,
-                    title: "Testovací hovor".into(),
-                    media: None,
-                    since: None,
-                    muted: false,
-                    early: vec![],
-                });
-                Task::perform(
-                    async move {
-                        let media = call_media(backend.clone()).await?;
-                        let id = backend
-                            .start_call(tymy_core::CallTarget::EchoBot, media.clone())
-                            .await?;
-                        Ok((id, media))
-                    },
-                    |r: tymy_core::Result<_>| Msg::CallStarted(r.map_err(Failure::from)),
-                )
+                self.start_outgoing(tymy_core::CallTarget::EchoBot, "Testovací hovor".into())
+            }
+            Msg::CallPerson(peer, title) => {
+                self.start_outgoing(tymy_core::CallTarget::Person(peer), title)
             }
             Msg::CallStarted(r) => match r {
                 Ok((id, media)) => match self.call.as_mut().filter(|c| c.id.is_none()) {
@@ -7578,6 +7587,31 @@ impl App {
             } else {
                 space().into()
             };
+        let call: Element<'a, Msg> = match self.peer(conv).filter(|_| !self.is_draft(&conv.id)) {
+            Some(peer) => iced::widget::tooltip(
+                button(text("Zavolat").size(13))
+                    .padding([6, 12])
+                    .style(style::secondary)
+                    .on_press_maybe(
+                        self.call
+                            .is_none()
+                            .then(|| Msg::CallPerson(peer, title.clone())),
+                    ),
+                container(
+                    text(if self.call.is_none() {
+                        "Hlasový hovor"
+                    } else {
+                        "Už probíhá jiný hovor"
+                    })
+                    .size(11),
+                )
+                .padding([3, 8])
+                .style(style::tooltip),
+                iced::widget::tooltip::Position::Bottom,
+            )
+            .into(),
+            None => space().into(),
+        };
         let header = container(
             row![
                 header_avatar,
@@ -7587,6 +7621,7 @@ impl App {
                 ]
                 .spacing(1),
                 space::horizontal(),
+                call,
                 manage,
             ]
             .spacing(12)
