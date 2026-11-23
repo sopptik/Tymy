@@ -396,6 +396,10 @@ samostatného commitu“)
    chatu má tlačítko **Zavolat** (hlasový hovor, stejná lišta jako u testovacího hovoru).
    Odmítnutí nebo nedostupnost protistrany (`addParticipantFailure`) hovor ukončí s důvodem;
    tvar této události zatím není z odchytu ověřený. Ověří uživatel hovorem s kolegou.
+   Připomínky uživatele (2026-11-23): „dej tam ikonku zelene pozadi a v něm bílé sluchátko“:
+   tlačítko je teď kulaté zelené se sluchátkem (SVG, `crates/app/assets/phone.svg`).
+   „až budeš dělat video tak použij ikonu kamery asi v červeném pozadí“: videohovor bude
+   mít vedle sluchátka kulaté červené tlačítko s bílou kamerou.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

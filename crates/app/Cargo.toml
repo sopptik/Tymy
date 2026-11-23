@@ -23,6 +23,6 @@ chrono.workspace = true
 directories.workspace = true
 x11rb.workspace = true
 zbus.workspace = true
-iced = { version = "0.14", features = ["tokio", "image", "advanced"] }
+iced = { version = "0.14", features = ["tokio", "image", "svg", "advanced"] }
 tokio.workspace = true
 tracing.workspace = true

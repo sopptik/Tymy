@@ -41,6 +41,8 @@ use crate::state::{
 use crate::style::{self, BOLD, SEMIBOLD, accent, muted};
 use crate::tray::{self, TrayEvent, TrayHandle};
 
+/// Ikona sluchátka (bílá, na zelené tlačítko hovoru).
+const PHONE_ICON: &[u8] = include_bytes!("../assets/phone.svg");
 const COMPOSER: Id = Id::new("composer");
 const GROUP_QUERY: Id = Id::new("group-query");
 const SEARCH: Id = Id::new("search");
@@ -7589,14 +7591,20 @@ impl App {
             };
         let call: Element<'a, Msg> = match self.peer(conv).filter(|_| !self.is_draft(&conv.id)) {
             Some(peer) => iced::widget::tooltip(
-                button(text("Zavolat").size(13))
-                    .padding([6, 12])
-                    .style(style::secondary)
-                    .on_press_maybe(
-                        self.call
-                            .is_none()
-                            .then(|| Msg::CallPerson(peer, title.clone())),
-                    ),
+                button(
+                    iced::widget::svg(iced::widget::svg::Handle::from_memory(PHONE_ICON))
+                        .width(18)
+                        .height(18),
+                )
+                .width(34)
+                .height(34)
+                .padding(8)
+                .style(style::call_round)
+                .on_press_maybe(
+                    self.call
+                        .is_none()
+                        .then(|| Msg::CallPerson(peer, title.clone())),
+                ),
                 container(
                     text(if self.call.is_none() {
                         "Hlasový hovor"

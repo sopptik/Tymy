@@ -762,6 +762,27 @@ pub fn primary(t: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Kulaté zelené tlačítko hovoru (bílé sluchátko).
+pub fn call_round(t: &Theme, status: button::Status) -> button::Style {
+    let green = t.palette().success;
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => Color {
+            r: green.r * 0.85,
+            g: green.g * 0.85,
+            b: green.b * 0.85,
+            a: 1.0,
+        },
+        button::Status::Disabled => Color { a: 0.35, ..green },
+        button::Status::Active => green,
+    };
+    button::Style {
+        background: Some(bg.into()),
+        text_color: Color::WHITE,
+        border: rounded(17.0),
+        ..Default::default()
+    }
+}
+
 /// Kulaté tlačítko (odeslat, „nové zprávy“).
 pub fn primary_round(t: &Theme, status: button::Status) -> button::Style {
     let mut s = primary(t, status);
