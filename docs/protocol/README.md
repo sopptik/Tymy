@@ -555,13 +555,21 @@ chat, a proto posílá `groupChat: null`.
 Záznam hovoru v chatu: zprávy `messagetype: Event/Call`, ke každému hovoru dvě.
 - `callStarted`: `<partlist alt ="">` bez účastníků.
 - `callEnded`: `<ended/><partlist count="N">` s `<part identity="8:orgid:…"><name>`,
-  `<displayName>` a `<duration>` (sekundy účasti).
+  `<displayName>` a `<duration>`.
+  - `<duration>` je u všech stejná: je to délka celého hovoru, ne účasti jednotlivce
+    (ověřeno na schůzce s 64 účastníky).
+  - Jmen je v seznamu nejvýš 25, skutečný počet nese atribut `count`.
 - Obě mají v `<meetingDetails>` hodnoty `callId`, `callEventType`,
   `conversationStartTime` (UTC, `MM/DD/YYYY HH:MM:SS`) a `meetingType` (`Adhoc` u hovoru,
   `Scheduled`/`Recurring` u schůzky).
 - `startTime`/`endTime` v meetingDetails patří k naplánované schůzce (u hovoru
   `01/01/0001`).
 - Konec přijde jako zpráva zhruba v čase konce hovoru.
+
+Schůzka (např. naplánovaná `Scheduled`) má v chatu kromě `Event/Call` i zprávy
+`RichText/Media_CallRecording` (stav nahrávání `Initial` → `ChunkFinished` → `Success`,
+`RecordingContent`, `RecordingStorage`) a `RichText/Media_CallTranscript`. Tymy je zatím
+nezobrazuje. Schůzky v `48:calllogs` nejsou.
 
 Historie hovorů: obyčejné hovory 1:1 (tlačítko Volat) se do chatu **nezapisují**.
 Jsou jen v konverzaci `48:calllogs`:

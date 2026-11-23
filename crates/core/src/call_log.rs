@@ -17,17 +17,20 @@ pub struct CallLog {
     /// Spojuje začátek a konec téhož hovoru.
     pub call_id: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
-    /// Délka hovoru (nejdelší účast) v sekundách; jen u konce.
+    /// Délka hovoru v sekundách; jen u konce. (Teams ji uvádí u každého účastníka, ale jde
+    /// o délku celého hovoru, ne o délku jeho účasti.)
     pub duration_secs: Option<u64>,
-    /// Jména účastníků (u konce).
+    /// Jména účastníků (u konce; Teams jich vypíše nejvýš 25).
     pub participants: Vec<String>,
+    /// Skutečný počet účastníků (`partlist count`), i když jména nejsou všechna.
+    pub participant_count: usize,
 }
 
 impl CallLog {
     /// Konec bez účasti protistrany (nikdo hovor nepřijal).
     pub fn missed(&self) -> bool {
         self.phase == CallPhase::Ended
-            && (self.participants.len() < 2 || self.duration_secs.unwrap_or(0) == 0)
+            && (self.participant_count < 2 || self.duration_secs.unwrap_or(0) == 0)
     }
 }
 
@@ -64,8 +67,18 @@ pub fn parse(content: &str) -> Option<CallLog> {
         }
         rest = &part[end..];
     }
+    let participant_count = content
+        .find("<partlist")
+        .and_then(|i| {
+            let head = &content[i..i + content[i..].find('>')?];
+            let v = head.split("count=\"").nth(1)?.split('"').next()?;
+            v.parse::<usize>().ok()
+        })
+        .unwrap_or(0)
+        .max(participants.len());
     Some(CallLog {
         phase,
+        participant_count,
         call_id: tag(content, "callId").filter(|c| !c.is_empty()),
         started_at,
         duration_secs,
@@ -152,11 +165,27 @@ mod tests {
         assert_eq!(c.call_id.as_deref(), Some("c-1"));
         assert_eq!(c.duration_secs, Some(192));
         assert_eq!(c.participants, ["Jana Nováková", "Petr & spol."]);
+        assert_eq!(c.participant_count, 2);
         assert_eq!(
             c.started_at.unwrap().to_rfc3339(),
             "2026-03-14T09:30:05+00:00"
         );
         assert!(!c.missed());
+    }
+
+    /// Velká schůzka: jmen je v seznamu jen 25, skutečný počet je v `count`.
+    #[test]
+    fn participant_count_from_attribute() {
+        let parts: String = (0..25)
+            .map(|i| format!("<part identity=\"8:orgid:{i}\"><name>{i}</name><duration>5102</duration></part>"))
+            .collect();
+        let c = parse(&format!(
+            "<ended/><partlist alt=\"\" count=\"64\">{parts}</partlist>\
+<callEventType>callEnded</callEventType>"
+        ))
+        .expect("hovor");
+        assert_eq!((c.participants.len(), c.participant_count), (25, 64));
+        assert_eq!(c.duration_secs, Some(5102));
     }
 
     #[test]

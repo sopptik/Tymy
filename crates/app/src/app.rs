@@ -10066,8 +10066,8 @@ fn call_row<'a>(c: &tymy_core::call_log::CallLog, m: &Message) -> Element<'a, Ms
     {
         parts.push(format_duration(d));
     }
-    if c.participants.len() > 2 {
-        parts.push(format!("{} účastníků", c.participants.len()));
+    if c.participant_count > 2 {
+        parts.push(format!("{} účastníků", c.participant_count));
     }
     pill_row(parts.join(" · "), c.missed())
 }
