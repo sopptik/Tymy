@@ -108,10 +108,43 @@ pub fn from_ms(sdp: &str) -> String {
         .first()
         .and_then(|s| s.lines.iter().find(|l| is_direction(l)).cloned())
         .unwrap_or_else(|| "a=sendrecv".to_owned());
+    // server u odmítnutého média (port 0) vynechá `a=mid`; `webrtcbin` pak odmítne celou
+    // odpověď, proto se mid doplní podle pořadí v `a=group:BUNDLE`
+    let bundle: Vec<String> = secs
+        .first()
+        .and_then(|s| {
+            s.lines
+                .iter()
+                .find_map(|l| l.strip_prefix("a=group:BUNDLE "))
+        })
+        .map(|g| g.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
+    // údaje transportu sdílené v BUNDLE (server je u odmítnutého média vynechá, `webrtcbin`
+    // je chce u každého)
+    const TRANSPORT: &[&str] = &["a=ice-ufrag:", "a=ice-pwd:", "a=fingerprint:", "a=setup:"];
+    let transport: Vec<String> = TRANSPORT
+        .iter()
+        .filter_map(|p| {
+            secs.iter()
+                .skip(1)
+                .find_map(|s| s.lines.iter().find(|l| l.starts_with(p)).cloned())
+        })
+        .collect();
     for (i, sec) in secs.iter_mut().enumerate() {
         if i == 0 {
             sec.lines.retain(|l| !l.starts_with("a=x-"));
             continue;
+        }
+        for t in &transport {
+            let prefix = &t[..t.find(':').map_or(t.len(), |i| i + 1)];
+            if !sec.lines.iter().any(|l| l.starts_with(prefix)) {
+                sec.lines.push(t.clone());
+            }
+        }
+        if !sec.lines.iter().any(|l| l.starts_with("a=mid:"))
+            && let Some(mid) = bundle.get(i - 1)
+        {
+            sec.lines.push(format!("a=mid:{mid}"));
         }
         let Some(m) = parse_m(&sec.lines[0]) else {
             continue;
@@ -148,9 +181,12 @@ pub fn from_ms(sdp: &str) -> String {
             lines.extend(
                 sec.lines
                     .iter()
-                    .filter(|l| l.starts_with("a=mid:"))
+                    .filter(|l| {
+                        l.starts_with("a=mid:") || TRANSPORT.iter().any(|p| l.starts_with(p))
+                    })
                     .cloned(),
             );
+            lines.push("a=inactive".to_owned());
             sec.lines = lines;
             continue;
         }
@@ -189,7 +225,10 @@ pub fn from_ms(sdp: &str) -> String {
             }
             lines.push(l.clone());
         }
-        if !lines.iter().any(|l| is_direction(l)) {
+        if m.port == "0" {
+            lines.retain(|l| !is_direction(l));
+            lines.push("a=inactive".to_owned());
+        } else if !lines.iter().any(|l| is_direction(l)) {
             lines.push(session_direction.clone());
         }
         sec.lines = lines;
@@ -251,7 +290,10 @@ pub fn to_ms(sdp: &str) -> String {
         let Some(m) = parse_m(&sec.lines[0]) else {
             continue;
         };
-        let rejected = m.port == "0";
+        // `webrtcbin` (max-bundle) dává dalším médiím port 0 s `a=bundle-only`; server by je
+        // bral jako odmítnutá, web klient má všude stejný port
+        let bundled = sec.lines.iter().any(|l| l == "a=bundle-only");
+        let rejected = m.port == "0" && !bundled;
         let (addr, port) = default_candidate(&sec.lines)
             .or_else(|| shared.clone())
             .unwrap_or_else(|| ("0.0.0.0".into(), m.port.to_owned()));
@@ -281,6 +323,7 @@ pub fn to_ms(sdp: &str) -> String {
             }
             // RTCP na stejném portu (rtcp-mux); odlišný port by server mohl brát vážně
             if l.starts_with("a=rtcp:")
+                || l == "a=bundle-only"
                 || l.starts_with("a=end-of-candidates")
                 || l.starts_with("a=rtcp-mux-only")
             {
@@ -302,6 +345,21 @@ pub fn to_ms(sdp: &str) -> String {
                 let fmtp = format!("a=fmtp:{pt} ");
                 if !sec.lines.iter().any(|l| l.starts_with(&fmtp)) {
                     lines.push(format!("{fmtp}minptime=10;useinbandfec=1"));
+                }
+                continue;
+            }
+            if let Some(map) = l.strip_prefix("a=rtpmap:")
+                && let Some((pt, codec)) = map.split_once(' ')
+                && codec.to_ascii_uppercase().starts_with("H264/")
+            {
+                lines.push(l.clone());
+                // `webrtcbin` u H264 `a=fmtp` nepíše; server ho chce (jako web klient:
+                // Constrained Baseline 3.1, fragmentace FU-A)
+                let fmtp = format!("a=fmtp:{pt} ");
+                if !sec.lines.iter().any(|l| l.starts_with(&fmtp)) {
+                    lines.push(format!(
+                        "{fmtp}packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1"
+                    ));
                 }
                 continue;
             }
@@ -462,6 +520,52 @@ a=mid:data_2\r\n";
         assert!(!s.contains("tcptype") && !s.contains("fe80") && !s.contains("rtcp-mux-only"));
         assert!(
             s.contains("a=rtpmap:102 opus/48000/2\r\na=fmtp:102 minptime=10;useinbandfec=1\r\n")
+        );
+    }
+
+    /// Videohovor z `webrtcbin` (max-bundle): video má port 0 a `a=bundle-only`.
+    #[test]
+    fn bundle_only_video_gets_shared_port() {
+        let sdp = "v=0\r\no=- 1 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+a=group:BUNDLE audio0 video1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:audio0\r\n\
+a=candidate:1 1 UDP 100 198.51.100.3 3478 typ relay raddr 203.0.113.9 rport 1\r\n\
+a=rtpmap:111 OPUS/48000/2\r\n\
+m=video 0 UDP/TLS/RTP/SAVPF 107\r\nc=IN IP4 0.0.0.0\r\na=bundle-only\r\na=mid:video1\r\n\
+a=sendrecv\r\na=rtpmap:107 H264/90000\r\na=ssrc:42 cname:x\r\n";
+        let s = to_ms(sdp);
+        assert!(
+            s.contains("m=video 3478 RTP/SAVP 107\r\nc=IN IP4 198.51.100.3\r\n"),
+            "{s}"
+        );
+        assert!(!s.contains("bundle-only"), "{s}");
+        assert!(
+            s.contains("a=x-ssrc-range:42-42\r\na=label:main-video\r\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("a=rtpmap:107 H264/90000\r\na=fmtp:107 packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1\r\n"),
+            "{s}"
+        );
+    }
+
+    /// Server video odmítne (echo bot): port 0, `RTP/AVP`, bez `a=mid` a bez směru.
+    #[test]
+    fn rejected_video_gets_mid_from_bundle() {
+        let answer = "v=0\r\no=- 1 0 IN IP4 198.51.100.7\r\ns=session\r\nt=0 0\r\n\
+a=group:BUNDLE audio0 video1\r\na=x-plaza-msi-range:1-100 101-200\r\n\
+m=audio 3478 RTP/SAVP 111\r\nc=IN IP4 198.51.100.7\r\na=setup:passive\r\na=mid:audio0\r\n\
+a=rtpmap:111 OPUS/48000/2\r\n\
+m=video 0 RTP/AVP 107\r\na=label:main-video\r\n";
+        let s = from_ms(answer);
+        let video = s.split("m=video").nth(1).expect("video");
+        assert!(video.contains("a=mid:video1\r\n"), "{s}");
+        assert!(video.contains("a=inactive\r\n"), "{s}");
+        assert!(!video.contains("a=sendrecv"), "{s}");
+        let audio = s.split("m=video").next().unwrap();
+        assert!(
+            audio.contains("a=mid:audio0\r\n") && audio.contains("a=sendrecv"),
+            "{s}"
         );
     }
 

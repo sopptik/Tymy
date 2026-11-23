@@ -529,6 +529,22 @@ seřazená). Když protistranu nejde přizvat, čeká se `conversation/addPartic
 Její tělo zatím nemáme z odchytu. Tymy v ní hledá kód SIP (486 obsazeno, 603 odmítnuto,
 480/408 nezvedá) a hovor ukončí.
 
+Video (ověřeno s echo botem 2026-11-23): bot video odmítne, odpověď má
+`m=video 0 RTP/AVP 107` jen s `a=label:main-video`, bez `a=mid`, ICE údajů a směru.
+`webrtcbin` pak odmítne celou odpověď („media 1 is missing … 'mid'“, potom „… 'ice-ufrag'“),
+proto `sdp::from_ms` doplní mid podle `a=group:BUNDLE` a ICE údaje a otisk z prvního média
+a nastaví `a=inactive`. V relaci přišlo `a=x-plaza-msi-range:1-100 101-200` a u zvuku
+`a=x-source-streamid:201`, což jsou identifikátory proudů (MSI) pro vyžádání obrazu.
+`webrtcbin` u druhého média v BUNDLE píše port 0 a `a=bundle-only` a u H264 nepíše `a=fmtp`.
+`sdp::to_ms` dává sdílený port a `packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1`.
+
+Vyžádání obrazu protistrany (z kódu web klienta, zatím neověřeno): klient pošle
+`controlVideoStreaming` (`controlInfo: [{control: "start", sourceId, streamMsid, fmtParams}]`)
+nebo `applyChannelParameters.multiChannelParameter` (`mids`, `mediaParameter` = JSON
+s `controlVideoStreaming` typu `sr`) na odkaz `links.applyChannelParameters` /
+`links.controlVideoStreaming` z odpovědí mediálního řadiče. Přednostně ale jde datovým kanálem
+(`m=x-data`, SCTP).
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce

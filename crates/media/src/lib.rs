@@ -1,5 +1,6 @@
 //! Média hovorů nad GStreamerem: `webrtcbin` (ICE, DTLS-SRTP, relay servery Teams),
-//! zvuk Opus z mikrofonu (PipeWire/PulseAudio) do reproduktoru.
+//! zvuk Opus z mikrofonu (PipeWire/PulseAudio) do reproduktoru, obraz H264 z kamery
+//! a dekódované snímky protistrany pro okno (viz [`video`]).
 //!
 //! SDP se vyjednává ve standardním tvaru WebRTC; překlad do dialektu Microsoftu dělá
 //! `tymy-api`. Kandidáti ICE se nesbírají průběžně (Teams trickle nepoužívá): nabídka
@@ -13,10 +14,15 @@ use async_trait::async_trait;
 use gst::prelude::*;
 use tymy_core::{Error, Result};
 
+pub mod video;
+pub use video::{Frame, VideoSource};
+
 /// Nejdéle, kolik se čeká na sběr kandidátů ICE (relay servery bývají do 1–2 s).
 const GATHER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Typ obsahu Opus, když ho určujeme my (nabídka).
 const OPUS_PT: u32 = 111;
+/// Typ obsahu H264, když ho určujeme my (nabídka).
+const H264_PT: u32 = 107;
 
 /// Odkud bere hovor zvuk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +46,8 @@ pub struct Config {
     pub turn: Vec<String>,
     pub source: Source,
     pub sink: Sink,
+    /// Obraz: `Some` = videohovor (kamera se zapne hned), `None` = jen zvuk.
+    pub video: Option<VideoSource>,
 }
 
 /// Co se za hovor přeneslo.
@@ -53,6 +61,8 @@ pub struct Stats {
     pub loud_samples: u64,
     /// Nejvyšší hlasitost od minulého volání `stats` (dBFS).
     pub recent_db: Option<f64>,
+    /// Kolik snímků obrazu protistrany se dekódovalo.
+    pub video_frames: u64,
 }
 
 /// Práh, nad kterým přijatý zvuk nepovažujeme za ticho (dBFS).
@@ -82,6 +92,9 @@ struct Shared {
     /// Nejvyšší hlášené počty paketů (statistika proudu po čase zmizí).
     packets: Mutex<(u64, u64)>,
     stop: AtomicBool,
+    /// Obraz protistrany a náhled vlastní kamery.
+    remote_video: Arc<video::Slot>,
+    local_video: Arc<video::Slot>,
 }
 
 pub struct GstMedia {
@@ -91,6 +104,10 @@ pub struct GstMedia {
     shared: Arc<Shared>,
     /// Vysílací větev zvuku už je napojená (přeVyjednání ji nezakládá znovu).
     sending: Mutex<bool>,
+    /// Vstup kodéru obrazu (`None` = hovor bez videa).
+    video_in: Mutex<Option<gst_app::AppSrc>>,
+    /// Běžící kamera (`None` = vypnutá).
+    camera: Mutex<Option<video::Camera>>,
 }
 
 impl std::fmt::Debug for GstMedia {
@@ -102,7 +119,7 @@ impl std::fmt::Debug for GstMedia {
     }
 }
 
-fn err(what: &str, e: impl std::fmt::Display) -> Error {
+pub(crate) fn err(what: &str, e: impl std::fmt::Display) -> Error {
     Error::Other(format!("{what}: {e}"))
 }
 
@@ -130,6 +147,8 @@ impl GstMedia {
             level: Mutex::new(Level::default()),
             packets: Mutex::new((0, 0)),
             stop: AtomicBool::new(false),
+            remote_video: Arc::default(),
+            local_video: Arc::default(),
         });
         {
             let shared = shared.clone();
@@ -163,12 +182,13 @@ impl GstMedia {
         {
             let pipeline = pipeline.downgrade();
             let sink = config.sink;
+            let remote = shared.remote_video.clone();
             webrtc.connect_pad_added(move |_, pad| {
                 if pad.direction() != gst::PadDirection::Src {
                     return;
                 }
                 if let Some(p) = pipeline.upgrade()
-                    && let Err(e) = on_remote_pad(&p, pad, sink)
+                    && let Err(e) = on_remote_pad(&p, pad, sink, remote.clone())
                 {
                     tracing::warn!(error = %e, "příchozí médium");
                 }
@@ -181,7 +201,52 @@ impl GstMedia {
             config,
             shared,
             sending: Mutex::new(false),
+            video_in: Mutex::new(None),
+            camera: Mutex::new(None),
         })
+    }
+
+    /// Poslední snímek obrazu protistrany.
+    pub fn remote_frame(&self) -> Option<Arc<Frame>> {
+        self.shared.remote_video.latest()
+    }
+
+    /// Poslední snímek vlastní kamery (náhled).
+    pub fn local_frame(&self) -> Option<Arc<Frame>> {
+        self.shared.local_video.latest()
+    }
+
+    /// Má hovor obraz (videohovor)?
+    pub fn has_video(&self) -> bool {
+        self.video_in.lock().expect("zámek").is_some()
+    }
+
+    pub fn camera_on(&self) -> bool {
+        self.camera.lock().expect("zámek").is_some()
+    }
+
+    /// Zapne nebo vypne kameru. Vypnutá kamera se zastaví úplně (zhasne kontrolka);
+    /// protistrana uvidí poslední odeslaný snímek, dokud se neposílá nic dalšího.
+    pub fn set_camera(&self, on: bool) -> Result<()> {
+        let mut camera = self.camera.lock().expect("zámek");
+        if !on {
+            *camera = None;
+            video::clear(&self.shared.local_video);
+            return Ok(());
+        }
+        if camera.is_some() {
+            return Ok(());
+        }
+        let Some(input) = self.video_in.lock().expect("zámek").clone() else {
+            return Err(Error::Other("hovor nemá obraz".into()));
+        };
+        let source = self.config.video.unwrap_or(VideoSource::Camera);
+        *camera = Some(video::Camera::start(
+            source,
+            input,
+            self.shared.local_video.clone(),
+        )?);
+        Ok(())
     }
 
     /// Ztlumí nebo zapne mikrofon.
@@ -205,6 +270,7 @@ impl GstMedia {
                 peak_db: l.peak,
                 loud_samples: l.loud,
                 recent_db: l.recent.take(),
+                video_frames: self.shared.remote_video.count(),
                 ..Default::default()
             }
         };
@@ -242,6 +308,7 @@ impl GstMedia {
     /// Zastaví zvuk i spojení.
     pub fn stop(&self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        *self.camera.lock().expect("zámek") = None;
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 
@@ -337,6 +404,30 @@ impl GstMedia {
         Ok(())
     }
 
+    /// Napojí vysílání obrazu (kamera → H264 → RTP) na `webrtcbin` a zapne kameru.
+    fn add_video_sender(&self, pt: u32) -> Result<()> {
+        if self.config.video.is_none() || self.has_video() {
+            return Ok(());
+        }
+        let (input, last) = video::sender(&self.pipeline, pt, random_ssrc())?;
+        let sink = self
+            .webrtc
+            .request_pad_simple("sink_%u")
+            .ok_or_else(|| Error::Other("webrtcbin nedal vstup pro obraz".into()))?;
+        last.static_pad("src")
+            .expect("capsfilter má výstup")
+            .link(&sink)
+            .map_err(|e| err("napojení obrazu", e))?;
+        if let Some(t) = sink.property::<Option<gst_webrtc::WebRTCRTPTransceiver>>("transceiver") {
+            t.set_property(
+                "direction",
+                gst_webrtc::WebRTCRTPTransceiverDirection::Sendrecv,
+            );
+        }
+        *self.video_in.lock().expect("zámek") = Some(input);
+        self.set_camera(true)
+    }
+
     fn play(&self) -> Result<()> {
         self.pipeline
             .set_state(gst::State::Playing)
@@ -384,6 +475,7 @@ impl GstMedia {
 impl tymy_core::Media for GstMedia {
     async fn offer(&self) -> Result<String> {
         self.add_audio_sender(OPUS_PT)?;
+        self.add_video_sender(H264_PT)?;
         self.play()?;
         let pending = self.call("create-offer", &[&None::<gst::Structure>]);
         let reply = pending
@@ -400,6 +492,9 @@ impl tymy_core::Media for GstMedia {
         // vysílat stejným typem obsahu, jaký protistrana nabídla
         let pt = opus_pt(offer).unwrap_or(OPUS_PT);
         self.add_audio_sender(pt)?;
+        if let Some(pt) = video::h264_pt(offer) {
+            self.add_video_sender(pt)?;
+        }
         self.play()?;
         self.set_remote(gst_webrtc::WebRTCSDPType::Offer, offer)
             .await?;
@@ -420,7 +515,7 @@ impl tymy_core::Media for GstMedia {
     }
 
     fn sends_video(&self) -> bool {
-        false
+        self.config.video.is_some()
     }
 }
 
@@ -431,7 +526,12 @@ impl Drop for GstMedia {
 }
 
 /// Příchozí RTP z `webrtcbin`: dekódovat a zvuk poslat do reproduktoru (nebo jen měřit).
-fn on_remote_pad(pipeline: &gst::Pipeline, pad: &gst::Pad, sink: Sink) -> Result<()> {
+fn on_remote_pad(
+    pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    sink: Sink,
+    remote: Arc<video::Slot>,
+) -> Result<()> {
     let decode = gst::ElementFactory::make("decodebin")
         .build()
         .map_err(|e| err("decodebin", e))?;
@@ -447,8 +547,9 @@ fn on_remote_pad(pipeline: &gst::Pipeline, pad: &gst::Pad, sink: Sink) -> Result
             .unwrap_or_default();
         let r = if kind.starts_with("audio/") {
             audio_out(&pipeline, pad, sink)
+        } else if kind.starts_with("video/") {
+            video::output(&pipeline, pad, remote.clone())
         } else {
-            // obraz zatím nikam (zobrazení přijde s videem)
             discard(&pipeline, pad)
         };
         if let Err(e) = r {

@@ -400,6 +400,23 @@ samostatného commitu“)
    tlačítko je teď kulaté zelené se sluchátkem (SVG, `crates/app/assets/phone.svg`).
    „až budeš dělat video tak použij ikonu kamery asi v červeném pozadí“: videohovor bude
    mít vedle sluchátka kulaté červené tlačítko s bílou kamerou.
+   🟡 **Video (2026-11-23):** „pushni to a pokračuj videem“. Hotovo:
+   - média: kamera (V4L2) ve vlastní pipeline (vypnutí kamery ji zastaví, zhasne kontrolka),
+     640×360 při 15 snímcích/s, H264 přes openh264 (záloha x264), obraz protistrany
+     dekódovaný na snímky RGBA; test mezi dvěma instancemi: obraz oběma směry ~15 snímků/s;
+   - SDP: video z `webrtcbin` (port 0 + `bundle-only`) dostane sdílený port, H264 `a=fmtp`
+     jako web klient; odmítnuté video v odpovědi serveru (bez `a=mid` a ICE údajů) se doplní,
+     aby šel aspoň zvuk;
+   - okno: v hlavičce 1:1 chatu červené tlačítko s kamerou (videohovor) vedle zeleného;
+     nad chatem plocha s obrazem protistrany a náhledem vlastní kamery; v liště
+     „Vypnout/Zapnout kameru“; CLI `echo-call --video`.
+   Chybí (potřebuje živý hovor s člověkem, echo bot video odmítá): vyžádání obrazu protistrany
+   u mediálního serveru. Web klient posílá `controlVideoStreaming` / `applyChannelParameters`
+   se `sourceId` (MSI z `a=x-plaza-msi-range` / rosteru) na odkaz `applyChannelParameters`;
+   bez toho server obraz protistrany asi neposílá.
+   Síť (2026-11-23): po změně sítě (kabel i Wi-Fi ve stejné síti, dvě veřejné adresy) neprojde
+   ICE ani u hlasového hovoru (i verze 0.2.0): server na naše kontroly neodpovídá, dvojice
+   s relay kandidáty se netvoří. Řešit zvlášť.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

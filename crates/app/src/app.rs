@@ -43,6 +43,10 @@ use crate::tray::{self, TrayEvent, TrayHandle};
 
 /// Ikona sluchátka (bílá, na zelené tlačítko hovoru).
 const PHONE_ICON: &[u8] = include_bytes!("../assets/phone.svg");
+/// Ikona kamery (bílá, na červené tlačítko videohovoru).
+const CAMERA_ICON: &[u8] = include_bytes!("../assets/camera.svg");
+/// Jak často okno přebírá nové snímky obrazu hovoru (~15 snímků/s jako kamera).
+const VIDEO_FRAME: Duration = Duration::from_millis(66);
 const COMPOSER: Id = Id::new("composer");
 const GROUP_QUERY: Id = Id::new("group-query");
 const SEARCH: Id = Id::new("search");
@@ -109,15 +113,65 @@ struct Call {
     muted: bool,
     /// Stavy, které přišly dřív, než zahájení hovoru vrátilo jeho id (server odpovídá rychle).
     early: Vec<(String, tymy_core::CallState)>,
+    /// Videohovor (vysíláme obraz z kamery).
+    video: bool,
+    /// Poslední zobrazené snímky: obraz protistrany a náhled vlastní kamery (s pořadím).
+    remote: Option<(u64, image::Handle)>,
+    local: Option<(u64, image::Handle)>,
 }
 
-/// Média hovoru: mikrofon a reproduktor, relay servery Teams.
-async fn call_media(backend: Arc<TeamsBackend>) -> tymy_core::Result<Arc<tymy_media::GstMedia>> {
+impl Call {
+    fn new(id: Option<String>, title: String, video: bool) -> Self {
+        Self {
+            id,
+            title,
+            media: None,
+            since: None,
+            muted: false,
+            early: vec![],
+            video,
+            remote: None,
+            local: None,
+        }
+    }
+
+    /// Převezme nové snímky z médií; `true` = něco se změnilo.
+    fn refresh_frames(&mut self) -> bool {
+        let Some(m) = &self.media else {
+            return false;
+        };
+        let update = |slot: &mut Option<(u64, image::Handle)>,
+                      f: Option<Arc<tymy_media::Frame>>| match f {
+            Some(f) if slot.as_ref().is_none_or(|(seq, _)| *seq != f.seq) => {
+                let h = image::Handle::from_rgba(f.width, f.height, f.rgba.clone());
+                *slot = Some((f.seq, h));
+                true
+            }
+            Some(_) => false,
+            None => slot.take().is_some(),
+        };
+        let r = update(&mut self.remote, m.remote_frame());
+        let l = update(&mut self.local, m.local_frame());
+        r || l
+    }
+
+    /// Je co zobrazit (obraz protistrany nebo vlastní kamera)?
+    fn shows_video(&self) -> bool {
+        self.remote.is_some() || self.local.is_some()
+    }
+}
+
+/// Média hovoru: mikrofon a reproduktor (u videohovoru i kamera), relay servery Teams.
+async fn call_media(
+    backend: Arc<TeamsBackend>,
+    video: bool,
+) -> tymy_core::Result<Arc<tymy_media::GstMedia>> {
     let turn = backend.turn_credentials().await?.urls();
     let media = tymy_media::GstMedia::new(tymy_media::Config {
         turn,
         source: tymy_media::Source::Microphone,
         sink: tymy_media::Sink::Speaker,
+        video: video.then_some(tymy_media::VideoSource::Camera),
     })?;
     Ok(Arc::new(media))
 }
@@ -332,7 +386,11 @@ pub enum Msg {
     /// Zkušební hovor s echo botem (se zvukem).
     TestCall,
     /// Zavolat protistraně 1:1 chatu (MRI, jméno do lišty hovoru).
-    CallPerson(UserId, String),
+    CallPerson(UserId, String, bool),
+    /// Zapnout / vypnout kameru v probíhajícím videohovoru.
+    ToggleCamera,
+    /// Překreslit obraz hovoru (nové snímky).
+    VideoTick,
     AcceptCall(String),
     CallAccepted(String, Result<Arc<tymy_media::GstMedia>, Failure>),
     CallStarted(Result<(String, Arc<tymy_media::GstMedia>), Failure>),
@@ -691,7 +749,9 @@ impl Msg {
             Msg::DismissCall(_) => debug!("update: DismissCall"),
             Msg::CallNotification(_, c) => debug!(choice = ?c, "update: CallNotification"),
             Msg::TestCall => debug!("update: TestCall"),
-            Msg::CallPerson(..) => debug!("update: CallPerson"),
+            Msg::CallPerson(_, _, video) => debug!(video, "update: CallPerson"),
+            Msg::ToggleCamera => debug!("update: ToggleCamera"),
+            Msg::VideoTick => {}
             Msg::AcceptCall(_) => debug!("update: AcceptCall"),
             Msg::CallAccepted(_, r) => debug!(result = ok(r.is_ok()), "update: CallAccepted"),
             Msg::CallStarted(r) => debug!(result = ok(r.is_ok()), "update: CallStarted"),
@@ -1524,6 +1584,12 @@ impl App {
                 iced::time::every(CALENDAR_TICK).map(|_| Msg::CalendarTick),
                 if self.call.as_ref().is_some_and(|c| c.since.is_some()) {
                     iced::time::every(Duration::from_secs(1)).map(|_| Msg::CallTick)
+                } else {
+                    Subscription::none()
+                },
+                // obraz hovoru: kamera běží hned, obraz protistrany může přijít kdykoli
+                if self.call.as_ref().is_some_and(|c| c.media.is_some()) {
+                    iced::time::every(VIDEO_FRAME).map(|_| Msg::VideoTick)
                 } else {
                     Subscription::none()
                 },
@@ -3215,24 +3281,22 @@ impl App {
     }
 
     /// Odchozí hovor: lišta hned ukáže „Vyzvání…“, média a signalizace běží na pozadí.
-    fn start_outgoing(&mut self, target: tymy_core::CallTarget, title: String) -> Task<Msg> {
+    fn start_outgoing(
+        &mut self,
+        target: tymy_core::CallTarget,
+        title: String,
+        video: bool,
+    ) -> Task<Msg> {
         let Some(backend) = self.session().map(|s| s.backend.clone()) else {
             return Task::none();
         };
         if self.call.is_some() {
             return self.show_toast("Už probíhá jiný hovor");
         }
-        self.call = Some(Call {
-            id: None,
-            title,
-            media: None,
-            since: None,
-            muted: false,
-            early: vec![],
-        });
+        self.call = Some(Call::new(None, title, video));
         Task::perform(
             async move {
-                let media = call_media(backend.clone()).await?;
+                let media = call_media(backend.clone(), video).await?;
                 let id = backend.start_call(target, media.clone()).await?;
                 Ok((id, media))
             },
@@ -3596,10 +3660,34 @@ impl App {
             },
             Msg::TestCall => {
                 self.account_menu = false;
-                self.start_outgoing(tymy_core::CallTarget::EchoBot, "Testovací hovor".into())
+                self.start_outgoing(
+                    tymy_core::CallTarget::EchoBot,
+                    "Testovací hovor".into(),
+                    false,
+                )
             }
-            Msg::CallPerson(peer, title) => {
-                self.start_outgoing(tymy_core::CallTarget::Person(peer), title)
+            Msg::CallPerson(peer, title, video) => {
+                self.start_outgoing(tymy_core::CallTarget::Person(peer), title, video)
+            }
+            Msg::ToggleCamera => {
+                let Some(c) = self.call.as_mut() else {
+                    return Task::none();
+                };
+                let Some(m) = c.media.clone() else {
+                    return Task::none();
+                };
+                let on = !m.camera_on();
+                if let Err(e) = m.set_camera(on) {
+                    return self.show_toast(&format!("Kameru se nepodařilo zapnout: {e}"));
+                }
+                c.refresh_frames();
+                Task::none()
+            }
+            Msg::VideoTick => {
+                if let Some(c) = self.call.as_mut() {
+                    c.refresh_frames();
+                }
+                Task::none()
             }
             Msg::CallStarted(r) => match r {
                 Ok((id, media)) => match self.call.as_mut().filter(|c| c.id.is_none()) {
@@ -3635,22 +3723,20 @@ impl App {
                 let Some(incoming) = self.incoming.take().filter(|c| c.call_id == call_id) else {
                     return self.show_toast("Hovor už nezvoní");
                 };
-                self.call = Some(Call {
-                    id: Some(call_id.clone()),
-                    title: incoming
+                // přijímá se se zvukem; obraz protistrany se zobrazí, pokud ho posílá
+                self.call = Some(Call::new(
+                    Some(call_id.clone()),
+                    incoming
                         .from_name
                         .clone()
                         .unwrap_or_else(|| "Neznámý volající".into()),
-                    media: None,
-                    since: None,
-                    muted: false,
-                    early: vec![],
-                });
+                    false,
+                ));
                 Task::perform(
                     {
                         let call_id = call_id.clone();
                         async move {
-                            let media = call_media(backend.clone()).await?;
+                            let media = call_media(backend.clone(), false).await?;
                             backend.accept_call(&call_id, media.clone()).await?;
                             Ok(media)
                         }
@@ -5885,6 +5971,9 @@ impl App {
             None => body,
         };
         let body = match &self.call {
+            Some(call) if call.shows_video() => {
+                column![active_call_bar(call), video_stage(call), body].into()
+            }
             Some(call) => column![active_call_bar(call), body].into(),
             None => body,
         };
@@ -7590,34 +7679,55 @@ impl App {
                 space().into()
             };
         let call: Element<'a, Msg> = match self.peer(conv).filter(|_| !self.is_draft(&conv.id)) {
-            Some(peer) => iced::widget::tooltip(
-                button(
-                    iced::widget::svg(iced::widget::svg::Handle::from_memory(PHONE_ICON))
-                        .width(18)
-                        .height(18),
-                )
-                .width(34)
-                .height(34)
-                .padding(8)
-                .style(style::call_round)
-                .on_press_maybe(
-                    self.call
-                        .is_none()
-                        .then(|| Msg::CallPerson(peer, title.clone())),
-                ),
-                container(
-                    text(if self.call.is_none() {
-                        "Hlasový hovor"
-                    } else {
-                        "Už probíhá jiný hovor"
+            Some(peer) => {
+                let free = self.call.is_none();
+                let tip = |label: &'static str| {
+                    container(
+                        text(if free {
+                            label
+                        } else {
+                            "Už probíhá jiný hovor"
+                        })
+                        .size(11),
+                    )
+                    .padding([3, 8])
+                    .style(style::tooltip)
+                };
+                let round = |icon: &'static [u8], video: bool| {
+                    button(
+                        iced::widget::svg(iced::widget::svg::Handle::from_memory(icon))
+                            .width(18)
+                            .height(18),
+                    )
+                    .width(34)
+                    .height(34)
+                    .padding(8)
+                    .style(move |t: &Theme, st| {
+                        if video {
+                            style::video_round(t, st)
+                        } else {
+                            style::call_round(t, st)
+                        }
                     })
-                    .size(11),
-                )
-                .padding([3, 8])
-                .style(style::tooltip),
-                iced::widget::tooltip::Position::Bottom,
-            )
-            .into(),
+                    .on_press_maybe(
+                        free.then(|| Msg::CallPerson(peer.clone(), title.clone(), video)),
+                    )
+                };
+                row![
+                    iced::widget::tooltip(
+                        round(CAMERA_ICON, true),
+                        tip("Videohovor"),
+                        iced::widget::tooltip::Position::Bottom,
+                    ),
+                    iced::widget::tooltip(
+                        round(PHONE_ICON, false),
+                        tip("Hlasový hovor"),
+                        iced::widget::tooltip::Position::Bottom,
+                    ),
+                ]
+                .spacing(8)
+                .into()
+            }
             None => space().into(),
         };
         let header = container(
@@ -9496,7 +9606,9 @@ fn active_call_bar(call: &Call) -> Element<'_, Msg> {
     };
     container(
         row![
-            text("📞").size(16).font(style::EMOJI),
+            text(if call.video { "🎥" } else { "📞" })
+                .size(16)
+                .font(style::EMOJI),
             column![
                 text(call.title.as_str()).size(14).font(BOLD),
                 text(status).size(12).style(muted),
@@ -9514,6 +9626,7 @@ fn active_call_bar(call: &Call) -> Element<'_, Msg> {
             .padding([6, 14])
             .style(style::secondary)
             .on_press_maybe(call.media.is_some().then_some(Msg::ToggleMute)),
+            camera_toggle(call),
             button(text("Zavěsit").size(13))
                 .padding([6, 14])
                 .style(style::danger_button)
@@ -9527,6 +9640,61 @@ fn active_call_bar(call: &Call) -> Element<'_, Msg> {
     .style(style::call_banner)
     .into()
 }
+
+/// Tlačítko kamery v liště videohovoru (u hlasového hovoru nic).
+fn camera_toggle(call: &Call) -> Element<'_, Msg> {
+    let Some(m) = call.media.as_ref().filter(|m| m.has_video()) else {
+        return space().width(0).into();
+    };
+    button(
+        text(if m.camera_on() {
+            "Vypnout kameru"
+        } else {
+            "Zapnout kameru"
+        })
+        .size(13),
+    )
+    .padding([6, 14])
+    .style(style::secondary)
+    .on_press(Msg::ToggleCamera)
+    .into()
+}
+
+/// Obraz videohovoru: protistrana přes celou šířku, vlastní kamera vpravo dole.
+fn video_stage(call: &Call) -> Element<'_, Msg> {
+    let main: Element<'_, Msg> = match &call.remote {
+        Some((_, h)) => image(h.clone())
+            .content_fit(iced::ContentFit::Contain)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        None => container(text("Čekám na obraz protistrany…").size(13).style(muted))
+            .center(Length::Fill)
+            .into(),
+    };
+    let mut layers =
+        iced::widget::Stack::new().push(container(main).width(Length::Fill).height(Length::Fill));
+    if let Some((_, h)) = &call.local {
+        layers = layers.push(
+            container(
+                container(image(h.clone()).width(192).height(108))
+                    .style(style::video_preview)
+                    .padding(2),
+            )
+            .align_right(Length::Fill)
+            .align_bottom(Length::Fill)
+            .padding(10),
+        );
+    }
+    container(layers)
+        .width(Length::Fill)
+        .height(VIDEO_HEIGHT)
+        .style(style::video_stage)
+        .into()
+}
+
+/// Výška plochy s obrazem hovoru nad chatem.
+const VIDEO_HEIGHT: f32 = 380.0;
 
 fn error_banner(err: &str) -> Element<'_, Msg> {
     container(

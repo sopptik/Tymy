@@ -14,6 +14,9 @@ tracing.workspace = true
 gst = { package = "gstreamer", version = "0.25" }
 gst-webrtc = { package = "gstreamer-webrtc", version = "0.25" }
 gst-sdp = { package = "gstreamer-sdp", version = "0.25" }
+gst-app = { package = "gstreamer-app", version = "0.25" }
+gst-video = { package = "gstreamer-video", version = "0.25" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tymy-api.workspace = true

@@ -783,6 +783,48 @@ pub fn call_round(t: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Kulaté červené tlačítko videohovoru (bílá kamera).
+pub fn video_round(t: &Theme, status: button::Status) -> button::Style {
+    let mut s = call_round(t, status);
+    let red = colors(t).danger;
+    s.background = Some(
+        match status {
+            button::Status::Hovered | button::Status::Pressed => Color {
+                r: red.r * 0.85,
+                g: red.g * 0.85,
+                b: red.b * 0.85,
+                a: 1.0,
+            },
+            button::Status::Disabled => Color { a: 0.35, ..red },
+            button::Status::Active => red,
+        }
+        .into(),
+    );
+    s
+}
+
+/// Plocha s obrazem hovoru (tmavá jako ve videohovorech).
+pub fn video_stage(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgb8(0x1b, 0x1b, 0x1f).into()),
+        text_color: Some(Color::from_rgb8(0xc8, 0xc8, 0xcc)),
+        ..Default::default()
+    }
+}
+
+/// Rámeček náhledu vlastní kamery.
+pub fn video_preview(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::BLACK.into()),
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 /// Kulaté tlačítko (odeslat, „nové zprávy“).
 pub fn primary_round(t: &Theme, status: button::Status) -> button::Style {
     let mut s = primary(t, status);

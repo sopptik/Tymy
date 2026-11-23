@@ -103,6 +103,9 @@ enum Command {
         /// Nevolat, jen vypsat nabídku SDP v podobě pro server (obsahuje vlastní IP adresy).
         #[arg(long)]
         dry_run: bool,
+        /// Nabídnout i obraz (testovací obrazec, nebo kamera s `--live`).
+        #[arg(long)]
+        video: bool,
     },
     /// Ladění: požadavek na službu přítomnosti (`ups`), vypíše stav a tělo odpovědi.
     Ups {
@@ -343,7 +346,13 @@ async fn main() -> Result<()> {
             seconds,
             live,
             dry_run,
+            video,
         } => {
+            let video = video.then_some(if live {
+                tymy_media::VideoSource::Camera
+            } else {
+                tymy_media::VideoSource::TestPattern
+            });
             let backend = Arc::new(backend(&config, cli.account.as_deref()).await?);
             if dry_run {
                 use tymy_core::Media;
@@ -352,11 +361,12 @@ async fn main() -> Result<()> {
                     turn,
                     source: tymy_media::Source::TestTone,
                     sink: tymy_media::Sink::Meter,
+                    video,
                 })?;
                 print!("{}", tymy_api::sdp::to_ms(&media.offer().await?));
                 return Ok(());
             }
-            echo_call(backend, Duration::from_secs(seconds), live).await
+            echo_call(backend, Duration::from_secs(seconds), live, video).await
         }
         Command::Ups {
             method,
@@ -528,7 +538,12 @@ async fn resolve_chat(backend: &TeamsBackend, chat: &str) -> Result<Conversation
 }
 
 /// Zkušební hovor s echo botem se skutečnými médii (viz `Command::EchoCall`).
-async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> Result<()> {
+async fn echo_call(
+    backend: Arc<TeamsBackend>,
+    length: Duration,
+    live: bool,
+    video: Option<tymy_media::VideoSource>,
+) -> Result<()> {
     use tymy_media::{Config, GstMedia, Sink, Source};
     let turn = backend.turn_credentials().await?.urls();
     let (source, sink) = if live {
@@ -536,7 +551,12 @@ async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> 
     } else {
         (Source::TestTone, Sink::Meter)
     };
-    let media = Arc::new(GstMedia::new(Config { turn, source, sink })?);
+    let media = Arc::new(GstMedia::new(Config {
+        turn,
+        source,
+        sink,
+        video,
+    })?);
     // události (odpověď serveru, stav hovoru) chodí trouterem; ten musí běžet celou dobu
     let ended = Arc::new(tokio::sync::Notify::new());
     let poller = {
@@ -601,10 +621,11 @@ async fn echo_call(backend: Arc<TeamsBackend>, length: Duration, live: bool) -> 
             _ = tokio::time::sleep(Duration::from_secs(3)) => {
                 let s = media.stats().await;
                 println!(
-                    "odesláno {} paketů, přijato {}, hlasitost přijatého zvuku {}",
+                    "odesláno {} paketů, přijato {}, hlasitost přijatého zvuku {}, snímků obrazu {}",
                     s.packets_sent,
                     s.packets_received,
-                    s.recent_db.map_or("ticho".into(), |d| format!("{d:.0} dB"))
+                    s.recent_db.map_or("ticho".into(), |d| format!("{d:.0} dB")),
+                    s.video_frames,
                 );
             }
         }
