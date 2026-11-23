@@ -552,6 +552,17 @@ Odchozí hovor ho má v odpovědi na založení konverzace, přijatý v odpověd
 addModality, mute, unmute, admit, getAllParticipants, …). U přijatého hovoru Tymy nezná
 chat, a proto posílá `groupChat: null`.
 
+Záznam hovoru v chatu: zprávy `messagetype: Event/Call`, ke každému hovoru dvě.
+- `callStarted`: `<partlist alt ="">` bez účastníků.
+- `callEnded`: `<ended/><partlist count="N">` s `<part identity="8:orgid:…"><name>`,
+  `<displayName>` a `<duration>` (sekundy účasti).
+- Obě mají v `<meetingDetails>` hodnoty `callId`, `callEventType`,
+  `conversationStartTime` (UTC, `MM/DD/YYYY HH:MM:SS`) a `meetingType` (`Adhoc` u hovoru,
+  `Scheduled`/`Recurring` u schůzky).
+- `startTime`/`endTime` v meetingDetails patří k naplánované schůzce (u hovoru
+  `01/01/0001`).
+- Konec přijde jako zpráva zhruba v čase konce hovoru.
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce

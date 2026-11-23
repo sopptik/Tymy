@@ -7970,7 +7970,23 @@ impl App {
         let mut prev: Option<&Message> = None;
         let colors = style::colors(&self.theme());
         let bubble_max = self.bubble_max();
+        // začátek hovoru se nezobrazuje, když je načtený i jeho konec (ten nese délku)
+        let ended_calls: std::collections::HashSet<String> = msgs
+            .iter()
+            .filter_map(call_log)
+            .filter(|c| c.phase == tymy_core::call_log::CallPhase::Ended)
+            .filter_map(|c| c.call_id)
+            .collect();
         for m in msgs.iter().filter(|m| displayable(m)) {
+            let call = call_log(m);
+            if let Some(c) = &call
+                && c.phase == tymy_core::call_log::CallPhase::Started
+                && c.call_id
+                    .as_ref()
+                    .is_some_and(|id| ended_calls.contains(id))
+            {
+                continue;
+            }
             let day = m.arrived_at.map(|t| t.with_timezone(&Local).date_naive());
             let prev_day = prev
                 .and_then(|p| p.arrived_at)
@@ -7988,8 +8004,14 @@ impl App {
                     .padding([12, 0]),
                 );
             }
+            if let Some(c) = &call {
+                list = list.push(call_row(c, m));
+                prev = Some(m);
+                continue;
+            }
             let new_group = prev.is_none_or(|p| {
                 p.sender != m.sender
+                    || call_log(p).is_some()
                     || day != prev_day
                     || match (p.arrived_at, m.arrived_at) {
                         (Some(a), Some(b)) => (b - a).num_minutes() > 5,
@@ -9214,7 +9236,8 @@ fn message_view<'a>(
 
     let mut col = Column::new().spacing(3);
     if header {
-        let time = short_time(m.arrived_at.or(m.composed_at));
+        // datum ukazují oddělovače dnů, u bubliny stačí čas
+        let time = clock_time(m.arrived_at.or(m.composed_at));
         let label: Element<'a, Msg> = if mine {
             text(time).size(11).style(muted).into()
         } else {
@@ -9905,6 +9928,65 @@ fn error_banner(err: &str) -> Element<'_, Msg> {
     .padding([8, 16])
     .width(Length::Fill)
     .style(style::error_banner)
+    .into()
+}
+
+/// Čas zprávy ve vlákně (hodiny a minuty, místní čas).
+fn clock_time(t: Option<DateTime<Utc>>) -> String {
+    t.map(|t| t.with_timezone(&Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+/// Záznam hovoru ze zprávy `Event/Call`.
+fn call_log(m: &Message) -> Option<tymy_core::call_log::CallLog> {
+    match &m.kind {
+        MessageKind::Event(t) if t.starts_with("Event/Call") && !m.deleted => {
+            tymy_core::call_log::parse(&m.content)
+        }
+        _ => None,
+    }
+}
+
+/// Řádek hovoru ve vlákně: kdy začal, jak dlouho trval (nebo že byl zmeškaný).
+fn call_row<'a>(c: &tymy_core::call_log::CallLog, m: &Message) -> Element<'a, Msg> {
+    use tymy_core::call_log::{CallPhase, format_duration};
+    let at = clock_time(c.started_at.or(m.composed_at).or(m.arrived_at));
+    let mut parts = vec![];
+    match c.phase {
+        CallPhase::Ended if c.missed() => parts.push("Zmeškaný hovor".to_owned()),
+        CallPhase::Ended => parts.push("Hovor".to_owned()),
+        CallPhase::Started => parts.push("Hovor začal".to_owned()),
+    }
+    if !at.is_empty() {
+        parts.push(at);
+    }
+    if c.phase == CallPhase::Ended
+        && !c.missed()
+        && let Some(d) = c.duration_secs
+    {
+        parts.push(format_duration(d));
+    }
+    if c.participants.len() > 2 {
+        parts.push(format!("{} účastníků", c.participants.len()));
+    }
+    let missed = c.missed();
+    let label = text(parts.join(" · ")).size(12);
+    let label = if missed {
+        label.style(style::danger)
+    } else {
+        label.style(muted)
+    };
+    container(
+        container(
+            row![text("📞").size(12).font(style::EMOJI), label]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+        )
+        .padding([4, 12])
+        .style(style::day_pill),
+    )
+    .center_x(Length::Fill)
+    .padding([6, 0])
     .into()
 }
 

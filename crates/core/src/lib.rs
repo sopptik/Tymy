@@ -5,6 +5,7 @@
 
 mod backend;
 mod calendar;
+pub mod call_log;
 mod error;
 mod media;
 mod model;

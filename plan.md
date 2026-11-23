@@ -425,6 +425,16 @@ samostatného commitu“)
    upozornění. Konec hovoru nově ukáže i důvod („Hovor skončil: protistrana hovor odmítla“).
    Ověří uživatel s kolegy (echo bota přidávat nejde); tvar těla pro třetího účastníka
    (`groupChat` u přijatého hovoru `null`) není z odchytu ověřený.
+   ✅ **Hovory v chatu (2026-11-23):** „v chatu nevidím hovory, chtěl bych aby tam pokud
+   možno byly vidět i s informací kdy a jak dlouhé byly“. Teams posílá ke každému hovoru
+   `Event/Call` `callStarted` a `callEnded` (účastníci s `<duration>` v s, začátek
+   v `conversationStartTime`, UTC). Ve vlákně je teď místo bubliny „📞 Hovor“ řádek
+   „📞 Hovor · 9:30 · 3 min 12 s“ (začátek se schová, když je načtený konec), u skupinových
+   i počet účastníků, nepřijatý „Zmeškaný hovor“ červeně (odhad: méně než 2 účastníci nebo
+   délka 0, zmeškaný v historii zatím není). Ověřeno na 20 skutečných záznamech (jen souhrn).
+   ✅ **Čas u bublin (2026-11-23):** „a u starých chatů chci vidět u bubliny čas a ne datum,
+   datumové ohraničení zajišťují předěly v chatu kde je datum“. Bublina ukazuje vždy jen
+   hodiny a minuty; datum je na oddělovačích dnů.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**
