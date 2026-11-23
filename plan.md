@@ -455,6 +455,10 @@ samostatného commitu“)
      oznámení. Potřeba: HAR z web klientu při spuštění a zastavení nahrávání (schůzka
      „Sejít se hned“ jen se sebou, nikoho neruší) a souhlas uživatele s tím, že Tymy předá
      botovi token.
+     HAR dodán 2026-11-23 („v har máš nový záznam“), rozbor v `docs/protocol` (token pro
+     `4580fd1d-…/access_recorder_service`, přizvání bota s `botData`, příkaz
+     `oncommand`). Získání tokenu pro nahrávací službu zablokovala kontrola oprávnění
+     a čeká na výslovný souhlas uživatele. Zastavení nahrávání v záznamu chybí.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

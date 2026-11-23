@@ -582,6 +582,39 @@ Nahrávání (z kódu web klienta, neověřeno živě):
   `WaitingForMeetingLive`, `Paused`) a `userId`, tedy kdo nahrávání spustil.
 - Další režimy bota: `realTimeTranscript`, `closedCaptions`, `copilot`.
 
+Spuštění nahrávání (odchyt z web klienta 2026-11-23, schůzka „Sejít se hned“ jen se sebou):
+1. **Token pro nahrávací službu:** obnovovacím tokenem (`grant_type=refresh_token`, client id
+   web klienta) s `scope=4580fd1d-e5a3-4f56-9ad1-aab0e3bf8f76/.default openid profile
+   offline_access`. Vrácený token má `scp=access_recorder_service`.
+2. **Přizvání bota:** `POST <conv>/add` (stejný jako `addParticipant`), `to` je
+   `28:bdd75849-…`, k tomu `participantInvitationData.botData`:
+   - `meetingTitle` (prázdný), `clientInfo: "Teams-R4"`, `callId`, `threadId`;
+   - `recorderFeatures`: `enablePPTSharing`, `intermediateLiveCaptions`,
+     `actionItemsEnabled`, `enableEmailAndMeetingLanguageModel`, `ceoSummit`,
+     `useUnmixedAudio`, `enableTranscriptMeetingChaptering`;
+   - `mode: "RecordingAndTranscription"`, `iCalUid`, `consumerType: "Teams"`,
+     `spokenLanguage`, `exchangeId`, `meetingOrganizer` (jméno);
+   - **`initiatorUserToken`** = token z kroku 1.
+
+   Odpověď je `202`, pak přijde trouterem `conversation/addParticipantSuccess` s
+   `participantInfos` bota (endpointId, participantId).
+3. **Příkaz start:** `POST https://api.flightproxy.teams.microsoft.com/api/v2/ep/
+   <instance>.callrecorder.teams.cloud.microsoft:20088/v2/oncommand/<id>`, **bez
+   Authorization** (oprávnění nese adresa) a s hlavičkami `requestid` a
+   `x-microsoft-skype-chain-id`. Tělo:
+   - `timestamp`, `participantMri` (já), `participantLegId` (moje participantId);
+   - `action: "start"`, `processingModes: ["recording", "realTimeTranscript"]`;
+   - `actionParameters`: `recordingFeatures` jako výše a `recordingStorageSettings:
+     [{StorageType: "OnedriveForBusiness", StorageLocation: "Recordings", FileName}]`;
+   - dál `correlationId`, `meetingTitle`, `meetingOrganizer`, `recordingMode: "Normal"`,
+     `spokenLanguage`, `type: "start"` a `participantSkypeToken: ""`.
+
+   Odpověď je `200 {"CorrelationId"}`.
+
+Adresa `oncommand/<id>` v HTTP ani v trouteru nebyla. Klient ji bere z `commandUrl`
+v `endpointMetadata` bota v rosteru, který u schůzky chodí jinou cestou (datový kanál nebo
+broker). Zastavení (`action: "stop"`?) záznam neobsahuje, schůzka skončila odchodem.
+
 Historie hovorů: obyčejné hovory 1:1 (tlačítko Volat) se do chatu **nezapisují**.
 Jsou jen v konverzaci `48:calllogs`:
 - `GET /v1/users/ME/conversations/48%3Acalllogs/messages`;
