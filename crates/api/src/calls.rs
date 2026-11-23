@@ -64,6 +64,124 @@ pub fn parse_trap_tokens(v: &Value) -> Option<TurnCredentials> {
 /// Nahrávací bot Teams (přizve ho klient, který nahrávání spouští).
 pub const RECORDER_BOT: &str = "28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5";
 
+/// Rozsah tokenu pro nahrávací službu (`initiatorUserToken` v `botData`).
+pub const RECORDER_SCOPE: &str = "4580fd1d-e5a3-4f56-9ad1-aab0e3bf8f76/.default";
+
+/// Funkce nahrávání jako web klient (bez shrnutí a úkolů).
+fn recorder_features() -> Value {
+    json!({
+        "enablePPTSharing": true, "intermediateLiveCaptions": false, "actionItemsEnabled": false,
+        "enableEmailAndMeetingLanguageModel": true, "ceoSummit": false, "useUnmixedAudio": true,
+        "enableTranscriptMeetingChaptering": false,
+    })
+}
+
+/// `participantInvitationData` pro přizvání nahrávacího bota. `token` = přístupový token
+/// spouštějícího pro [`RECORDER_SCOPE`] (bot s ním uloží nahrávku na jeho OneDrive).
+pub fn recorder_invitation(
+    call_id: &str,
+    thread: Option<&str>,
+    token: &str,
+    organizer: &str,
+) -> Value {
+    json!({ "botData": {
+        "meetingTitle": "",
+        "clientInfo": "Teams-R4",
+        "callId": call_id,
+        "threadId": thread.unwrap_or(""),
+        "recorderFeatures": recorder_features(),
+        "mode": "RecordingAndTranscription",
+        "iCalUid": null,
+        "consumerType": "Teams",
+        "spokenLanguage": "",
+        "initiatorUserToken": token,
+        "exchangeId": null,
+        "meetingOrganizer": organizer,
+    }})
+}
+
+/// Příkaz nahrávacímu botovi (`action` = `start` / `stop`) na jeho `commandUrl`.
+/// `stop` je jako u web klienta bez `actionParameters`.
+pub fn recorder_command(me: &Caller, action: &str, title: &str) -> Value {
+    let now = chrono::Utc::now();
+    if action != "start" {
+        return json!({
+            "timestamp": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "participantMri": me.mri.as_str(),
+            "participantLegId": me.participant_id,
+            "action": action,
+            "processingModes": ["recording", "realTimeTranscript"],
+            "participantSkypeToken": "",
+        });
+    }
+    json!({
+        "timestamp": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "participantMri": me.mri.as_str(),
+        "participantLegId": me.participant_id,
+        "action": action,
+        "processingModes": ["recording", "realTimeTranscript"],
+        "actionParameters": {
+            "recordingFeatures": recorder_features(),
+            "recordingStorageSettings": [{
+                "StorageType": "OnedriveForBusiness",
+                "StorageLocation": "Recordings",
+                "FileName": format!("{title}-{}-Záznam schůzky", now.format("%Y%m%d_%H%M%S")),
+            }],
+            "correlationId": uuid::Uuid::new_v4().to_string(),
+            "meetingTitle": title,
+            "exchangeId": null,
+            "meetingOrganizer": me.display_name,
+            "recordingMode": "Normal",
+            "spokenLanguage": "cs-cz",
+            "type": action,
+        },
+        "participantSkypeToken": "",
+    })
+}
+
+/// Adresa pro příkazy nahrávacímu botovi z rosteru (`endpointMetadata.commandUrl`, i jako
+/// JSON řetězec). Jen `https` na doménách Microsoftu; posílá se přes flightproxy jako
+/// u web klienta.
+pub fn recorder_command_url(v: &Value) -> Option<Url> {
+    fn walk(v: &Value) -> Option<String> {
+        match v {
+            Value::Object(o) => {
+                if let Some(c) = o.get("commandUrl") {
+                    let first = match c {
+                        Value::String(s) => Some(s.clone()),
+                        Value::Array(a) => a.iter().find_map(|x| x.as_str().map(str::to_owned)),
+                        _ => None,
+                    };
+                    if first.is_some() {
+                        return first;
+                    }
+                }
+                o.values().find_map(walk)
+            }
+            Value::Array(a) => a.iter().find_map(walk),
+            Value::String(s) if s.contains("commandUrl") => serde_json::from_str::<Value>(s)
+                .ok()
+                .as_ref()
+                .and_then(walk),
+            _ => None,
+        }
+    }
+    let bot = v
+        .pointer("/participants")
+        .and_then(|p| p.get(RECORDER_BOT))?;
+    let url = Url::parse(&walk(bot)?).ok().filter(trusted)?;
+    if url.host_str()?.starts_with("api.flightproxy.") {
+        return Some(url);
+    }
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Url::parse(&format!(
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/{}{port}{}",
+        url.host_str()?,
+        url.path()
+    ))
+    .ok()
+}
+
 /// Stav nahrávání z `conversation/rosterUpdate`: bot hlásí u svého koncového bodu
 /// `endpointMetadata.processingModes.recording.state` (`Active` = nahrává; metadata bývají
 /// i jako JSON řetězec). `None` = aktualizace se nahrávání netýká (delta bez bota).
@@ -572,13 +690,24 @@ pub fn add_failure_reason(v: &Value) -> String {
 /// Tělo `POST <links.addParticipant>`: pozve protistranu do hovoru v 1:1 chatu `thread`.
 /// Bez známého chatu (`thread = None`) se `groupChat` neposílá.
 pub fn add_body(caller: &Caller, cb: &Callbacks, to: &str, thread: Option<&str>) -> Value {
+    add_body_with(caller, cb, to, thread, json!({}))
+}
+
+/// Jako [`add_body`], s vlastními `participantInvitationData` (např. `botData` pro nahrávání).
+pub fn add_body_with(
+    caller: &Caller,
+    cb: &Callbacks,
+    to: &str,
+    thread: Option<&str>,
+    invitation: Value,
+) -> Value {
     json!({
         "disableUnmute": false,
         "participants": {
             "from": caller.json(),
             "to": [{ "id": to, "participantId": uuid::Uuid::new_v4().to_string() }],
         },
-        "participantInvitationData": {},
+        "participantInvitationData": invitation,
         "replacementDetails": null,
         "groupContext": null,
         "groupChat": thread.map(|t| json!({ "threadId": t, "messageId": null })),
@@ -847,6 +976,41 @@ mod tests {
         assert_eq!(recording_state(&left), Some(false));
         let other = json!({"participants": {"8:orgid:aaaa": {"state": "active"}}});
         assert_eq!(recording_state(&other), None);
+    }
+
+    #[test]
+    fn recorder_url_and_bodies() {
+        let meta = json!({"commandUrl": ["https://x1.callrecorder.teams.cloud.microsoft:20088/v2/oncommand/abc"]});
+        let roster = json!({"participants": {RECORDER_BOT: {"endpoints": {"e": {
+            "endpointMetadata": meta.to_string()}}}}});
+        assert_eq!(
+            recorder_command_url(&roster).unwrap().as_str(),
+            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/x1.callrecorder.teams.cloud.microsoft:20088/v2/oncommand/abc"
+        );
+        let evil = json!({"participants": {RECORDER_BOT: {"endpointMetadata":
+            {"commandUrl": "https://evil.example/oncommand/abc"}}}});
+        assert!(recorder_command_url(&evil).is_none());
+        let inv = recorder_invitation("c-1", Some("19:x@thread.v2"), "TOKEN", "Jana");
+        assert_eq!(inv["botData"]["initiatorUserToken"], "TOKEN");
+        assert_eq!(inv["botData"]["mode"], "RecordingAndTranscription");
+        let add = add_body_with(
+            &caller(),
+            &Callbacks::new("https://pub.example/v4/f/a/"),
+            RECORDER_BOT,
+            None,
+            inv,
+        );
+        assert_eq!(add["participantInvitationData"]["botData"]["callId"], "c-1");
+        let stop = recorder_command(&caller(), "stop", "Hovor");
+        assert_eq!(stop["action"], "stop");
+        assert!(stop.get("actionParameters").is_none());
+        assert_eq!(stop["participantLegId"], caller().participant_id);
+        let start = recorder_command(&caller(), "start", "Hovor");
+        assert_eq!(start["actionParameters"]["type"], "start");
+        assert_eq!(
+            start["actionParameters"]["recordingStorageSettings"][0]["StorageType"],
+            "OnedriveForBusiness"
+        );
     }
 
     #[test]

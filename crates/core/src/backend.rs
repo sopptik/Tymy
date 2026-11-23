@@ -222,6 +222,13 @@ pub trait ChatBackend: Send + Sync {
         Ok(vec![])
     }
 
+    /// Spustí (`true`) nebo zastaví nahrávání hovoru. Stav pak hlásí
+    /// [`crate::CallState::Recording`].
+    async fn set_recording(&self, call_id: &str, on: bool) -> Result<()> {
+        let _ = (call_id, on);
+        Err(crate::Error::Other("účet neumí nahrávat".into()))
+    }
+
     /// Přizve do probíhajícího hovoru dalšího člověka (z hovoru ve dvou je skupinový).
     async fn add_to_call(&self, call_id: &str, person: &crate::UserId) -> Result<()> {
         let _ = (call_id, person);

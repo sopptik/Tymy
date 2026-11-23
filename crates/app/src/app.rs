@@ -121,6 +121,8 @@ struct Call {
     video: bool,
     /// Hovor se nahrává (hlásí nahrávací bot v rosteru).
     recording: bool,
+    /// Spuštění / zastavení nahrávání bylo vyžádáno a čeká se na bota.
+    recording_busy: bool,
     /// Poslední zobrazené snímky: obraz protistrany a náhled vlastní kamery (s pořadím).
     remote: Option<(u64, image::Handle)>,
     local: Option<(u64, image::Handle)>,
@@ -150,6 +152,7 @@ impl Call {
             early: vec![],
             video,
             recording: false,
+            recording_busy: false,
             remote: None,
             local: None,
         }
@@ -411,6 +414,9 @@ pub enum Msg {
     ToggleCamera,
     /// Otevřít / zavřít přidávání lidí do hovoru.
     ToggleCallAdd,
+    /// Spustit / zastavit nahrávání hovoru.
+    ToggleRecording,
+    RecordingRequested(bool, Result<(), Failure>),
     CallAddQuery(String),
     CallAddFire(u64),
     CallAddPeople(u64, Result<Vec<Person>, Failure>),
@@ -782,6 +788,10 @@ impl Msg {
             Msg::CallPerson(_, _, video) => debug!(video, "update: CallPerson"),
             Msg::ToggleCamera => debug!("update: ToggleCamera"),
             Msg::ToggleCallAdd => debug!("update: ToggleCallAdd"),
+            Msg::ToggleRecording => debug!("update: ToggleRecording"),
+            Msg::RecordingRequested(on, r) => {
+                debug!(on, result = ok(r.is_ok()), "update: RecordingRequested")
+            }
             Msg::LoadCallHistory => debug!("update: LoadCallHistory"),
             Msg::CallHistory(r) => debug!(
                 result = ok(r.is_ok()),
@@ -3314,9 +3324,13 @@ impl App {
                 None
             }
             tymy_core::CallState::Ringing => None,
-            tymy_core::CallState::Info { text } => Some(self.show_toast(&text)),
+            tymy_core::CallState::Info { text } => {
+                c.recording_busy = false;
+                Some(self.show_toast(&text))
+            }
             tymy_core::CallState::Recording { active } => {
                 c.recording = active;
+                c.recording_busy = false;
                 Some(self.show_toast(if active {
                     "Hovor se nahrává"
                 } else {
@@ -3781,6 +3795,46 @@ impl App {
                     Task::none()
                 }
             },
+            Msg::ToggleRecording => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(c), Some(backend)) = (self.call.as_mut(), backend) else {
+                    return Task::none();
+                };
+                let Some(call_id) = c.id.clone().filter(|_| c.since.is_some()) else {
+                    return self.show_toast("Nahrávat jde až spojený hovor");
+                };
+                if c.recording_busy {
+                    return Task::none();
+                }
+                c.recording_busy = true;
+                let on = !c.recording;
+                Task::perform(
+                    async move {
+                        backend
+                            .set_recording(&call_id, on)
+                            .await
+                            .map_err(Failure::from)
+                    },
+                    move |r| Msg::RecordingRequested(on, r),
+                )
+            }
+            Msg::RecordingRequested(on, r) => {
+                let Err(e) = r else {
+                    // stav potvrdí bot v rosteru (`CallState::Recording`)
+                    return Task::none();
+                };
+                if let Some(c) = self.call.as_mut() {
+                    c.recording_busy = false;
+                }
+                self.call_failed(
+                    if on {
+                        "Nahrávání se nepodařilo spustit"
+                    } else {
+                        "Nahrávání se nepodařilo zastavit"
+                    },
+                    e,
+                )
+            }
             Msg::ToggleCallAdd => {
                 self.call_add = match self.call_add.take() {
                     Some(_) => None,
@@ -9899,6 +9953,19 @@ fn active_call_bar(call: &Call, adding: bool) -> Element<'_, Msg> {
             .style(style::secondary)
             .on_press_maybe(call.media.is_some().then_some(Msg::ToggleMute)),
             camera_toggle(call),
+            button(
+                text(match (call.recording, call.recording_busy) {
+                    (_, true) => "Čekám na nahrávání…",
+                    (true, false) => "Zastavit nahrávání",
+                    (false, false) => "● Nahrávat",
+                })
+                .size(13)
+            )
+            .padding([6, 14])
+            .style(style::secondary)
+            .on_press_maybe(
+                (call.since.is_some() && !call.recording_busy).then_some(Msg::ToggleRecording)
+            ),
             button(text(if adding { "Hotovo" } else { "Přidat lidi" }).size(13))
                 .padding([6, 14])
                 .style(style::secondary)

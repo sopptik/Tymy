@@ -613,7 +613,14 @@ Spuštění nahrávání (odchyt z web klienta 2026-11-23, schůzka „Sejít se
 
 Adresa `oncommand/<id>` v HTTP ani v trouteru nebyla. Klient ji bere z `commandUrl`
 v `endpointMetadata` bota v rosteru, který u schůzky chodí jinou cestou (datový kanál nebo
-broker). Zastavení (`action: "stop"`?) záznam neobsahuje, schůzka skončila odchodem.
+broker), v obou záznamech chybí.
+
+Zastavení (druhý odchyt 2026-11-23) je stejný `POST` na stejnou `oncommand/<id>` s tělem
+`timestamp`, `participantMri`, `participantLegId`, `action: "stop"`,
+`processingModes: ["recording", "realTimeTranscript"]`, `participantSkypeToken: ""`
+(bez `actionParameters`). Odpověď je `200` se stejným `CorrelationId` jako u startu.
+Instance nahrávací služby i port se liší hovor od hovoru (`…-p04-api…:20088`,
+`…-p08-api…:23333`).
 
 Historie hovorů: obyčejné hovory 1:1 (tlačítko Volat) se do chatu **nezapisují**.
 Jsou jen v konverzaci `48:calllogs`:

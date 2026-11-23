@@ -459,6 +459,16 @@ samostatného commitu“)
      `4580fd1d-…/access_recorder_service`, přizvání bota s `botData`, příkaz
      `oncommand`). Získání tokenu pro nahrávací službu zablokovala kontrola oprávnění
      a čeká na výslovný souhlas uživatele. Zastavení nahrávání v záznamu chybí.
+     Uživatel (2026-11-23): „máš souhlas“, „máš uložený nový soubor i s ukončením
+     nahrávání“. ✅ V liště hovoru je tlačítko „● Nahrávat“ / „Zastavit nahrávání“.
+     Funguje takto:
+     - token pro nahrávací službu (náš klient ho dostane);
+     - přizvání bota s `botData`;
+     - start na `commandUrl` z rosteru, jakmile se bot připojí;
+     - stop podle druhého odchytu.
+
+     Neověřeno živě. V hovorech přes Tymy čekám, že roster s `commandUrl` přijde trouterem
+     jako `rosterUpdate`.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

@@ -102,6 +102,10 @@ struct ActiveCall {
     thread: Option<String>,
     /// Naposledy hlášený stav nahrávání.
     recording: bool,
+    /// Adresa pro příkazy nahrávacímu botovi (až se bot připojí).
+    recorder: Option<url::Url>,
+    /// Nahrávání vyžádáno, bot se ještě připojuje (start se pošle, až přijde jeho adresa).
+    record_pending: bool,
 }
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
@@ -543,6 +547,36 @@ impl TeamsBackend {
         Ok(serde_json::from_str(&text).unwrap_or_default())
     }
 
+    /// Příkaz nahrávacímu botovi: jako web klient bez přihlašovací hlavičky (oprávnění nese
+    /// adresa z metadat bota), jen s id hovoru a požadavku.
+    async fn recorder_signal(
+        &self,
+        url: url::Url,
+        me: &calls::Caller,
+        call_id: &str,
+        action: &str,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .client
+            .post(url)
+            .header("x-microsoft-skype-chain-id", call_id)
+            .header("requestid", uuid::Uuid::new_v4().to_string())
+            .json(&calls::recorder_command(me, action, "Hovor"))
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Other(format!(
+                "nahrávací služba: HTTP {status} {}",
+                text.chars().take(200).collect::<String>()
+            )));
+        }
+        Ok(())
+    }
+
     /// Přihlašovací údaje k relay serverům médií (`trap/tokens`), uložené na dobu platnosti.
     /// Odhlásí nás z hovoru (odchozí: `leave`, přijatý: `DELETE callLeg`).
     async fn send_hangup(&self, c: ActiveCall) -> Result<()> {
@@ -779,39 +813,57 @@ impl TeamsBackend {
         }
         let call = &mut active[i];
         let v: serde_json::Value = serde_json::from_str(&d.body).unwrap_or_default();
-        let mut events = vec![];
-        if name == "conversation/rosterUpdate"
-            && let Some(rec) = calls::recording_state(&v)
-            && rec != call.recording
-        {
-            call.recording = rec;
-            events.push(Event::CallState {
-                call_id: call.call_id.clone(),
-                state: tymy_core::CallState::Recording { active: rec },
-            });
-        }
-        if name == "conversation/rosterUpdate"
-            && let Some(n) = calls::participant_count(&v)
-        {
-            call.joined |= n >= 2;
-            // 1:1 (i echo bot): protistrana odešla a my bychom zůstali na schůzce sami
-            if n <= 1 && call.joined && !call.group {
-                let c = active.remove(i);
-                drop(active);
+        if name == "conversation/rosterUpdate" {
+            let mut events = vec![];
+            if let Some(rec) = calls::recording_state(&v)
+                && rec != call.recording
+            {
+                call.recording = rec;
+                events.push(Event::CallState {
+                    call_id: call.call_id.clone(),
+                    state: tymy_core::CallState::Recording { active: rec },
+                });
+            }
+            // nahrávací bot se připojil: adresa pro příkazy; čeká-li start, poslat ho
+            let mut start = None;
+            if let Some(url) = calls::recorder_command_url(&v) {
+                call.recorder = Some(url.clone());
+                if std::mem::take(&mut call.record_pending) {
+                    start = Some((url, call.me.clone(), call.call_id.clone()));
+                }
+            }
+            let mut hangup = None;
+            if let Some(n) = calls::participant_count(&v) {
+                call.joined |= n >= 2;
+                // 1:1 (i echo bot): protistrana odešla a my bychom zůstali na schůzce sami
+                if n <= 1 && call.joined && !call.group {
+                    hangup = Some(active.remove(i));
+                }
+            }
+            drop(active);
+            if let Some((url, me, call_id)) = start
+                && let Err(e) = self.recorder_signal(url, &me, &call_id, "start").await
+            {
+                tracing::warn!(error = %e, "spuštění nahrávání");
+                events.push(Event::CallState {
+                    call_id,
+                    state: tymy_core::CallState::Info {
+                        text: format!("Nahrávání se nepodařilo spustit: {e}"),
+                    },
+                });
+            }
+            if let Some(c) = hangup {
                 let call_id = c.call_id.clone();
                 if let Err(e) = self.send_hangup(c).await {
                     tracing::warn!(error = %e, "zavěšení po odchodu protistrany");
                 }
-                return vec![Event::CallState {
+                events.push(Event::CallState {
                     call_id,
                     state: tymy_core::CallState::Ended {
                         reason: "protistrana odešla".into(),
                     },
-                }];
+                });
             }
-            return events;
-        }
-        if name == "conversation/rosterUpdate" {
             return events;
         }
         // protistranu se nepodařilo přizvat (odmítla, nezvedá, je offline): v 1:1 hovoru
@@ -1577,6 +1629,8 @@ impl ChatBackend for TeamsBackend {
             add: Some(add.clone()),
             thread: Some(thread.clone()),
             recording: false,
+            recorder: None,
+            record_pending: false,
         });
         let body = calls::add_body(&me, &cb, &to, Some(&thread));
         if let Err(e) = self
@@ -1636,6 +1690,8 @@ impl ChatBackend for TeamsBackend {
             add: r.add,
             thread: None,
             recording: false,
+            recorder: None,
+            record_pending: false,
         });
         Ok(())
     }
@@ -1658,6 +1714,73 @@ impl ChatBackend for TeamsBackend {
             &v,
             &format!("8:orgid:{}", self.profile.account_id),
         ))
+    }
+
+    async fn set_recording(&self, call_id: &str, on: bool) -> Result<()> {
+        let (recorder, me, agent, add, thread) = {
+            let active = self.active.lock().await;
+            let c = active
+                .iter()
+                .find(|c| c.call_id == call_id)
+                .ok_or_else(|| Error::Other("hovor už neprobíhá".into()))?;
+            (
+                c.recorder.clone(),
+                c.me.clone(),
+                c.agent.clone(),
+                c.add.clone(),
+                c.thread.clone(),
+            )
+        };
+        if let Some(url) = recorder {
+            return self
+                .recorder_signal(url, &me, call_id, if on { "start" } else { "stop" })
+                .await;
+        }
+        if !on {
+            return Err(Error::Other("nahrávací bot v hovoru není".into()));
+        }
+        // bot v hovoru ještě není: přizvat ho s tokenem pro uložení nahrávky, start se
+        // pošle, až v rosteru oznámí adresu pro příkazy
+        let add =
+            add.ok_or_else(|| Error::Protocol("do tohoto hovoru nejde nikoho přidat".into()))?;
+        let surl = self
+            .calls_info
+            .lock()
+            .await
+            .clone()
+            .map(|i| i.surl)
+            .ok_or_else(|| Error::Other("služba hovorů není připojená".into()))?;
+        let token = self.scoped_token(calls::RECORDER_SCOPE).await?;
+        let cb = calls::Callbacks::with_id(&surl, &agent);
+        let invitation =
+            calls::recorder_invitation(call_id, thread.as_deref(), &token, &me.display_name);
+        let body =
+            calls::add_body_with(&me, &cb, calls::RECORDER_BOT, thread.as_deref(), invitation);
+        if let Some(c) = self
+            .active
+            .lock()
+            .await
+            .iter_mut()
+            .find(|c| c.call_id == call_id)
+        {
+            c.record_pending = true;
+        }
+        if let Err(e) = self
+            .call_signal(reqwest::Method::POST, add, &body, call_id)
+            .await
+        {
+            if let Some(c) = self
+                .active
+                .lock()
+                .await
+                .iter_mut()
+                .find(|c| c.call_id == call_id)
+            {
+                c.record_pending = false;
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn add_to_call(&self, call_id: &str, person: &tymy_core::UserId) -> Result<()> {
