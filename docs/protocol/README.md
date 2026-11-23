@@ -571,6 +571,17 @@ Schůzka (např. naplánovaná `Scheduled`) má v chatu kromě `Event/Call` i zp
 `RecordingContent`, `RecordingStorage`) a `RichText/Media_CallTranscript`. Tymy je zatím
 nezobrazuje. Schůzky v `48:calllogs` nejsou.
 
+Nahrávání (z kódu web klienta, neověřeno živě):
+- Nahrává bot `28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5` (Teams). Klient ho přizve
+  `addParticipant` s `participantInvitationData.botData`: `meetingTitle`, `clientInfo`,
+  `callId`, `threadId`, `recorderFeatures`, `mode`, `iCalUid`, `consumerType`,
+  `spokenLanguage`, `correlationId` a `initiatorUserToken` (token spouštějícího).
+- Příkazy start/stop jdou na `commandUrl` z `endpointMetadata` bota.
+- Stav je v rosteru u bota:
+  `endpoints…endpointMetadata.processingModes.recording.state` (`Active`, `Inactive`,
+  `WaitingForMeetingLive`, `Paused`) a `userId`, tedy kdo nahrávání spustil.
+- Další režimy bota: `realTimeTranscript`, `closedCaptions`, `copilot`.
+
 Historie hovorů: obyčejné hovory 1:1 (tlačítko Volat) se do chatu **nezapisují**.
 Jsou jen v konverzaci `48:calllogs`:
 - `GET /v1/users/ME/conversations/48%3Acalllogs/messages`;

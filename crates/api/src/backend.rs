@@ -100,6 +100,8 @@ struct ActiveCall {
     add: Option<url::Url>,
     /// Chat, ke kterému hovor patří (`groupChat.threadId` při přizvání).
     thread: Option<String>,
+    /// Naposledy hlášený stav nahrávání.
+    recording: bool,
 }
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
@@ -777,6 +779,17 @@ impl TeamsBackend {
         }
         let call = &mut active[i];
         let v: serde_json::Value = serde_json::from_str(&d.body).unwrap_or_default();
+        let mut events = vec![];
+        if name == "conversation/rosterUpdate"
+            && let Some(rec) = calls::recording_state(&v)
+            && rec != call.recording
+        {
+            call.recording = rec;
+            events.push(Event::CallState {
+                call_id: call.call_id.clone(),
+                state: tymy_core::CallState::Recording { active: rec },
+            });
+        }
         if name == "conversation/rosterUpdate"
             && let Some(n) = calls::participant_count(&v)
         {
@@ -796,7 +809,10 @@ impl TeamsBackend {
                     },
                 }];
             }
-            return vec![];
+            return events;
+        }
+        if name == "conversation/rosterUpdate" {
+            return events;
         }
         // protistranu se nepodařilo přizvat (odmítla, nezvedá, je offline): v 1:1 hovoru
         // bychom zůstali sami, tak hovor ukončit
@@ -1560,6 +1576,7 @@ impl ChatBackend for TeamsBackend {
             joined: false,
             add: Some(add.clone()),
             thread: Some(thread.clone()),
+            recording: false,
         });
         let body = calls::add_body(&me, &cb, &to, Some(&thread));
         if let Err(e) = self
@@ -1618,6 +1635,7 @@ impl ChatBackend for TeamsBackend {
             joined: false,
             add: r.add,
             thread: None,
+            recording: false,
         });
         Ok(())
     }

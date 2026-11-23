@@ -61,6 +61,50 @@ pub fn parse_trap_tokens(v: &Value) -> Option<TurnCredentials> {
     })
 }
 
+/// Nahrávací bot Teams (přizve ho klient, který nahrávání spouští).
+pub const RECORDER_BOT: &str = "28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5";
+
+/// Stav nahrávání z `conversation/rosterUpdate`: bot hlásí u svého koncového bodu
+/// `endpointMetadata.processingModes.recording.state` (`Active` = nahrává; metadata bývají
+/// i jako JSON řetězec). `None` = aktualizace se nahrávání netýká (delta bez bota).
+pub fn recording_state(v: &Value) -> Option<bool> {
+    fn walk(v: &Value, found: &mut Option<bool>) {
+        match v {
+            Value::Object(o) => {
+                if let Some(rec) = o.get("processingModes").and_then(|p| p.get("recording")) {
+                    let active = rec.get("state").and_then(Value::as_str) == Some("Active");
+                    *found = Some(found.unwrap_or(false) || active);
+                }
+                o.values().for_each(|x| walk(x, found));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, found)),
+            Value::String(s) if s.contains("processingModes") => {
+                if let Ok(inner) = serde_json::from_str::<Value>(s) {
+                    walk(&inner, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = None;
+    walk(v, &mut found);
+    if found.is_none() {
+        // bot z hovoru odešel (nahrávání skončilo)
+        let bot = v
+            .pointer("/participants")
+            .and_then(Value::as_object)
+            .and_then(|p| p.get(RECORDER_BOT));
+        if bot
+            .and_then(|b| b.get("state"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "inactive")
+        {
+            return Some(false);
+        }
+    }
+    found
+}
+
 /// Historie hovorů: zprávy konverzace `48:calllogs` s vlastností `call-log` (JSON řetězec).
 /// `me` = vlastní MRI (protistrana je ten druhý z volajícího a volaného).
 pub fn parse_call_logs(v: &Value, me: &str) -> Vec<tymy_core::call_log::CallRecord> {
@@ -788,6 +832,21 @@ mod tests {
         assert!(link(&v, "/links/bad").is_err());
         assert!(link(&v, "/links/plain").is_err());
         assert!(link(&v, "/links/missing").is_err());
+    }
+
+    #[test]
+    fn recording_state_from_roster() {
+        let meta = json!({"processingModes": {"recording": {"state": "Active", "userId": "x"}}});
+        let on = json!({"participants": {RECORDER_BOT: {"state": "active", "endpoints": {
+            "e1": {"endpointMetadata": meta.to_string()}}}}});
+        assert_eq!(recording_state(&on), Some(true));
+        let paused = json!({"participants": {RECORDER_BOT: {"endpoints": {"e1": {
+            "endpointMetadata": {"processingModes": {"recording": {"state": "Inactive"}}}}}}}});
+        assert_eq!(recording_state(&paused), Some(false));
+        let left = json!({"participants": {RECORDER_BOT: {"state": "inactive"}}});
+        assert_eq!(recording_state(&left), Some(false));
+        let other = json!({"participants": {"8:orgid:aaaa": {"state": "active"}}});
+        assert_eq!(recording_state(&other), None);
     }
 
     #[test]

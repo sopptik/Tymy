@@ -119,6 +119,8 @@ struct Call {
     early: Vec<(String, tymy_core::CallState)>,
     /// Videohovor (vysíláme obraz z kamery).
     video: bool,
+    /// Hovor se nahrává (hlásí nahrávací bot v rosteru).
+    recording: bool,
     /// Poslední zobrazené snímky: obraz protistrany a náhled vlastní kamery (s pořadím).
     remote: Option<(u64, image::Handle)>,
     local: Option<(u64, image::Handle)>,
@@ -147,6 +149,7 @@ impl Call {
             muted: false,
             early: vec![],
             video,
+            recording: false,
             remote: None,
             local: None,
         }
@@ -3312,6 +3315,14 @@ impl App {
             }
             tymy_core::CallState::Ringing => None,
             tymy_core::CallState::Info { text } => Some(self.show_toast(&text)),
+            tymy_core::CallState::Recording { active } => {
+                c.recording = active;
+                Some(self.show_toast(if active {
+                    "Hovor se nahrává"
+                } else {
+                    "Nahrávání skončilo"
+                }))
+            }
             tymy_core::CallState::Ended { reason } => {
                 tracing::info!(reason, "hovor skončil");
                 if let Some(m) = &c.media {
@@ -9870,7 +9881,9 @@ fn active_call_bar(call: &Call, adding: bool) -> Element<'_, Msg> {
                 .font(style::EMOJI),
             column![
                 text(call.title.as_str()).size(14).font(BOLD),
-                text(status).size(12).style(muted),
+                row![text(status).size(12).style(muted), recording_badge(call)]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
             ]
             .spacing(2),
             space::horizontal(),
@@ -9954,6 +9967,17 @@ fn call_add_panel(a: &CallAdd, ready: bool) -> Element<'_, Msg> {
     .width(Length::Fill)
     .style(style::call_banner)
     .into()
+}
+
+/// Červený štítek „● Nahrává se“ v liště hovoru (jinak nic).
+fn recording_badge(call: &Call) -> Element<'_, Msg> {
+    if !call.recording {
+        return space().width(0).into();
+    }
+    container(text("● Nahrává se").size(11).font(SEMIBOLD))
+        .padding([1, 8])
+        .style(style::recording_badge)
+        .into()
 }
 
 /// Tlačítko kamery v liště videohovoru (u hlasového hovoru nic).

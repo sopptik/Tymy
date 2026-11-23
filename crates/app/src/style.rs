@@ -803,6 +803,16 @@ pub fn video_round(t: &Theme, status: button::Status) -> button::Style {
     s
 }
 
+/// Štítek „Nahrává se“ v liště hovoru.
+pub fn recording_badge(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(colors(t).danger.into()),
+        text_color: Some(Color::WHITE),
+        border: rounded(9.0),
+        ..Default::default()
+    }
+}
+
 /// Plocha s obrazem hovoru (tmavá jako ve videohovorech).
 pub fn video_stage(_t: &Theme) -> container::Style {
     container::Style {

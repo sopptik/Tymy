@@ -354,6 +354,8 @@ pub enum CallState {
     Ringing,
     /// Protistrana hovor přijala, média se spojují nebo běží.
     Connected,
+    /// Nahrávání hovoru se spustilo (`true`) nebo skončilo.
+    Recording { active: bool },
     /// Zpráva pro uživatele bez změny stavu (např. pozvaného se nepodařilo přidat).
     Info { text: String },
     /// Konec; `reason` = popis pro uživatele (prázdný = běžné zavěšení).

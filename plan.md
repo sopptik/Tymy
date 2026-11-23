@@ -442,6 +442,19 @@ samostatného commitu“)
    vloží do vlákna 1:1 chatu podle času: „📞 Příchozí hovor · 9:55 · 45 min 45 s“, nepřijaté
    červeně („Zmeškaný“ / „Nepřijatý hovor“). Hovory starší než načtená historie chatu se
    ukážou až po jejím dočtení.
+   🟡 **Nahrávání hovoru (2026-11-23):** „ve status line běžicího hovoru by měla být informace
+   o tom, že je nahrávaný a pokud není mělo by tam být tlačítko nahrávat“.
+   - ✅ stav: v liště hovoru červený štítek „● Nahrává se“, upozornění při spuštění i konci.
+     Pozná se podle nahrávacího bota v rosteru (`processingModes.recording.state: Active`).
+     Neověřeno živě.
+   - ⏸ tlačítko „Nahrávat“ čeká na odchyt. Klient přizve nahrávacího bota
+     (`28:bdd75849-…`) přes `addParticipant` s `participantInvitationData.botData`
+     (callId, threadId, `recorderFeatures`, `mode`, iCalUid, **`initiatorUserToken`**) a pak mu
+     posílá příkazy na `commandUrl` z jeho metadat, případně datovým kanálem.
+     Nahrávka se uloží na OneDrive nebo SharePoint spouštějícího a všichni účastníci dostanou
+     oznámení. Potřeba: HAR z web klientu při spuštění a zastavení nahrávání (schůzka
+     „Sejít se hned“ jen se sebou, nikoho neruší) a souhlas uživatele s tím, že Tymy předá
+     botovi token.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**
