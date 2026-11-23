@@ -120,6 +120,19 @@ struct Call {
     local: Option<(u64, image::Handle)>,
 }
 
+/// Panel „Přidat lidi“ pod lištou hovoru: hledání v adresáři.
+#[derive(Debug, Default)]
+struct CallAdd {
+    query: String,
+    /// Pořadí dotazu (starší odpovědi se zahodí).
+    seq: u64,
+    searching: bool,
+    results: Vec<Person>,
+    /// Kdo už byl do tohoto hovoru pozván (nenabízet znovu).
+    invited: Vec<tymy_core::UserId>,
+    busy: bool,
+}
+
 impl Call {
     fn new(id: Option<String>, title: String, video: bool) -> Self {
         Self {
@@ -389,6 +402,13 @@ pub enum Msg {
     CallPerson(UserId, String, bool),
     /// Zapnout / vypnout kameru v probíhajícím videohovoru.
     ToggleCamera,
+    /// Otevřít / zavřít přidávání lidí do hovoru.
+    ToggleCallAdd,
+    CallAddQuery(String),
+    CallAddFire(u64),
+    CallAddPeople(u64, Result<Vec<Person>, Failure>),
+    AddToCall(Person),
+    AddedToCall(Person, Result<(), Failure>),
     /// Překreslit obraz hovoru (nové snímky).
     VideoTick,
     AcceptCall(String),
@@ -751,6 +771,16 @@ impl Msg {
             Msg::TestCall => debug!("update: TestCall"),
             Msg::CallPerson(_, _, video) => debug!(video, "update: CallPerson"),
             Msg::ToggleCamera => debug!("update: ToggleCamera"),
+            Msg::ToggleCallAdd => debug!("update: ToggleCallAdd"),
+            Msg::CallAddQuery(_) => trace!("update: CallAddQuery"),
+            Msg::CallAddFire(seq) => debug!(seq, "update: CallAddFire"),
+            Msg::CallAddPeople(seq, r) => {
+                debug!(seq, result = ok(r.is_ok()), "update: CallAddPeople")
+            }
+            Msg::AddToCall(p) => debug!(mri = %p.mri, "update: AddToCall"),
+            Msg::AddedToCall(p, r) => {
+                debug!(mri = %p.mri, result = ok(r.is_ok()), "update: AddedToCall")
+            }
             Msg::VideoTick => {}
             Msg::AcceptCall(_) => debug!("update: AcceptCall"),
             Msg::CallAccepted(_, r) => debug!(result = ok(r.is_ok()), "update: CallAccepted"),
@@ -1155,6 +1185,8 @@ pub struct App {
     /// Běží testovací hovor.
     /// Probíhající hovor (najednou jen jeden).
     call: Option<Call>,
+    /// Otevřené přidávání lidí do hovoru.
+    call_add: Option<CallAdd>,
     /// Příchozí hovor, který právě zvoní.
     incoming: Option<tymy_core::IncomingCall>,
     /// Chaty, ve kterých právě někdo píše, a kdy to přišlo naposledy.
@@ -1383,6 +1415,7 @@ impl App {
             typing: HashMap::new(),
             typing_sent: None,
             call: None,
+            call_add: None,
             incoming: None,
             searching_people: false,
             people_note: None,
@@ -3259,13 +3292,19 @@ impl App {
                 None
             }
             tymy_core::CallState::Ringing => None,
+            tymy_core::CallState::Info { text } => Some(self.show_toast(&text)),
             tymy_core::CallState::Ended { reason } => {
                 tracing::info!(reason, "hovor skončil");
                 if let Some(m) = &c.media {
                     m.stop();
                 }
                 self.call = None;
-                Some(self.show_toast("Hovor skončil"))
+                self.call_add = None;
+                Some(self.show_toast(&if reason.is_empty() {
+                    "Hovor skončil".to_owned()
+                } else {
+                    format!("Hovor skončil: {reason}")
+                }))
             }
         }
     }
@@ -3682,6 +3721,97 @@ impl App {
                 }
                 c.refresh_frames();
                 Task::none()
+            }
+            Msg::ToggleCallAdd => {
+                self.call_add = match self.call_add.take() {
+                    Some(_) => None,
+                    None if self.call.is_some() => Some(CallAdd::default()),
+                    None => None,
+                };
+                Task::none()
+            }
+            Msg::CallAddQuery(q) => {
+                let Some(a) = &mut self.call_add else {
+                    return Task::none();
+                };
+                a.query = q;
+                a.seq += 1;
+                if a.query.trim().chars().count() < MIN_PEOPLE_QUERY {
+                    a.results.clear();
+                    a.searching = false;
+                    return Task::none();
+                }
+                let seq = a.seq;
+                Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |_| {
+                    Msg::CallAddFire(seq)
+                })
+            }
+            Msg::CallAddFire(seq) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let (Some(a), Some(backend)) = (&mut self.call_add, backend) else {
+                    return Task::none();
+                };
+                if seq != a.seq {
+                    return Task::none();
+                }
+                a.searching = true;
+                let query = a.query.trim().to_owned();
+                Task::perform(
+                    async move { backend.search_people(&query).await.map_err(Failure::from) },
+                    move |r| Msg::CallAddPeople(seq, r),
+                )
+            }
+            Msg::CallAddPeople(seq, r) => {
+                let Some(a) = self.call_add.as_mut().filter(|a| a.seq == seq) else {
+                    return Task::none();
+                };
+                a.searching = false;
+                match r {
+                    Ok(found) => {
+                        a.results = found;
+                        Task::none()
+                    }
+                    Err(e) => self.fail_background(e),
+                }
+            }
+            Msg::AddToCall(person) => {
+                let backend = self.session().map(|s| s.backend.clone());
+                let call_id = self.call.as_ref().and_then(|c| c.id.clone());
+                let (Some(a), Some(backend), Some(call_id)) =
+                    (&mut self.call_add, backend, call_id)
+                else {
+                    return self.show_toast("Hovor se ještě spojuje, zkuste to za chvíli");
+                };
+                if a.busy {
+                    return Task::none();
+                }
+                a.busy = true;
+                Task::perform(
+                    {
+                        let mri = person.mri.clone();
+                        async move {
+                            backend
+                                .add_to_call(&call_id, &mri)
+                                .await
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::AddedToCall(person.clone(), r),
+                )
+            }
+            Msg::AddedToCall(person, r) => {
+                if let Some(a) = &mut self.call_add {
+                    a.busy = false;
+                    if r.is_ok() {
+                        a.invited.push(person.mri.clone());
+                        a.query.clear();
+                        a.results.clear();
+                    }
+                }
+                match r {
+                    Ok(()) => self.show_toast(&format!("Volám: {}", person.display_name)),
+                    Err(e) => self.call_failed("Přidání do hovoru se nepovedlo", e),
+                }
             }
             Msg::VideoTick => {
                 if let Some(c) = self.call.as_mut() {
@@ -5971,10 +6101,16 @@ impl App {
             None => body,
         };
         let body = match &self.call {
-            Some(call) if call.shows_video() => {
-                column![active_call_bar(call), video_stage(call), body].into()
+            Some(call) => {
+                let mut top = column![active_call_bar(call, self.call_add.is_some())];
+                if let Some(a) = &self.call_add {
+                    top = top.push(call_add_panel(a, call.id.is_some()));
+                }
+                if call.shows_video() {
+                    top = top.push(video_stage(call));
+                }
+                top.push(body).into()
             }
-            Some(call) => column![active_call_bar(call), body].into(),
             None => body,
         };
         container(body)
@@ -9595,7 +9731,7 @@ fn call_banner(call: &tymy_core::IncomingCall, can_accept: bool) -> Element<'_, 
 }
 
 /// Lišta probíhajícího hovoru: s kým, délka, ztlumení mikrofonu, zavěsit.
-fn active_call_bar(call: &Call) -> Element<'_, Msg> {
+fn active_call_bar(call: &Call, adding: bool) -> Element<'_, Msg> {
     let status = match (&call.id, &call.media, call.since) {
         (_, _, Some(since)) => {
             let secs = since.elapsed().as_secs();
@@ -9627,6 +9763,10 @@ fn active_call_bar(call: &Call) -> Element<'_, Msg> {
             .style(style::secondary)
             .on_press_maybe(call.media.is_some().then_some(Msg::ToggleMute)),
             camera_toggle(call),
+            button(text(if adding { "Hotovo" } else { "Přidat lidi" }).size(13))
+                .padding([6, 14])
+                .style(style::secondary)
+                .on_press(Msg::ToggleCallAdd),
             button(text("Zavěsit").size(13))
                 .padding([6, 14])
                 .style(style::danger_button)
@@ -9634,6 +9774,58 @@ fn active_call_bar(call: &Call) -> Element<'_, Msg> {
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center),
+    )
+    .padding([10, 16])
+    .width(Length::Fill)
+    .style(style::call_banner)
+    .into()
+}
+
+/// Přidávání lidí do hovoru: hledání v adresáři a pozvání kliknutím.
+fn call_add_panel(a: &CallAdd, ready: bool) -> Element<'_, Msg> {
+    let mut results = Column::new().spacing(2);
+    if !ready {
+        results = results.push(note("Hovor se ještě spojuje…"));
+    } else if a.searching {
+        results = results.push(note("Hledám…"));
+    } else if a.query.trim().chars().count() >= MIN_PEOPLE_QUERY && a.results.is_empty() {
+        results = results.push(note("Nikdo nenalezen"));
+    }
+    for person in a.results.iter().filter(|p| !a.invited.contains(&p.mri)) {
+        results = results.push(
+            button(
+                row![
+                    avatar(&person.display_name, 28.0),
+                    column![
+                        text(truncate(&person.display_name, 32))
+                            .size(13)
+                            .font(SEMIBOLD),
+                        text(truncate(&person.subtitle(), 48)).size(11).style(muted),
+                    ]
+                    .spacing(1),
+                    space::horizontal(),
+                    text("Zavolat").size(12).style(accent),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 8])
+            .style(|t: &Theme, st| style::list_item(t, st, false))
+            .on_press_maybe((ready && !a.busy).then(|| Msg::AddToCall(person.clone()))),
+        );
+    }
+    container(
+        column![
+            text_input("Koho přidat do hovoru (jméno nebo e-mail)…", &a.query)
+                .on_input(Msg::CallAddQuery)
+                .padding([8, 12])
+                .size(13)
+                .style(style::search_input),
+            scrollable(results).height(Length::Shrink),
+        ]
+        .spacing(6)
+        .max_width(520),
     )
     .padding([10, 16])
     .width(Length::Fill)

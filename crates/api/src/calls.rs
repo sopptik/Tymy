@@ -471,7 +471,8 @@ pub fn add_failure_reason(v: &Value) -> String {
 }
 
 /// Tělo `POST <links.addParticipant>`: pozve protistranu do hovoru v 1:1 chatu `thread`.
-pub fn add_body(caller: &Caller, cb: &Callbacks, to: &str, thread: &str) -> Value {
+/// Bez známého chatu (`thread = None`) se `groupChat` neposílá.
+pub fn add_body(caller: &Caller, cb: &Callbacks, to: &str, thread: Option<&str>) -> Value {
     json!({
         "disableUnmute": false,
         "participants": {
@@ -481,7 +482,7 @@ pub fn add_body(caller: &Caller, cb: &Callbacks, to: &str, thread: &str) -> Valu
         "participantInvitationData": {},
         "replacementDetails": null,
         "groupContext": null,
-        "groupChat": { "threadId": thread, "messageId": null },
+        "groupChat": thread.map(|t| json!({ "threadId": t, "messageId": null })),
         "links": cb.links("conversation", &["addParticipantSuccess", "addParticipantFailure"]),
     })
 }
@@ -737,9 +738,18 @@ mod tests {
     #[test]
     fn add_and_leave_bodies() {
         let cb = Callbacks::new("https://pub.example/v4/f/abc/");
-        let add = add_body(&caller(), &cb, ECHO_BOT, "19:aaaa_bbbb@unq.gbl.spaces");
+        let add = add_body(
+            &caller(),
+            &cb,
+            ECHO_BOT,
+            Some("19:aaaa_bbbb@unq.gbl.spaces"),
+        );
         assert_eq!(add["participants"]["to"][0]["id"], ECHO_BOT);
         assert_eq!(add["groupChat"]["threadId"], "19:aaaa_bbbb@unq.gbl.spaces");
+        // přizvání do přijatého hovoru: chat neznáme, `groupChat` je null
+        let more = add_body(&caller(), &cb, "8:orgid:cccc", None);
+        assert!(more["groupChat"].is_null());
+        assert_eq!(more["participants"]["to"][0]["id"], "8:orgid:cccc");
         let leave = leave_body(&caller());
         assert_eq!(
             leave["callTransactionEnd"]["phrase"],

@@ -70,6 +70,8 @@ struct Ringing {
     offer: Option<(String, String)>,
     participant_id: String,
     group: bool,
+    /// Přizvání dalších (`additionalActionResponses[0].output.links.addParticipant` z `attach`).
+    add: Option<url::Url>,
 }
 
 /// Jak zavěsit probíhající hovor.
@@ -94,6 +96,10 @@ struct ActiveCall {
     group: bool,
     /// V hovoru byl někdo další (počet účastníků aspoň 2).
     joined: bool,
+    /// Přizvání dalších lidí (`links.addParticipant` konverzace).
+    add: Option<url::Url>,
+    /// Chat, ke kterému hovor patří (`groupChat.threadId` při přizvání).
+    thread: Option<String>,
 }
 
 /// Skypetoken obnovujeme s předstihem, aby nevypršel uprostřed požadavku.
@@ -410,7 +416,7 @@ impl TeamsBackend {
             let add = calls::link(&conv, "/links/addParticipant")?;
             let bot = calls::ECHO_BOT.trim_start_matches("28:");
             let thread = format!("19:{}_{bot}@unq.gbl.spaces", self.profile.account_id);
-            let body = calls::add_body(&caller, &cb, calls::ECHO_BOT, &thread);
+            let body = calls::add_body(&caller, &cb, calls::ECHO_BOT, Some(&thread));
             let (status, text) = send(add, body, auth, false).await?;
             log.push(format!("pozvání echo bota: HTTP {status}"));
             if !(200..300).contains(&status) {
@@ -794,7 +800,18 @@ impl TeamsBackend {
         }
         // protistranu se nepodařilo přizvat (odmítla, nezvedá, je offline): v 1:1 hovoru
         // bychom zůstali sami, tak hovor ukončit
-        if name == "conversation/addParticipantFailure" && !call.group && !call.joined {
+        if name == "conversation/addParticipantFailure" && (call.group || call.joined) {
+            return vec![Event::CallState {
+                call_id: call.call_id.clone(),
+                state: tymy_core::CallState::Info {
+                    text: format!(
+                        "Pozvaného se nepodařilo přidat: {}",
+                        calls::add_failure_reason(&v)
+                    ),
+                },
+            }];
+        }
+        if name == "conversation/addParticipantFailure" {
             let c = active.remove(i);
             drop(active);
             let call_id = c.call_id.clone();
@@ -905,11 +922,11 @@ impl TeamsBackend {
             Some(surl) => self.ring(&invite, surl).await,
             None => Err(Error::Other("spojení pro hovory nemá adresu".into())),
         };
-        let (agent, reject, acceptance) = match rung {
+        let (agent, reject, acceptance, add) = match rung {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "ohlášení příchozího hovoru");
-                (String::new(), invite.reject.clone(), None)
+                (String::new(), invite.reject.clone(), None, None)
             }
         };
         ringing.push(Ringing {
@@ -921,17 +938,18 @@ impl TeamsBackend {
             offer: invite.offer,
             participant_id: invite.participant_id,
             group: invite.group,
+            add,
         });
         vec![event]
     }
 
     /// `attach` + `progress: ringing`. Vrací `<uuid>` adres hovoru, odkaz pro odmítnutí
-    /// (a zavěšení) a odkaz pro přijetí.
+    /// (a zavěšení), odkaz pro přijetí a odkaz pro přizvání dalších.
     async fn ring(
         &self,
         invite: &calls::Invite,
         surl: &str,
-    ) -> Result<(String, url::Url, Option<url::Url>)> {
+    ) -> Result<(String, url::Url, Option<url::Url>, Option<url::Url>)> {
         let cb = calls::Callbacks::new(surl);
         let resp = self
             .call_signal(
@@ -944,6 +962,11 @@ impl TeamsBackend {
         let reject = calls::link(&resp, "/callInvitation/links/callLeg")
             .unwrap_or_else(|_| invite.reject.clone());
         let acceptance = calls::link(&resp, "/callInvitation/links/acceptance").ok();
+        let add = calls::link(
+            &resp,
+            "/additionalActionResponses/0/output/links/addParticipant",
+        )
+        .ok();
         let me = self.me_in_call(&invite.participant_id);
         if let Ok(progress) = calls::link(&resp, "/callInvitation/links/progress")
             && let Err(e) = self
@@ -957,7 +980,7 @@ impl TeamsBackend {
         {
             tracing::warn!(error = %e, "hlášení zvonění");
         }
-        Ok((cb.id().to_owned(), reject, acceptance))
+        Ok((cb.id().to_owned(), reject, acceptance, add))
     }
 
     fn endpoints_kind(&self) -> AccountKind {
@@ -1516,6 +1539,15 @@ impl ChatBackend for TeamsBackend {
             .await?;
         let leave = calls::link(&conv, "/links/leave")?;
         let add = calls::link(&conv, "/links/addParticipant")?;
+        // 1:1 chat má id ze dvou MRI bez prefixu, seřazených
+        let mut ids = [
+            self.profile.account_id.to_string(),
+            to.rsplit(':').next().unwrap_or(&to).to_owned(),
+        ];
+        if matches!(target, tymy_core::CallTarget::Person(_)) {
+            ids.sort();
+        }
+        let thread = format!("19:{}_{}@unq.gbl.spaces", ids[0], ids[1]);
         self.active.lock().await.push(ActiveCall {
             call_id: call_id.clone(),
             agent: cb.id().to_owned(),
@@ -1526,17 +1558,10 @@ impl ChatBackend for TeamsBackend {
             hangup: Hangup::Leave(leave),
             group: false,
             joined: false,
+            add: Some(add.clone()),
+            thread: Some(thread.clone()),
         });
-        // 1:1 chat má id ze dvou MRI bez prefixu, seřazených
-        let mut ids = [
-            self.profile.account_id.to_string(),
-            to.rsplit(':').next().unwrap_or(&to).to_owned(),
-        ];
-        if matches!(target, tymy_core::CallTarget::Person(_)) {
-            ids.sort();
-        }
-        let thread = format!("19:{}_{}@unq.gbl.spaces", ids[0], ids[1]);
-        let body = calls::add_body(&me, &cb, &to, &thread);
+        let body = calls::add_body(&me, &cb, &to, Some(&thread));
         if let Err(e) = self
             .call_signal(reqwest::Method::POST, add, &body, &call_id)
             .await
@@ -1591,6 +1616,8 @@ impl ChatBackend for TeamsBackend {
             hangup: Hangup::CallLeg(call_leg),
             group: r.group,
             joined: false,
+            add: r.add,
+            thread: None,
         });
         Ok(())
     }
@@ -1605,6 +1632,43 @@ impl ChatBackend for TeamsBackend {
         };
         self.send_hangup(c).await
     }
+    async fn add_to_call(&self, call_id: &str, person: &tymy_core::UserId) -> Result<()> {
+        let surl = self
+            .calls_info
+            .lock()
+            .await
+            .clone()
+            .map(|i| i.surl)
+            .ok_or_else(|| Error::Other("služba hovorů není připojená".into()))?;
+        let (add, me, agent, thread) = {
+            let active = self.active.lock().await;
+            let c = active
+                .iter()
+                .find(|c| c.call_id == call_id)
+                .ok_or_else(|| Error::Other("hovor už neprobíhá".into()))?;
+            let add = c
+                .add
+                .clone()
+                .ok_or_else(|| Error::Protocol("do tohoto hovoru nejde nikoho přidat".into()))?;
+            (add, c.me.clone(), c.agent.clone(), c.thread.clone())
+        };
+        let cb = calls::Callbacks::with_id(&surl, &agent);
+        let body = calls::add_body(&me, &cb, person.as_str(), thread.as_deref());
+        self.call_signal(reqwest::Method::POST, add, &body, call_id)
+            .await?;
+        // od teď skupinový hovor: odchodem jednoho z ostatních nekončí
+        if let Some(c) = self
+            .active
+            .lock()
+            .await
+            .iter_mut()
+            .find(|c| c.call_id == call_id)
+        {
+            c.group = true;
+        }
+        Ok(())
+    }
+
     async fn reject_call(&self, call_id: &str) -> Result<()> {
         let r = {
             let mut ringing = self.ringing.lock().await;

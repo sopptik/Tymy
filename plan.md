@@ -417,6 +417,14 @@ samostatného commitu“)
    Síť (2026-11-23): po změně sítě (kabel i Wi-Fi ve stejné síti, dvě veřejné adresy) neprojde
    ICE ani u hlasového hovoru (i verze 0.2.0): server na naše kontroly neodpovídá, dvojice
    s relay kandidáty se netvoří. Řešit zvlášť.
+   🟡 **Přidávání lidí do hovoru (2026-11-23):** „jdou přidávat uživatelé do hovoru?“,
+   „udělej přidávání lidí do hovoru“. V liště hovoru je „Přidat lidi“: hledání v adresáři,
+   kliknutím „Zavolat“ se člověk pozve (`POST links.addParticipant`, u přijatého hovoru odkaz
+   z odpovědi `attach` → `additionalActionResponses[0].output.links.addParticipant`). Hovor se
+   tím stane skupinovým (odchodem jednoho z ostatních nekončí); nepovedené pozvání ohlásí
+   upozornění. Konec hovoru nově ukáže i důvod („Hovor skončil: protistrana hovor odmítla“).
+   Ověří uživatel s kolegy (echo bota přidávat nejde); tvar těla pro třetího účastníka
+   (`groupChat` u přijatého hovoru `null`) není z odchytu ověřený.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

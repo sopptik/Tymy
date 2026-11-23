@@ -217,6 +217,12 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Přizve do probíhajícího hovoru dalšího člověka (z hovoru ve dvou je skupinový).
+    async fn add_to_call(&self, call_id: &str, person: &crate::UserId) -> Result<()> {
+        let _ = (call_id, person);
+        Err(crate::Error::Other("účet neumí přidávat do hovoru".into()))
+    }
+
     /// Odmítne příchozí hovor `call_id` (z [`crate::Event::IncomingCall`]).
     async fn reject_call(&self, call_id: &str) -> Result<()> {
         let _ = call_id;

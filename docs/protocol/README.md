@@ -545,6 +545,13 @@ s `controlVideoStreaming` typu `sr`) na odkaz `links.applyChannelParameters` /
 `links.controlVideoStreaming` z odpovědí mediálního řadiče. Přednostně ale jde datovým kanálem
 (`m=x-data`, SCTP).
 
+Přizvání dalšího účastníka (neověřeno živě): stejné tělo jako pozvání protistrany
+(`participants.from/to`, `links.addParticipantSuccess/Failure`) na `links.addParticipant`.
+Odchozí hovor ho má v odpovědi na založení konverzace, přijatý v odpovědi `attach`
+(`additionalActionResponses[0].output.links`: leave, addParticipant, removeParticipant,
+addModality, mute, unmute, admit, getAllParticipants, …). U přijatého hovoru Tymy nezná
+chat, a proto posílá `groupChat: null`.
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce
