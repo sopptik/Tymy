@@ -217,6 +217,11 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Historie hovorů (nejnovější první).
+    async fn call_history(&self) -> Result<Vec<crate::call_log::CallRecord>> {
+        Ok(vec![])
+    }
+
     /// Přizve do probíhajícího hovoru dalšího člověka (z hovoru ve dvou je skupinový).
     async fn add_to_call(&self, call_id: &str, person: &crate::UserId) -> Result<()> {
         let _ = (call_id, person);

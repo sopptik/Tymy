@@ -61,6 +61,61 @@ pub fn parse_trap_tokens(v: &Value) -> Option<TurnCredentials> {
     })
 }
 
+/// Historie hovorů: zprávy konverzace `48:calllogs` s vlastností `call-log` (JSON řetězec).
+/// `me` = vlastní MRI (protistrana je ten druhý z volajícího a volaného).
+pub fn parse_call_logs(v: &Value, me: &str) -> Vec<tymy_core::call_log::CallRecord> {
+    let time = |c: &Value, k: &str| {
+        c.get(k)
+            .and_then(Value::as_str)
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+    };
+    v.get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let raw = m.pointer("/properties/call-log")?;
+            let c: Value = match raw {
+                Value::String(s) => serde_json::from_str(s).ok()?,
+                v => v.clone(),
+            };
+            let incoming = c.get("callDirection").and_then(Value::as_str) == Some("incoming");
+            let (orig, target) = (
+                c.get("originator").and_then(Value::as_str).unwrap_or(""),
+                c.get("target").and_then(Value::as_str).unwrap_or(""),
+            );
+            let (peer, peer_part) = if incoming || target == me {
+                (orig, "/originatorParticipant/displayName")
+            } else {
+                (target, "/targetParticipant/displayName")
+            };
+            Some(tymy_core::call_log::CallRecord {
+                call_id: c.get("callId")?.as_str()?.to_owned(),
+                peer: tymy_core::UserId(peer.to_owned()),
+                peer_name: c
+                    .pointer(peer_part)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                incoming,
+                state: c
+                    .get("callState")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                call_type: c
+                    .get("callType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                started_at: time(&c, "startTime")?,
+                connected_at: time(&c, "connectTime"),
+                ended_at: time(&c, "endTime"),
+            })
+        })
+        .collect()
+}
+
 /// Počet účastníků z `conversation/rosterUpdate` (`participantCounts.totalParticipants`).
 pub fn participant_count(v: &Value) -> Option<u64> {
     v.pointer("/participantCounts/totalParticipants")?.as_u64()
@@ -733,6 +788,40 @@ mod tests {
         assert!(link(&v, "/links/bad").is_err());
         assert!(link(&v, "/links/plain").is_err());
         assert!(link(&v, "/links/missing").is_err());
+    }
+
+    #[test]
+    fn parses_call_logs() {
+        // smyšlený záznam ve tvaru `48:calllogs`
+        let log = json!({
+            "startTime": "2026-03-13T08:55:01.1Z", "connectTime": "2026-03-13T08:55:09.5Z",
+            "endTime": "2026-03-13T09:40:54.6Z", "callDirection": "incoming",
+            "callType": "twoParty", "callState": "accepted",
+            "originator": "8:orgid:bbbb", "target": "8:orgid:aaaa",
+            "originatorParticipant": {"id": "8:orgid:bbbb", "displayName": "Jana Nováková"},
+            "targetParticipant": {"id": "8:orgid:aaaa", "displayName": null},
+            "callId": "c-1"
+        });
+        let missed = json!({
+            "startTime": "2026-03-12T10:00:00Z", "connectTime": null, "endTime": "2026-03-12T10:00:30Z",
+            "callDirection": "outgoing", "callType": "twoParty", "callState": "missed",
+            "originator": "8:orgid:aaaa", "target": "8:orgid:cccc",
+            "targetParticipant": {"id": "8:orgid:cccc", "displayName": "Petr"}, "callId": "c-2"
+        });
+        let v = json!({"messages": [
+            {"messagetype": "Text", "properties": {"call-log": log.to_string()}},
+            {"messagetype": "Text", "properties": {"call-log": missed.to_string()}},
+            {"messagetype": "Text", "properties": {}},
+        ]});
+        let r = parse_call_logs(&v, "8:orgid:aaaa");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].peer.as_str(), "8:orgid:bbbb");
+        assert_eq!(r[0].peer_name.as_deref(), Some("Jana Nováková"));
+        assert!(r[0].incoming && !r[0].missed());
+        assert_eq!(r[0].duration_secs(), Some(2745));
+        assert_eq!(r[1].peer.as_str(), "8:orgid:cccc");
+        assert!(!r[1].incoming && r[1].missed());
+        assert_eq!(r[1].duration_secs(), None);
     }
 
     #[test]

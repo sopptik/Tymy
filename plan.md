@@ -435,6 +435,13 @@ samostatného commitu“)
    ✅ **Čas u bublin (2026-11-23):** „a u starých chatů chci vidět u bubliny čas a ne datum,
    datumové ohraničení zajišťují předěly v chatu kde je datum“. Bublina ukazuje vždy jen
    hodiny a minuty; datum je na oddělovačích dnů.
+   ✅ **Hovory 1:1 z historie (2026-11-23):** „v chatu s … bych měl vidět hovor z pátku
+   a nevidím“. Obyčejné hovory 1:1 se do chatu nezapisují, jen do historie hovorů
+   (konverzace `48:calllogs`, zprávy s `properties.call-log`). Tymy ji načte při startu,
+   každé 2 min, po konci hovoru a při nové zprávě v `48:calllogs`. Hovory s protistranou
+   vloží do vlákna 1:1 chatu podle času: „📞 Příchozí hovor · 9:55 · 45 min 45 s“, nepřijaté
+   červeně („Zmeškaný“ / „Nepřijatý hovor“). Hovory starší než načtená historie chatu se
+   ukážou až po jejím dočtení.
 2. Prototyp v `tymy-cli`: odchozí 1:1 audio hovor; média přes `webrtc-rs`, záloha `libwebrtc`;
    zvuk přes PipeWire (`cpal`).
 3. **Rozhodovací bod:**

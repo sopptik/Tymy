@@ -47,6 +47,10 @@ const PHONE_ICON: &[u8] = include_bytes!("../assets/phone.svg");
 const CAMERA_ICON: &[u8] = include_bytes!("../assets/camera.svg");
 /// Jak často okno přebírá nové snímky obrazu hovoru (~15 snímků/s jako kamera).
 const VIDEO_FRAME: Duration = Duration::from_millis(66);
+/// Jak často se obnovuje historie hovorů (nové záznamy hlásí i trouter).
+const CALL_HISTORY_REFRESH: Duration = Duration::from_secs(120);
+/// Konverzace s historií hovorů.
+const CALL_LOGS: &str = "48:calllogs";
 const COMPOSER: Id = Id::new("composer");
 const GROUP_QUERY: Id = Id::new("group-query");
 const SEARCH: Id = Id::new("search");
@@ -409,6 +413,9 @@ pub enum Msg {
     CallAddPeople(u64, Result<Vec<Person>, Failure>),
     AddToCall(Person),
     AddedToCall(Person, Result<(), Failure>),
+    /// Načíst historii hovorů (po konci hovoru, nový záznam).
+    LoadCallHistory,
+    CallHistory(Result<Vec<tymy_core::call_log::CallRecord>, Failure>),
     /// Překreslit obraz hovoru (nové snímky).
     VideoTick,
     AcceptCall(String),
@@ -772,6 +779,12 @@ impl Msg {
             Msg::CallPerson(_, _, video) => debug!(video, "update: CallPerson"),
             Msg::ToggleCamera => debug!("update: ToggleCamera"),
             Msg::ToggleCallAdd => debug!("update: ToggleCallAdd"),
+            Msg::LoadCallHistory => debug!("update: LoadCallHistory"),
+            Msg::CallHistory(r) => debug!(
+                result = ok(r.is_ok()),
+                count = r.as_ref().map(Vec::len).unwrap_or(0),
+                "update: CallHistory"
+            ),
             Msg::CallAddQuery(_) => trace!("update: CallAddQuery"),
             Msg::CallAddFire(seq) => debug!(seq, "update: CallAddFire"),
             Msg::CallAddPeople(seq, r) => {
@@ -1187,6 +1200,10 @@ pub struct App {
     call: Option<Call>,
     /// Otevřené přidávání lidí do hovoru.
     call_add: Option<CallAdd>,
+    /// Historie hovorů (`48:calllogs`); hovory 1:1 se ukazují v chatu s protistranou.
+    call_history: Vec<tymy_core::call_log::CallRecord>,
+    /// Kdy se historie hovorů naposledy načítala (`None` = načíst při nejbližší příležitosti).
+    call_history_at: Option<std::time::Instant>,
     /// Příchozí hovor, který právě zvoní.
     incoming: Option<tymy_core::IncomingCall>,
     /// Chaty, ve kterých právě někdo píše, a kdy to přišlo naposledy.
@@ -1416,6 +1433,8 @@ impl App {
             typing_sent: None,
             call: None,
             call_add: None,
+            call_history: vec![],
+            call_history_at: None,
             incoming: None,
             searching_people: false,
             people_note: None,
@@ -3300,11 +3319,16 @@ impl App {
                 }
                 self.call = None;
                 self.call_add = None;
-                Some(self.show_toast(&if reason.is_empty() {
+                // záznam o hovoru server zapíše chvíli po konci
+                let history = Task::perform(tokio::time::sleep(Duration::from_secs(5)), |_| {
+                    Msg::LoadCallHistory
+                });
+                let toast = self.show_toast(&if reason.is_empty() {
                     "Hovor skončil".to_owned()
                 } else {
                     format!("Hovor skončil: {reason}")
-                }))
+                });
+                Some(Task::batch([toast, history]))
             }
         }
     }
@@ -3557,6 +3581,10 @@ impl App {
                             // co přišlo během výpadku, doběhne dotazem
                             refresh = true;
                         }
+                        // nový záznam v historii hovorů (není to chat)
+                        Event::NewMessage(m) if m.conversation_id.as_str() == CALL_LOGS => {
+                            ring_tasks.push(Task::done(Msg::LoadCallHistory));
+                        }
                         Event::NewMessage(m) => {
                             self.typing.remove(&m.conversation_id);
                             // obsah přišel trouterem: ukázat hned, dotaz jen u neznámého chatu
@@ -3722,6 +3750,26 @@ impl App {
                 c.refresh_frames();
                 Task::none()
             }
+            Msg::LoadCallHistory => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                self.call_history_at = Some(std::time::Instant::now());
+                Task::perform(
+                    async move { backend.call_history().await.map_err(Failure::from) },
+                    Msg::CallHistory,
+                )
+            }
+            Msg::CallHistory(r) => match r {
+                Ok(h) => {
+                    self.call_history = h;
+                    Task::none()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e.text, "historie hovorů");
+                    Task::none()
+                }
+            },
             Msg::ToggleCallAdd => {
                 self.call_add = match self.call_add.take() {
                     Some(_) => None,
@@ -4068,7 +4116,15 @@ impl App {
                 } else {
                     Task::none()
                 };
-                Task::batch([refresh, week, self.check_reminders()])
+                let history = if self
+                    .call_history_at
+                    .is_none_or(|t| t.elapsed() >= CALL_HISTORY_REFRESH)
+                {
+                    Task::done(Msg::LoadCallHistory)
+                } else {
+                    Task::none()
+                };
+                Task::batch([refresh, week, self.check_reminders(), history])
             }
             Msg::CalendarLoaded(id, r) => {
                 self.calendar.loading.remove(&id);
@@ -7977,7 +8033,51 @@ impl App {
             .filter(|c| c.phase == tymy_core::call_log::CallPhase::Ended)
             .filter_map(|c| c.call_id)
             .collect();
+        // hovory 1:1 z historie hovorů (do chatu se nezapisují); jen v rozsahu načtených zpráv,
+        // ať se starší hovory neobjeví nad nenačtenou historií
+        let chat_calls: std::collections::HashSet<String> = msgs
+            .iter()
+            .filter_map(call_log)
+            .filter_map(|c| c.call_id)
+            .collect();
+        let history_start = if self.older.get(&conv.id) == Some(&None) {
+            None
+        } else {
+            msgs.iter().filter_map(|m| m.arrived_at).min()
+        };
+        let mut records: Vec<&tymy_core::call_log::CallRecord> = match self.peer(conv) {
+            Some(peer) => self
+                .call_history
+                .iter()
+                .filter(|r| r.peer == peer && !chat_calls.contains(&r.call_id))
+                .filter(|r| history_start.is_none_or(|t| r.started_at >= t))
+                .collect(),
+            None => vec![],
+        };
+        records.sort_by_key(|r| r.started_at);
+        let mut records = records.into_iter().peekable();
+        let mut last_day: Option<chrono::NaiveDate> = None;
+        let day_pill = |d: chrono::NaiveDate| -> Element<'a, Msg> {
+            container(
+                container(text(day_label(d)).size(11))
+                    .padding([3, 12])
+                    .style(style::day_pill),
+            )
+            .center_x(Length::Fill)
+            .padding([12, 0])
+            .into()
+        };
         for m in msgs.iter().filter(|m| displayable(m)) {
+            while let Some(r) = records.next_if(|r| m.arrived_at.is_none_or(|t| r.started_at <= t))
+            {
+                let d = r.started_at.with_timezone(&Local).date_naive();
+                if last_day != Some(d) {
+                    list = list.push(day_pill(d));
+                    last_day = Some(d);
+                }
+                list = list.push(record_row(r));
+                prev = None;
+            }
             let call = call_log(m);
             if let Some(c) = &call
                 && c.phase == tymy_core::call_log::CallPhase::Started
@@ -7988,21 +8088,12 @@ impl App {
                 continue;
             }
             let day = m.arrived_at.map(|t| t.with_timezone(&Local).date_naive());
-            let prev_day = prev
-                .and_then(|p| p.arrived_at)
-                .map(|t| t.with_timezone(&Local).date_naive());
+            let prev_day = last_day;
             if let Some(d) = day
                 && day != prev_day
             {
-                list = list.push(
-                    container(
-                        container(text(day_label(d)).size(11))
-                            .padding([3, 12])
-                            .style(style::day_pill),
-                    )
-                    .center_x(Length::Fill)
-                    .padding([12, 0]),
-                );
+                list = list.push(day_pill(d));
+                last_day = Some(d);
             }
             if let Some(c) = &call {
                 list = list.push(call_row(c, m));
@@ -8036,6 +8127,15 @@ impl App {
                 },
             ));
             prev = Some(m);
+        }
+        // hovory novější než poslední zpráva
+        for r in records {
+            let d = r.started_at.with_timezone(&Local).date_naive();
+            if last_day != Some(d) {
+                list = list.push(day_pill(d));
+                last_day = Some(d);
+            }
+            list = list.push(record_row(r));
         }
 
         let can_send = !self.sending
@@ -9969,8 +10069,28 @@ fn call_row<'a>(c: &tymy_core::call_log::CallLog, m: &Message) -> Element<'a, Ms
     if c.participants.len() > 2 {
         parts.push(format!("{} účastníků", c.participants.len()));
     }
-    let missed = c.missed();
-    let label = text(parts.join(" · ")).size(12);
+    pill_row(parts.join(" · "), c.missed())
+}
+
+/// Řádek hovoru z historie hovorů: směr, čas, délka (nebo nepřijatý).
+fn record_row<'a>(r: &tymy_core::call_log::CallRecord) -> Element<'a, Msg> {
+    let at = clock_time(Some(r.started_at));
+    let what = match (r.incoming, r.missed()) {
+        (true, true) => "Zmeškaný hovor",
+        (false, true) => "Nepřijatý hovor",
+        (true, false) => "Příchozí hovor",
+        (false, false) => "Odchozí hovor",
+    };
+    let mut parts = vec![what.to_owned(), at];
+    if let Some(d) = r.duration_secs().filter(|_| !r.missed()) {
+        parts.push(tymy_core::call_log::format_duration(d));
+    }
+    pill_row(parts.join(" · "), r.missed())
+}
+
+/// Řádek hovoru uprostřed vlákna (červeně, když hovor nikdo nepřijal).
+fn pill_row<'a>(label: String, missed: bool) -> Element<'a, Msg> {
+    let label = text(label).size(12);
     let label = if missed {
         label.style(style::danger)
     } else {

@@ -90,6 +90,35 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Záznam z historie hovorů (`48:calllogs`). Hovory 1:1 se do chatu nezapisují, jen sem.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CallRecord {
+    pub call_id: String,
+    /// Protistrana (MRI).
+    pub peer: crate::UserId,
+    pub peer_name: Option<String>,
+    pub incoming: bool,
+    /// `accepted`, `missed`, `declined`, …
+    pub state: String,
+    /// `twoParty`, `groupCall`, …
+    pub call_type: String,
+    pub started_at: DateTime<Utc>,
+    pub connected_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+impl CallRecord {
+    /// Délka od spojení do konce (sekundy); `None` u nepřijatého hovoru.
+    pub fn duration_secs(&self) -> Option<u64> {
+        let (c, e) = (self.connected_at?, self.ended_at?);
+        u64::try_from((e - c).num_seconds()).ok()
+    }
+
+    pub fn missed(&self) -> bool {
+        self.state != "accepted" || self.connected_at.is_none()
+    }
+}
+
 /// Délka česky: „45 s“, „3 min 12 s“, „1 h 05 min“.
 pub fn format_duration(secs: u64) -> String {
     match secs {

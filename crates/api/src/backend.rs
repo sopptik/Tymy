@@ -1632,6 +1632,16 @@ impl ChatBackend for TeamsBackend {
         };
         self.send_hangup(c).await
     }
+    async fn call_history(&self) -> Result<Vec<tymy_core::call_log::CallRecord>> {
+        let v = self
+            .raw_get("/v1/users/ME/conversations/48%3Acalllogs/messages?view=msnp24Equivalent&pageSize=200")
+            .await?;
+        Ok(calls::parse_call_logs(
+            &v,
+            &format!("8:orgid:{}", self.profile.account_id),
+        ))
+    }
+
     async fn add_to_call(&self, call_id: &str, person: &tymy_core::UserId) -> Result<()> {
         let surl = self
             .calls_info

@@ -563,6 +563,16 @@ Záznam hovoru v chatu: zprávy `messagetype: Event/Call`, ke každému hovoru d
   `01/01/0001`).
 - Konec přijde jako zpráva zhruba v čase konce hovoru.
 
+Historie hovorů: obyčejné hovory 1:1 (tlačítko Volat) se do chatu **nezapisují**.
+Jsou jen v konverzaci `48:calllogs`:
+- `GET /v1/users/ME/conversations/48%3Acalllogs/messages`;
+- zprávy typu `Text` s obsahem „Call Logs for Call <id>“;
+- `properties.call-log` je JSON řetězec s poli `startTime`, `connectTime` (null u nepřijatého),
+  `endTime`, `callDirection` (`incoming`/`outgoing`), `callType` (`twoParty`, …),
+  `callState` (`accepted`, …), `originator`, `target` (MRI),
+  `originatorParticipant`/`targetParticipant` (`id`, `displayName`), `callId` a `threadId`
+  (u 1:1 null).
+
 ## Jak odchytit provoz (HAR)
 
 Záznam pořizuje uživatel v **Google Chrome** (Chromium, Edge): jen ty ukládají do HAR i rámce
