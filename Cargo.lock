@@ -5939,7 +5939,7 @@ dependencies = [
 
 [[package]]
 name = "tymy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5964,7 +5964,7 @@ dependencies = [
 
 [[package]]
 name = "tymy-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5991,7 +5991,7 @@ dependencies = [
 
 [[package]]
 name = "tymy-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6011,7 +6011,7 @@ dependencies = [
 
 [[package]]
 name = "tymy-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -6026,7 +6026,7 @@ dependencies = [
 
 [[package]]
 name = "tymy-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6037,7 +6037,7 @@ dependencies = [
 
 [[package]]
 name = "tymy-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "gstreamer",
@@ -6053,7 +6053,7 @@ dependencies = [
 
 [[package]]
 name = "tymy-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "rusqlite",
