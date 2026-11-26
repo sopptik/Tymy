@@ -648,6 +648,14 @@ pub enum Msg {
     OpenImage(InlineImage),
     /// Stažený originál obrázku: (URL originálu, URL náhledu, výsledek).
     FullImage(String, String, Result<Arc<Vec<u8>>, Failure>),
+    /// Stáhnout přílohu do složky Stažené: (URL, název souboru).
+    DownloadFile(String, String),
+    /// Stáhnout originál obrázku do složky Stažené.
+    DownloadImage(InlineImage),
+    /// Originál obrázku pro uložení: (URL originálu, URL náhledu, výsledek).
+    ImageForSave(String, String, Result<Arc<Vec<u8>>, Failure>),
+    /// Stažení skončilo: (URL, uložený soubor).
+    Downloaded(String, Result<std::path::PathBuf, Failure>),
 }
 
 impl Msg {
@@ -978,6 +986,10 @@ impl Msg {
                 bytes = r.as_ref().map(|b| b.len()).unwrap_or(0),
                 "update: FullImage"
             ),
+            Msg::DownloadFile(_, _) => debug!("update: DownloadFile"),
+            Msg::DownloadImage(_) => debug!("update: DownloadImage"),
+            Msg::ImageForSave(_, _, r) => debug!(result = ok(r.is_ok()), "update: ImageForSave"),
+            Msg::Downloaded(_, r) => debug!(result = ok(r.is_ok()), "update: Downloaded"),
         }
     }
 }
@@ -1048,6 +1060,8 @@ const INDEX_MAX_MESSAGES: i64 = 5000;
 /// Pauza po označení textu, než se výběr zkopíruje (ať se nekopíruje při každém pohybu myši).
 const COPY_DELAY: Duration = Duration::from_millis(350);
 const TOAST_DURATION: Duration = Duration::from_millis(1800);
+/// Hláška o uloženém souboru (obsahuje cestu, čte se déle).
+const SAVED_TOAST_DURATION: Duration = Duration::from_secs(5);
 
 /// Šířka levého panelu.
 const SIDEBAR_WIDTH: f32 = 320.0;
@@ -1328,6 +1342,8 @@ pub struct App {
     hovered: Option<ConversationId>,
     /// Originály obrázků uložené na disk (URL originálu → soubor).
     originals: HashMap<String, std::path::PathBuf>,
+    /// Právě stahované přílohy a obrázky (URL).
+    downloading: HashSet<String>,
     /// Kalendáře a připomínky (všechny účty).
     calendar: CalendarState,
 }
@@ -1470,6 +1486,7 @@ impl App {
             confirm_cancel_event: None,
             event_busy: false,
             originals: HashMap::new(),
+            downloading: HashSet::new(),
             calendar: CalendarState::load(),
         }
     }
@@ -2682,12 +2699,14 @@ impl App {
 
     /// Krátké oznámení nad vláknem.
     fn show_toast(&mut self, toast: &str) -> Task<Msg> {
+        self.show_toast_for(toast, TOAST_DURATION)
+    }
+
+    fn show_toast_for(&mut self, toast: &str, duration: Duration) -> Task<Msg> {
         self.toast = Some(toast.to_owned());
         self.toast_seq += 1;
         let seq = self.toast_seq;
-        Task::perform(tokio::time::sleep(TOAST_DURATION), move |_| {
-            Msg::HideToast(seq)
-        })
+        Task::perform(tokio::time::sleep(duration), move |_| Msg::HideToast(seq))
     }
 
     /// Klik na citaci odpovědi: přejít na původní zprávu v otevřeném chatu.
@@ -6184,6 +6203,123 @@ impl App {
                 }
                 Task::none()
             }
+            Msg::DownloadFile(url, name) => {
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                if !self.downloading.insert(url.clone()) {
+                    return self.show_toast("Soubor se už stahuje");
+                }
+                let dest = match download_target(&name) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        self.downloading.remove(&url);
+                        tracing::warn!(error = %e, "nelze připravit soubor ve Stažených");
+                        return self.show_toast("Do složky Stažené nelze zapisovat");
+                    }
+                };
+                let toast = self.show_toast(&format!("Stahuji {name}…"));
+                let task = Task::perform(
+                    {
+                        let url = url.clone();
+                        async move {
+                            match backend.download_file(&url, &dest).await {
+                                Ok(_) => Ok(dest),
+                                Err(e) => {
+                                    // rezervovaný prázdný soubor nenechávat
+                                    let _ = std::fs::remove_file(&dest);
+                                    Err(Failure::from(e))
+                                }
+                            }
+                        }
+                    },
+                    move |r| Msg::Downloaded(url.clone(), r),
+                );
+                Task::batch([toast, task])
+            }
+            Msg::DownloadImage(img) => {
+                let full = img.full_size_url();
+                if self.downloading.contains(&full) {
+                    return self.show_toast("Obrázek se už stahuje");
+                }
+                if let Some((store, account)) = self.store()
+                    && let Ok(Some(bytes)) = store.load_media(&account, &full)
+                {
+                    return self.update(Msg::ImageForSave(full, img.url, Ok(Arc::new(bytes))));
+                }
+                let Some(backend) = self.session().map(|s| s.backend.clone()) else {
+                    return Task::none();
+                };
+                self.downloading.insert(full.clone());
+                let preview = img.url;
+                Task::perform(
+                    {
+                        let full = full.clone();
+                        async move {
+                            backend
+                                .fetch_media(&full)
+                                .await
+                                .map(Arc::new)
+                                .map_err(Failure::from)
+                        }
+                    },
+                    move |r| Msg::ImageForSave(full.clone(), preview.clone(), r),
+                )
+            }
+            Msg::ImageForSave(full, preview, r) => {
+                self.downloading.remove(&full);
+                let bytes = match r {
+                    Ok(bytes) => {
+                        if let Some((store, account)) = self.store()
+                            && let Err(e) = store.save_media(&account, &full, &bytes)
+                        {
+                            tracing::warn!(error = %e, "uložení originálu do cache");
+                        }
+                        bytes
+                    }
+                    Err(e) => {
+                        // originál není k dispozici → uložit aspoň náhled
+                        tracing::warn!(error = %e.text, "originál obrázku nelze stáhnout, ukládám náhled");
+                        match self.media.get(&preview) {
+                            Some(Media::Ready(_, bytes)) => bytes.clone(),
+                            _ => return self.show_toast("Obrázek se nepodařilo stáhnout"),
+                        }
+                    }
+                };
+                let name = format!(
+                    "obrazek-{}.{}",
+                    Local::now().format("%Y-%m-%d-%H%M%S"),
+                    image_ext(&bytes)
+                );
+                let saved = download_target(&name)
+                    .and_then(|dest| std::fs::write(&dest, bytes.as_slice()).map(|_| dest));
+                match saved {
+                    Ok(path) => self.show_toast_for(
+                        &format!("Uloženo: {}", display_path(&path)),
+                        SAVED_TOAST_DURATION,
+                    ),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "uložení obrázku do Stažených");
+                        self.show_toast("Obrázek se nepodařilo uložit")
+                    }
+                }
+            }
+            Msg::Downloaded(url, r) => {
+                self.downloading.remove(&url);
+                match r {
+                    Ok(path) => self.show_toast_for(
+                        &format!("Uloženo: {}", display_path(&path)),
+                        SAVED_TOAST_DURATION,
+                    ),
+                    Err(e) => {
+                        tracing::warn!(error = %e.text, "stažení přílohy selhalo");
+                        self.show_toast_for(
+                            &format!("Stažení se nepodařilo: {}", e.text),
+                            SAVED_TOAST_DURATION,
+                        )
+                    }
+                }
+            }
             Msg::FullImage(_, preview, Err(e)) => {
                 // Originál není k dispozici → otevřít aspoň náhled.
                 tracing::warn!(error = %e.text, "originál obrázku nelze stáhnout, otevírám náhled");
@@ -9305,10 +9441,15 @@ fn message_view<'a>(
             let label = text(format!("📎 {}", a.name)).size(13).font(SEMIBOLD);
             body = body.push(match &a.url {
                 Some(url) => Element::from(
-                    button(label)
-                        .style(move |t: &Theme, s| style::link(t, s, mine))
-                        .padding(0)
-                        .on_press(Msg::OpenUrl(url.clone())),
+                    row![
+                        button(label)
+                            .style(move |t: &Theme, s| style::link(t, s, mine))
+                            .padding(0)
+                            .on_press(Msg::OpenUrl(url.clone())),
+                        download_button(mine, Msg::DownloadFile(url.clone(), a.name.clone())),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
                 ),
                 None => label.into(),
             });
@@ -9636,7 +9777,7 @@ fn block_view<'a>(
             }));
             table.into()
         }
-        Block::Image(img) => image_view(img, media.get(&img.url)),
+        Block::Image(img) => image_view(img, media.get(&img.url), mine),
         Block::Rule => container(space())
             .width(width.min(BUBBLE_MIN))
             .height(1)
@@ -9741,7 +9882,7 @@ fn paragraph<'a>(
 }
 
 /// Obrázek v bublině; velikost podle rozměrů z HTML, zmenšená na [`IMAGE_MAX_WIDTH`].
-fn image_view<'a>(img: &InlineImage, state: Option<&Media>) -> Element<'a, Msg> {
+fn image_view<'a>(img: &InlineImage, state: Option<&Media>, mine: bool) -> Element<'a, Msg> {
     let (w, h) = match (img.width, img.height) {
         (Some(w), Some(h)) => {
             let w2 = w.min(IMAGE_MAX_WIDTH);
@@ -9750,13 +9891,16 @@ fn image_view<'a>(img: &InlineImage, state: Option<&Media>) -> Element<'a, Msg> 
         _ => (IMAGE_MAX_WIDTH, IMAGE_MAX_WIDTH * 0.75),
     };
     match state {
-        Some(Media::Ready(handle, _)) => {
+        // klik na obrázek = náhled v prohlížeči obrázků, pod ním tlačítko stažení
+        Some(Media::Ready(handle, _)) => column![
             button(image(handle.clone()).width(w).height(h).border_radius(10))
                 .style(button::text)
                 .padding(0)
-                .on_press(Msg::OpenImage(img.clone()))
-                .into()
-        }
+                .on_press(Msg::OpenImage(img.clone())),
+            download_button(mine, Msg::DownloadImage(img.clone())),
+        ]
+        .spacing(3)
+        .into(),
         Some(Media::Failed) => text("🖼 Obrázek se nepodařilo načíst")
             .size(13)
             .style(muted)
@@ -9798,11 +9942,92 @@ fn preview_text(html: &str) -> String {
     parts.join(" ")
 }
 
-/// Zapíše dočasnou kopii média pro otevření v externí aplikaci.
-fn write_temp_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
-    use std::hash::{Hash, Hasher};
-    use std::os::unix::fs::PermissionsExt;
-    let ext = match bytes {
+/// Malé tlačítko „⤓ Stáhnout“ (u přílohy a pod obrázkem).
+fn download_button<'a>(mine: bool, msg: Msg) -> Element<'a, Msg> {
+    button(text("⤓ Stáhnout").size(12))
+        .style(move |t: &Theme, s| style::link(t, s, mine))
+        .padding(0)
+        .on_press(msg)
+        .into()
+}
+
+/// Volné místo pro soubor `name` ve složce Stažené (XDG, jinak domovská složka): při shodě
+/// jmen přidá „ (1)“, „ (2)“…; soubor rovnou založí (prázdný), aby ho souběžné stahování
+/// nepřepsalo.
+fn download_target(name: &str) -> std::io::Result<std::path::PathBuf> {
+    let dir = directories::UserDirs::new()
+        .and_then(|d| d.download_dir().map(std::path::Path::to_path_buf))
+        .or_else(|| directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()))
+        .ok_or_else(|| std::io::Error::other("nenalezena domovská složka"))?;
+    std::fs::create_dir_all(&dir)?;
+    unique_file(&dir, &safe_file_name(name))
+}
+
+/// Název souboru ze serveru bez lomítek a skrytí (`.`), aby nemohl mířit mimo složku.
+fn safe_file_name(name: &str) -> String {
+    let n: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\0') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let n = n.trim().trim_start_matches('.').trim();
+    if n.is_empty() {
+        "soubor".into()
+    } else {
+        n.into()
+    }
+}
+
+fn unique_file(dir: &std::path::Path, name: &str) -> std::io::Result<std::path::PathBuf> {
+    let p = std::path::Path::new(name);
+    let (stem, ext) = match (p.file_stem(), p.extension()) {
+        (Some(s), Some(e)) => (
+            s.to_string_lossy().into_owned(),
+            format!(".{}", e.to_string_lossy()),
+        ),
+        _ => (name.to_owned(), String::new()),
+    };
+    for i in 0..1000 {
+        let candidate = if i == 0 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{stem} ({i}){ext}"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(
+        "příliš mnoho souborů se stejným jménem",
+    ))
+}
+
+/// Cesta pro hlášku: domovská složka jako `~`.
+fn display_path(path: &std::path::Path) -> String {
+    match directories::BaseDirs::new().and_then(|d| {
+        path.strip_prefix(d.home_dir())
+            .ok()
+            .map(|p| p.to_path_buf())
+    }) {
+        Some(rel) => format!("~/{}", rel.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// Přípona obrázku podle prvních bajtů.
+fn image_ext(bytes: &[u8]) -> &'static str {
+    match bytes {
         [0xFF, 0xD8, ..] => "jpg",
         [0x89, b'P', b'N', b'G', ..] => "png",
         [b'G', b'I', b'F', ..] => "gif",
@@ -9822,7 +10047,14 @@ fn write_temp_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathB
             ..,
         ] => "webp",
         _ => "bin",
-    };
+    }
+}
+
+/// Zapíše dočasnou kopii média pro otevření v externí aplikaci.
+fn write_temp_media(url: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::PermissionsExt;
+    let ext = image_ext(bytes);
     let dir = temp_media_dir()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut h);
@@ -10492,6 +10724,25 @@ async fn sign_out(id: AccountId) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_file_names_are_safe_and_unique() {
+        assert_eq!(safe_file_name("../../.bashrc"), "_.._.bashrc");
+        assert_eq!(safe_file_name(".skryty"), "skryty");
+        assert_eq!(safe_file_name("  "), "soubor");
+        assert_eq!(safe_file_name("zpráva.pdf"), "zpráva.pdf");
+        let dir = std::env::temp_dir().join(format!("tymy-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = unique_file(&dir, "x.pdf").unwrap();
+        let b = unique_file(&dir, "x.pdf").unwrap();
+        let c = unique_file(&dir, "bez").unwrap();
+        let d = unique_file(&dir, "bez").unwrap();
+        assert_eq!(a.file_name().unwrap(), "x.pdf");
+        assert_eq!(b.file_name().unwrap(), "x (1).pdf");
+        assert_eq!(c.file_name().unwrap(), "bez");
+        assert_eq!(d.file_name().unwrap(), "bez (1)");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn table_columns_fit_content_and_bubble() {

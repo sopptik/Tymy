@@ -9,6 +9,7 @@ pub mod calendar;
 pub mod calls;
 pub mod chat;
 mod endpoints;
+pub mod files;
 pub mod graph;
 mod http;
 pub mod media;

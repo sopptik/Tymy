@@ -23,6 +23,12 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
     OneDrive, synchronizace ani jiné funkce.
   Obrázky ze schránky jdou dál přes vlastní úložiště Teams (AMS). Přijaté soubory se
   otevírají odkazem v prohlížeči.
+- **Stažení příloh (2026-11-26):** „šlo by přidat u souborů možnost přímého dowloadu bez
+  otevírání v prohlížeči, resp u obrázků mít obě možnosti jak náhled tak download“.
+  ✅ U přílohy je vedle odkazu „⤓ Stáhnout“: soubor ze SharePointu / OneDrive se stáhne
+  přes Graph (`shares/…/driveItem/content`) přímo do složky Stažené. Pod obrázkem je
+  „⤓ Stáhnout“ (uloží originál); klik na obrázek dál otevře náhled. Při shodě jmen se
+  přidá „ (1)“, výsledek ukáže hláška s cestou.
 - **Typy účtů:** pracovní/školní (M365) **i** osobní (Teams free).
 - **Backend:** interní (nedokumentovaná) API Teams web klienta, ne Microsoft Graph.
 - **Hovory:** pokus o nativní implementaci (výzkum), ne vložený web.

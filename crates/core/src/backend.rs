@@ -217,6 +217,13 @@ pub trait ChatBackend: Send + Sync {
         Ok(())
     }
 
+    /// Stáhne přílohu zprávy (`Attachment::url`) do souboru `dest`; vrátí počet bajtů.
+    async fn download_file(&self, url: &str, dest: &std::path::Path) -> Result<u64> {
+        let bytes = self.fetch_media(url).await?;
+        std::fs::write(dest, &bytes).map_err(|e| crate::Error::Other(e.to_string()))?;
+        Ok(bytes.len() as u64)
+    }
+
     /// Historie hovorů (nejnovější první).
     async fn call_history(&self) -> Result<Vec<crate::call_log::CallRecord>> {
         Ok(vec![])

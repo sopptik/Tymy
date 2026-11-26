@@ -267,6 +267,15 @@ přímo v HTML obsahu zprávy:
   "filename": "MicrosoftTeams-image.png", …}` ✅.
 - Ladění: `tymy-cli media <url> -o soubor`.
 
+### Stažení přílohy (soubor na SharePointu) ✅ implementováno, ověřit naživo
+- Příloha v `properties.files` odkazuje na SharePoint / OneDrive odesílatele (`shareUrl`,
+  `objectUrl`). Bez prohlížeče ji stáhneme přes Graph: `GET /v1.0/shares/u!{base64url(URL)
+  bez paddingu}/driveItem/content` s tokenem Graph (rozsah `Files.ReadWrite.All` v tokenu
+  ověřen 2026-11-26).
+- Graph odpoví `302` na podepsanou adresu `*.sharepoint.com/…download.aspx?…tempauth=…`;
+  tu stahujeme **bez** tokenu a jen na hosty SharePointu / OneDrive (`crates/api/src/files.rs`).
+- Přílohy mimo SharePoint (AMS) se stahují jako média se skypetokenem.
+
 ## 6. Middle tier (profily, hledání lidí)
 
 Adresa z authz odpovědi: `regionGtms.middleTier` (např. `https://teams.microsoft.com/api/mt/emea`).

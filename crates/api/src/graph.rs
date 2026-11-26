@@ -15,7 +15,7 @@ use tymy_core::{Error, NewMeeting, Result};
 use crate::http::{Http, SendLogged, check, json, net_err};
 
 pub const GRAPH_SCOPE: &str = "https://graph.microsoft.com/.default";
-const GRAPH_BASE: &str = "https://graph.microsoft.com";
+pub(crate) const GRAPH_BASE: &str = "https://graph.microsoft.com";
 
 /// Požadavek na Graph; `path` začíná `/v1.0/` nebo `/beta/`.
 pub async fn request(

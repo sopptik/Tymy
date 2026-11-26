@@ -1089,21 +1089,7 @@ impl TeamsBackend {
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
         for attempt in 0..2 {
-            let token = {
-                let mut guard = self.graph_token.lock().await;
-                let fresh = guard.as_ref().filter(|t| {
-                    t.expires_at - Duration::minutes(REFRESH_MARGIN_MINUTES) > chrono::Utc::now()
-                });
-                match fresh {
-                    Some(t) => t.access_token.clone(),
-                    None => {
-                        let t = self.token_set(crate::graph::GRAPH_SCOPE).await?;
-                        let access = t.access_token.clone();
-                        *guard = Some(t);
-                        access
-                    }
-                }
-            };
+            let token = self.graph_access_token().await?;
             match crate::graph::request(&self.http, &token, method.clone(), path, body).await {
                 Err(Error::Auth(msg)) if attempt == 0 => {
                     tracing::info!(%msg, "Graph odmítl token, obnovuji");
@@ -1115,6 +1101,23 @@ impl TeamsBackend {
         Err(Error::Other(
             "Graph: přihlášení se nepodařilo obnovit".into(),
         ))
+    }
+
+    /// Platný token Graph z mezipaměti, případně nový.
+    async fn graph_access_token(&self) -> Result<String> {
+        let mut guard = self.graph_token.lock().await;
+        let fresh = guard.as_ref().filter(|t| {
+            t.expires_at - Duration::minutes(REFRESH_MARGIN_MINUTES) > chrono::Utc::now()
+        });
+        Ok(match fresh {
+            Some(t) => t.access_token.clone(),
+            None => {
+                let t = self.token_set(crate::graph::GRAPH_SCOPE).await?;
+                let access = t.access_token.clone();
+                *guard = Some(t);
+                access
+            }
+        })
     }
 
     /// Ladění: GET na Graph.
@@ -1706,6 +1709,37 @@ impl ChatBackend for TeamsBackend {
         };
         self.send_hangup(c).await
     }
+    async fn download_file(&self, url: &str, dest: &std::path::Path) -> Result<u64> {
+        if !crate::files::is_sharepoint(url) {
+            let bytes = self.fetch_media(url).await?;
+            tokio::fs::write(dest, &bytes)
+                .await
+                .map_err(|e| Error::Other(format!("zápis {}: {e}", dest.display())))?;
+            return Ok(bytes.len() as u64);
+        }
+        for attempt in 0..2 {
+            let token = self.graph_access_token().await?;
+            let r = crate::files::download_sharepoint(
+                &self.http,
+                crate::graph::GRAPH_BASE,
+                &token,
+                url,
+                dest,
+            )
+            .await;
+            match r {
+                Err(Error::Auth(msg)) if attempt == 0 => {
+                    tracing::info!(%msg, "Graph odmítl token při stahování, obnovuji");
+                    *self.graph_token.lock().await = None;
+                }
+                r => return r,
+            }
+        }
+        Err(Error::Other(
+            "Graph: přihlášení se nepodařilo obnovit".into(),
+        ))
+    }
+
     async fn call_history(&self) -> Result<Vec<tymy_core::call_log::CallRecord>> {
         let v = self
             .raw_get("/v1/users/ME/conversations/48%3Acalllogs/messages?view=msnp24Equivalent&pageSize=200")
