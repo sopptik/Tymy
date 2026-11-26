@@ -96,6 +96,10 @@ Obsah: `<span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="0"
 Tvar podle přijatých zpráv a známých klientů; odeslání čeká na ověření (2026-11-09).
 
 ### Obsah zpráv (HTML) ✅
+- Zmínka v přijaté zprávě: `<span itemtype="http://schema.skype.com/Mention" itemid="N">`
+  v HTML, osoba v `properties.mentions` (JSON řetězec s polem `{itemid, mri, mentionType,
+  displayName}`). Web klient dělí celé jméno na zmínku po slovech (víc `itemid`, stejné
+  `mri`). `mentionType` `person` = osoba; kanál, tým a štítek mají jiný typ.
 
 Ověřeno na ~1200 reálných zprávách (struktura značek, bez obsahu):
 

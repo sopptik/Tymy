@@ -26,6 +26,8 @@ pub struct Span {
     pub style: Style,
     /// Cíl odkazu (jen `http(s)://` a `mailto:`).
     pub link: Option<String>,
+    /// `itemid` zmínky; osobu k němu najde [`crate::MessageMention`] ve zprávě.
+    pub mention: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +266,8 @@ enum Effect {
     Block,
     Style(Style),
     Link(Option<String>),
+    /// Zmínka: předchozí styl a `itemid`.
+    Mention(Style, Option<String>),
     Skip,
     Author,
     Heading,
@@ -294,6 +298,7 @@ struct Builder {
     inline: Vec<Span>,
     style: Style,
     link: Option<String>,
+    mention: Option<String>,
     open: Vec<(String, Effect)>,
     /// Otevřené seznamy: `None` = odrážky, `Some(n)` = číslovaný (poslední číslo).
     lists: Vec<Option<u32>>,
@@ -320,6 +325,7 @@ impl Builder {
             inline: Vec::new(),
             style: Style::default(),
             link: None,
+            mention: None,
             open: Vec::new(),
             lists: Vec::new(),
             item: None,
@@ -493,7 +499,10 @@ impl Builder {
                     self.skip += 1;
                     Effect::Skip
                 } else if attr(tag, "itemtype").is_some_and(|t| t.contains("Mention")) {
-                    self.restyle(|s| s.mention = true)
+                    let prev = (self.style, self.mention.take());
+                    self.style.mention = true;
+                    self.mention = attr(tag, "itemid").filter(|i| !i.is_empty());
+                    Effect::Mention(prev.0, prev.1)
                 } else {
                     Effect::None
                 }
@@ -529,6 +538,10 @@ impl Builder {
             Effect::Block => self.flush(),
             Effect::Style(prev) => self.style = prev,
             Effect::Link(prev) => self.link = prev,
+            Effect::Mention(style, mention) => {
+                self.style = style;
+                self.mention = mention;
+            }
             Effect::Skip => self.skip = self.skip.saturating_sub(1),
             Effect::Author => {
                 let name = self.author.take().map(|a| a.trim().to_owned());
@@ -628,7 +641,7 @@ impl Builder {
             code.push_str(t);
             return;
         }
-        let (style, link) = (self.style, self.link.clone());
+        let (style, link) = (self.style, (self.link.clone(), self.mention.clone()));
         let target = match &mut self.table {
             Some(Table { cell: Some(c), .. }) => &mut c.spans,
             Some(_) => return, // text mezi buňkami (bílé znaky)
@@ -655,7 +668,7 @@ impl Builder {
             None => self.inline.is_empty(),
         };
         if !empty {
-            let (style, link) = (self.style, self.link.clone());
+            let (style, link) = (self.style, (self.link.clone(), self.mention.clone()));
             match &mut self.table {
                 Some(Table { cell: Some(c), .. }) => push_span(&mut c.spans, t, style, link),
                 _ => push_span(&mut self.inline, t, style, link),
@@ -670,7 +683,7 @@ impl Builder {
             if let Some(c) = &mut t.cell
                 && c.spans.last().is_some_and(|s| !s.text.ends_with('\n'))
             {
-                let (style, link) = (self.style, self.link.clone());
+                let (style, link) = (self.style, (self.link.clone(), self.mention.clone()));
                 push_span(&mut c.spans, "\n", style, link);
             }
             return;
@@ -729,13 +742,22 @@ fn finish_row(t: &mut Table) {
     }
 }
 
-fn push_span(target: &mut Vec<Span>, t: &str, style: Style, link: Option<String>) {
+/// `link` = (cíl odkazu, `itemid` zmínky).
+fn push_span(
+    target: &mut Vec<Span>,
+    t: &str,
+    style: Style,
+    (link, mention): (Option<String>, Option<String>),
+) {
     match target.last_mut() {
-        Some(last) if last.style == style && last.link == link => last.text.push_str(t),
+        Some(last) if last.style == style && last.link == link && last.mention == mention => {
+            last.text.push_str(t)
+        }
         _ => target.push(Span {
             text: t.to_owned(),
             style,
             link,
+            mention,
         }),
     }
 }
@@ -813,7 +835,7 @@ pub fn safe_link(href: &str) -> bool {
 fn autolink(spans: Vec<Span>) -> Vec<Span> {
     let mut out = Vec::with_capacity(spans.len());
     for span in spans {
-        if span.link.is_some() || span.style.code {
+        if span.link.is_some() || span.style.code || span.mention.is_some() {
             out.push(span);
             continue;
         }
@@ -824,6 +846,7 @@ fn autolink(spans: Vec<Span>) -> Vec<Span> {
                     text: rest[..start].to_owned(),
                     style: span.style,
                     link: None,
+                    mention: None,
                 });
             }
             let url = &rest[start..end];
@@ -836,6 +859,7 @@ fn autolink(spans: Vec<Span>) -> Vec<Span> {
                 text: url.to_owned(),
                 style: span.style,
                 link: Some(href),
+                mention: None,
             });
             rest = &rest[end..];
         }
@@ -844,6 +868,7 @@ fn autolink(spans: Vec<Span>) -> Vec<Span> {
                 text: rest.to_owned(),
                 style: span.style,
                 link: None,
+                mention: None,
             });
         }
     }
@@ -898,6 +923,7 @@ mod tests {
             text: text.into(),
             style: Style::default(),
             link: None,
+            mention: None,
         }
     }
 
@@ -908,6 +934,7 @@ mod tests {
             text: text.into(),
             style,
             link: None,
+            mention: None,
         }
     }
 
@@ -916,6 +943,7 @@ mod tests {
             text: text.into(),
             style: Style::default(),
             link: Some(href.into()),
+            mention: None,
         }
     }
 
@@ -983,7 +1011,10 @@ mod tests {
             parse(html),
             vec![Block::Paragraph(vec![
                 p("Ahoj "),
-                styled("Jano", |s| s.mention = true),
+                Span {
+                    mention: Some("0".into()),
+                    ..styled("Jano", |s| s.mention = true)
+                },
                 p(", koukni "),
                 link("sem", "https://example.com/x"),
                 p(" 🙂 zlý"),

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tymy_core::{
     Attachment, Conversation, ConversationId, ConversationKind, Event, Message, MessageKind,
-    Reaction, TeamRef, UserId,
+    MessageMention, Reaction, TeamRef, UserId,
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -272,6 +272,7 @@ impl WireMessage {
             deleted,
             attachments: attachments(&props),
             reactions: reactions(&props),
+            mentions: mentions(&props),
         })
     }
 }
@@ -382,6 +383,43 @@ fn attachments(props: &Value) -> Vec<Attachment> {
                     .map(str::to_owned),
                 size: f.get("fileSize").and_then(Value::as_u64),
                 file_type: s("fileType").map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// Zmínky jsou v `properties.mentions` (JSON řetězec s polem): `itemid` úseku v HTML,
+/// `mri` a `displayName`. Bereme jen osoby (`8:…`), ne kanály, týmy ani štítky.
+fn mentions(props: &Value) -> Vec<MessageMention> {
+    let value = match props.get("mentions") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        None => return vec![],
+    };
+    let Value::Array(items) = value else {
+        return vec![];
+    };
+    items
+        .iter()
+        .filter_map(|m| {
+            let item_id = match m.get("itemid")? {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            let mri = m.get("mri").and_then(Value::as_str)?;
+            let person = m
+                .get("mentionType")
+                .and_then(Value::as_str)
+                .is_none_or(|t| t == "person");
+            (person && mri.starts_with("8:")).then(|| MessageMention {
+                item_id,
+                mri: UserId(mri.to_owned()),
+                name: m
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_owned),
             })
         })
         .collect()
@@ -548,6 +586,25 @@ mod tests {
             conversation_kind("19:abc@thread.skype", None),
             ConversationKind::Channel
         );
+    }
+
+    #[test]
+    fn parses_person_mentions() {
+        let props = serde_json::json!({"mentions": serde_json::json!([
+            {"@type": "http://schema.skype.com/Mention", "itemid": "0", "mri": "8:orgid:aaaa",
+             "mentionType": "person", "displayName": "Jana"},
+            {"itemid": 1, "mri": "8:orgid:aaaa", "mentionType": "person", "displayName": "Nováková"},
+            {"itemid": "2", "mri": "19:kanal@thread.tacv2", "mentionType": "channel"},
+            {"itemid": "3", "mri": "8:orgid:bbbb", "mentionType": "tag"}
+        ]).to_string()});
+        let m = mentions(&props);
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            (m[0].item_id.as_str(), m[0].mri.as_str()),
+            ("0", "8:orgid:aaaa")
+        );
+        assert_eq!(m[1].item_id, "1");
+        assert_eq!(m[0].name.as_deref(), Some("Jana"));
     }
 
     #[test]

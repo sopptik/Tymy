@@ -181,6 +181,17 @@ pub struct Message {
     /// Reakce (👍, ❤️, …); `default` kvůli starším záznamům v cache.
     #[serde(default)]
     pub reactions: Vec<Reaction>,
+    /// Zmínění lidé (`properties.mentions`); `default` kvůli starším záznamům v cache.
+    #[serde(default)]
+    pub mentions: Vec<MessageMention>,
+}
+
+/// Zmínka v přijaté zprávě: `itemid` úseku v HTML → osoba.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageMention {
+    pub item_id: String,
+    pub mri: UserId,
+    pub name: Option<String>,
 }
 
 /// Jedna reakce na zprávu a kdo ji dal.
@@ -456,6 +467,7 @@ mod tests {
             deleted: false,
             attachments: vec![],
             reactions: vec![],
+            mentions: vec![],
         }
     }
 

@@ -297,6 +297,7 @@ mod tests {
             deleted: false,
             attachments: vec![],
             reactions: vec![],
+            mentions: vec![],
         }
     }
 

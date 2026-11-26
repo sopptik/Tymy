@@ -34,6 +34,10 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   zůstává vpravo dole, dokud ji uživatel nezavře (✕); klik na název otevře soubor, ikona
   složky ho ukáže ve správci souborů přes standardní D-Bus `org.freedesktop.FileManager1`
   (Caja, Nautilus, Nemo, Dolphin, Thunar…), jinak `xdg-open` složky (výchozí správce).
+- **Zmínky (2026-11-26):** „šlo by nějak udělat aby když je někdo zmíněný v komunikaci aby po
+  kliknutí na text se otevřelo okno chatu s tím uživatelem“. ✅ Zmínka osoby ve zprávě je
+  odkaz; klik otevře (případně založí jako rozpracovaný) chat 1:1 s ní. Osoba se bere
+  z `properties.mentions` (`itemid` → `mri`); kanály, týmy a štítky se neotevírají.
 - **Typy účtů:** pracovní/školní (M365) **i** osobní (Teams free).
 - **Backend:** interní (nedokumentovaná) API Teams web klienta, ne Microsoft Graph.
 - **Hovory:** pokus o nativní implementaci (výzkum), ne vložený web.

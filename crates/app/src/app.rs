@@ -494,6 +494,8 @@ pub enum Msg {
     People(u64, Result<Vec<Person>, Failure>),
     External(u64, Result<Vec<Person>, Failure>),
     OpenPerson(Person),
+    /// Klik na zmínku osoby ve zprávě: otevřít s ní chat (MRI, jméno).
+    OpenMention(UserId, String),
     /// Nový skupinový chat: otevřít výběr lidí, název, hledání, přidání/odebrání, založení.
     NewGroup,
     GroupTopic(String),
@@ -917,6 +919,7 @@ impl Msg {
                 count = r.as_ref().map(Vec::len).unwrap_or(0),
                 "update: External"
             ),
+            Msg::OpenMention(mri, _) => debug!(%mri, "update: OpenMention"),
             Msg::OpenPerson(p) => debug!(mri = %p.mri, external = p.external, "update: OpenPerson"),
             Msg::NewGroup => debug!("update: NewGroup"),
             Msg::GroupTopic(_) | Msg::GroupQuery(_) => trace!("update: GroupInput"),
@@ -4772,6 +4775,21 @@ impl App {
                 Task::none()
             }
             Msg::OpenPerson(person) => self.open_person(person),
+            Msg::OpenMention(mri, name) => {
+                let me = self.session().map(|s| s.profile.account_id.clone());
+                if me.is_some_and(|me| mri.as_str() == format!("8:orgid:{}", me.as_str())) {
+                    return self.show_toast("To jste vy");
+                }
+                self.open_person(Person {
+                    mri,
+                    display_name: name,
+                    email: None,
+                    job_title: None,
+                    department: None,
+                    company: None,
+                    external: false,
+                })
+            }
             Msg::NewGroup => {
                 self.group_builder = Some(GroupBuilder::default());
                 operation::focus(GROUP_QUERY)
@@ -9469,8 +9487,10 @@ fn message_view<'a>(
                 .style(move |t: &Theme, _| style::selectable_text(t, mine)),
         );
     } else {
+        let mut blocks = rich::parse(&m.content);
+        link_mentions(&mut blocks, &m.mentions);
         body = body.extend(blocks_view(
-            &rich::parse(&m.content),
+            &blocks,
             mine,
             false,
             media,
@@ -9900,7 +9920,7 @@ fn paragraph<'a>(
             }
             let mut sp = span(part.to_owned())
                 .font(if is_emoji { style::EMOJI } else { font })
-                .underline(st.underline || s.link.is_some())
+                .underline(st.underline || (s.link.is_some() && !st.mention))
                 .strikethrough(st.strike);
             if st.code {
                 sp = sp.background(code_bg).padding([0, 3]);
@@ -9915,10 +9935,74 @@ fn paragraph<'a>(
         })
         .collect();
     rich_text(spans)
-        .on_link_click(Msg::OpenUrl)
+        .on_link_click(link_message)
         .size(size)
         .line_height(1.35)
         .into()
+}
+
+/// Vnitřní odkaz zmínky osoby: `PERSON_LINK` + MRI + `\u{1f}` + jméno.
+const PERSON_LINK: &str = "tymy-person:";
+
+/// Klik na odkaz v textu zprávy: zmínka otevře chat s osobou, jinak prohlížeč.
+fn link_message(link: String) -> Msg {
+    match link
+        .strip_prefix(PERSON_LINK)
+        .and_then(|rest| rest.split_once('\u{1f}'))
+    {
+        Some((mri, name)) => Msg::OpenMention(UserId(mri.to_owned()), name.to_owned()),
+        None => Msg::OpenUrl(link),
+    }
+}
+
+/// Zmínkám osob v blocích dá odkaz na chat s nimi. Teams celé jméno dělí na několik
+/// zmínek (každé slovo zvlášť, stejné MRI); jméno pro chat je proto složené ze všech.
+fn link_mentions(blocks: &mut [Block], mentions: &[tymy_core::MessageMention]) {
+    if mentions.is_empty() {
+        return;
+    }
+    let link_for = |item: &str| -> Option<String> {
+        let m = mentions.iter().find(|m| m.item_id == item)?;
+        // opakovaná zmínka téže osoby nesmí jméno zdvojit
+        let mut name: Vec<&str> = vec![];
+        for part in mentions
+            .iter()
+            .filter(|o| o.mri == m.mri)
+            .filter_map(|o| o.name.as_deref())
+        {
+            if !name.contains(&part) {
+                name.push(part);
+            }
+        }
+        Some(format!(
+            "{PERSON_LINK}{}\u{1f}{}",
+            m.mri.as_str(),
+            name.join(" ")
+        ))
+    };
+    fn walk(blocks: &mut [Block], f: &dyn Fn(&str) -> Option<String>) {
+        for b in blocks {
+            let spans: Vec<&mut Vec<rich::Span>> = match b {
+                Block::Paragraph(s) | Block::Heading(s) | Block::ListItem { spans: s, .. } => {
+                    vec![s]
+                }
+                Block::Table(rows) => rows.iter_mut().flatten().map(|c| &mut c.spans).collect(),
+                Block::Quote(q) => {
+                    walk(&mut q.blocks, f);
+                    vec![]
+                }
+                _ => vec![],
+            };
+            for s in spans.into_iter().flatten() {
+                if s.link.is_none()
+                    && let Some(link) = s.mention.as_deref().and_then(f)
+                {
+                    s.link = Some(link);
+                }
+            }
+        }
+    }
+    walk(blocks, &link_for);
 }
 
 /// Obrázek v bublině; velikost podle rozměrů z HTML, zmenšená na [`IMAGE_MAX_WIDTH`].
@@ -10864,6 +10948,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mention_opens_chat_with_person() {
+        let html = r#"<p>Ahoj <span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="0">Jana</span> <span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="1">Nováková</span>, <span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="2">Jana</span></p>"#;
+        let m = |i: &str, n: &str| tymy_core::MessageMention {
+            item_id: i.into(),
+            mri: UserId("8:orgid:aaaa".into()),
+            name: Some(n.into()),
+        };
+        let mut blocks = rich::parse(html);
+        link_mentions(
+            &mut blocks,
+            &[m("0", "Jana"), m("1", "Nováková"), m("2", "Jana")],
+        );
+        let Block::Paragraph(spans) = &blocks[0] else {
+            panic!("odstavec")
+        };
+        let links: Vec<Msg> = spans
+            .iter()
+            .filter_map(|s| s.link.clone())
+            .map(link_message)
+            .collect();
+        assert_eq!(links.len(), 3);
+        for l in links {
+            match l {
+                Msg::OpenMention(mri, name) => {
+                    assert_eq!(mri.as_str(), "8:orgid:aaaa");
+                    assert_eq!(name, "Jana Nováková");
+                }
+                _ => panic!("čekána zmínka"),
+            }
+        }
+        assert!(matches!(
+            link_message("https://example.com".into()),
+            Msg::OpenUrl(_)
+        ));
+    }
+
+    #[test]
     fn download_file_names_are_safe_and_unique() {
         assert_eq!(safe_file_name("../../.bashrc"), "_.._.bashrc");
         assert_eq!(safe_file_name(".skryty"), "skryty");
@@ -10894,6 +11015,7 @@ mod tests {
                 text: t.into(),
                 style: Default::default(),
                 link: None,
+                mention: None,
             }],
         };
         let rows = vec![
@@ -10932,6 +11054,7 @@ mod tests {
                 file_type: None,
             }],
             reactions: vec![],
+            mentions: vec![],
         };
         assert_eq!(message_plain(&m), "Ahoj světe\ndruhý\n\nsoubor.pdf");
         assert_eq!(estimate_text_width("ok", 500.0), 80.0);
