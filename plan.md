@@ -28,7 +28,12 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   ✅ U přílohy je vedle odkazu „⤓ Stáhnout“: soubor ze SharePointu / OneDrive se stáhne
   přes Graph (`shares/…/driveItem/content`) přímo do složky Stažené. Pod obrázkem je
   „⤓ Stáhnout“ (uloží originál); klik na obrázek dál otevře náhled. Při shodě jmen se
-  přidá „ (1)“, výsledek ukáže hláška s cestou.
+  přidá „ (1)“.
+  Uživatel (2026-11-26): „mohlo by tam to okno po stažení zůstat s tím, že by v něm byla
+  ikonka otevření složky?“ a „ne všichni na linuxu mají caja“. ✅ Hláška o staženém souboru
+  zůstává vpravo dole, dokud ji uživatel nezavře (✕); klik na název otevře soubor, ikona
+  složky ho ukáže ve správci souborů přes standardní D-Bus `org.freedesktop.FileManager1`
+  (Caja, Nautilus, Nemo, Dolphin, Thunar…), jinak `xdg-open` složky (výchozí správce).
 - **Typy účtů:** pracovní/školní (M365) **i** osobní (Teams free).
 - **Backend:** interní (nedokumentovaná) API Teams web klienta, ne Microsoft Graph.
 - **Hovory:** pokus o nativní implementaci (výzkum), ne vložený web.

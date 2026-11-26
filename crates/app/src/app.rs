@@ -45,6 +45,8 @@ use crate::tray::{self, TrayEvent, TrayHandle};
 const PHONE_ICON: &[u8] = include_bytes!("../assets/phone.svg");
 /// Ikona kamery (bílá, na červené tlačítko videohovoru).
 const CAMERA_ICON: &[u8] = include_bytes!("../assets/camera.svg");
+/// Ikona složky (v hlášce o staženém souboru).
+const FOLDER_ICON: &[u8] = include_bytes!("../assets/folder.svg");
 /// Jak často okno přebírá nové snímky obrazu hovoru (~15 snímků/s jako kamera).
 const VIDEO_FRAME: Duration = Duration::from_millis(66);
 /// Jak často se obnovuje historie hovorů (nové záznamy hlásí i trouter).
@@ -656,6 +658,10 @@ pub enum Msg {
     ImageForSave(String, String, Result<Arc<Vec<u8>>, Failure>),
     /// Stažení skončilo: (URL, uložený soubor).
     Downloaded(String, Result<std::path::PathBuf, Failure>),
+    /// Hláška o staženém souboru: otevřít soubor / ukázat ve složce / zavřít.
+    OpenSaved,
+    ShowSavedInFolder,
+    CloseSaved,
 }
 
 impl Msg {
@@ -990,6 +996,9 @@ impl Msg {
             Msg::DownloadImage(_) => debug!("update: DownloadImage"),
             Msg::ImageForSave(_, _, r) => debug!(result = ok(r.is_ok()), "update: ImageForSave"),
             Msg::Downloaded(_, r) => debug!(result = ok(r.is_ok()), "update: Downloaded"),
+            Msg::OpenSaved | Msg::ShowSavedInFolder | Msg::CloseSaved => {
+                debug!("update: Saved")
+            }
         }
     }
 }
@@ -1060,7 +1069,7 @@ const INDEX_MAX_MESSAGES: i64 = 5000;
 /// Pauza po označení textu, než se výběr zkopíruje (ať se nekopíruje při každém pohybu myši).
 const COPY_DELAY: Duration = Duration::from_millis(350);
 const TOAST_DURATION: Duration = Duration::from_millis(1800);
-/// Hláška o uloženém souboru (obsahuje cestu, čte se déle).
+/// Hláška o chybě stažení (obsahuje důvod, čte se déle).
 const SAVED_TOAST_DURATION: Duration = Duration::from_secs(5);
 
 /// Šířka levého panelu.
@@ -1344,6 +1353,8 @@ pub struct App {
     originals: HashMap<String, std::path::PathBuf>,
     /// Právě stahované přílohy a obrázky (URL).
     downloading: HashSet<String>,
+    /// Naposledy stažený soubor: hláška s tlačítky zůstává, dokud ji uživatel nezavře.
+    saved: Option<std::path::PathBuf>,
     /// Kalendáře a připomínky (všechny účty).
     calendar: CalendarState,
 }
@@ -1487,6 +1498,7 @@ impl App {
             event_busy: false,
             originals: HashMap::new(),
             downloading: HashSet::new(),
+            saved: None,
             calendar: CalendarState::load(),
         }
     }
@@ -5185,6 +5197,25 @@ impl App {
                     _ => Task::none(),
                 }
             }
+            Msg::OpenSaved => {
+                if let Some(p) = self.saved.as_ref().filter(|p| p.exists()) {
+                    open_path(p);
+                } else {
+                    self.saved = None;
+                    return self.show_toast("Soubor už neexistuje");
+                }
+                Task::none()
+            }
+            Msg::ShowSavedInFolder => {
+                if let Some(p) = &self.saved {
+                    show_in_folder(p.clone());
+                }
+                Task::none()
+            }
+            Msg::CloseSaved => {
+                self.saved = None;
+                Task::none()
+            }
             Msg::HideToast(seq) => {
                 if seq == self.toast_seq {
                     self.toast = None;
@@ -6294,10 +6325,10 @@ impl App {
                 let saved = download_target(&name)
                     .and_then(|dest| std::fs::write(&dest, bytes.as_slice()).map(|_| dest));
                 match saved {
-                    Ok(path) => self.show_toast_for(
-                        &format!("Uloženo: {}", display_path(&path)),
-                        SAVED_TOAST_DURATION,
-                    ),
+                    Ok(path) => {
+                        self.saved = Some(path);
+                        Task::none()
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "uložení obrázku do Stažených");
                         self.show_toast("Obrázek se nepodařilo uložit")
@@ -6307,10 +6338,10 @@ impl App {
             Msg::Downloaded(url, r) => {
                 self.downloading.remove(&url);
                 match r {
-                    Ok(path) => self.show_toast_for(
-                        &format!("Uloženo: {}", display_path(&path)),
-                        SAVED_TOAST_DURATION,
-                    ),
+                    Ok(path) => {
+                        self.saved = Some(path);
+                        Task::none()
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e.text, "stažení přílohy selhalo");
                         self.show_toast_for(
@@ -8560,6 +8591,15 @@ impl App {
                     .padding(14),
             );
         }
+        if let Some(p) = &self.saved {
+            layers = layers.push(
+                // vpravo dole, ať nezakrývá tlačítko „nejnovější zprávy“ uprostřed
+                container(saved_notice(p))
+                    .align_bottom(Length::Fill)
+                    .align_right(Length::Fill)
+                    .padding(14),
+            );
+        }
         if let Some(t) = &self.toast {
             layers = layers.push(
                 container(
@@ -9942,6 +9982,104 @@ fn preview_text(html: &str) -> String {
     parts.join(" ")
 }
 
+/// Hláška o staženém souboru: název (klik otevře soubor), ikona složky (ukáže soubor ve
+/// správci souborů) a zavření.
+fn saved_notice<'a>(path: &std::path::Path) -> Element<'a, Msg> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = path.parent().map(display_path).unwrap_or_default();
+    let on_toast = |t: &Theme| style::colors(t).sidebar;
+    let folder = button(
+        iced::widget::svg(iced::widget::svg::Handle::from_memory(FOLDER_ICON))
+            .width(18)
+            .height(18)
+            .style(move |t: &Theme, _| iced::widget::svg::Style {
+                color: Some(on_toast(t)),
+            }),
+    )
+    .padding(4)
+    .style(button::text)
+    .on_press(Msg::ShowSavedInFolder);
+    let open = button(
+        column![
+            text(format!("✓ Staženo: {name}")).size(13).font(SEMIBOLD),
+            text(dir).size(11),
+        ]
+        .spacing(1),
+    )
+    .padding(0)
+    .style(move |t: &Theme, _| button::Style {
+        text_color: on_toast(t),
+        ..Default::default()
+    })
+    .on_press(Msg::OpenSaved);
+    let close = button(text("✕").size(13))
+        .padding([2, 6])
+        .style(move |t: &Theme, _| button::Style {
+            text_color: on_toast(t),
+            ..Default::default()
+        })
+        .on_press(Msg::CloseSaved);
+    container(
+        row![
+            open,
+            iced::widget::tooltip(
+                folder,
+                container(text("Otevřít složku").size(12))
+                    .padding([3, 8])
+                    .style(style::tooltip),
+                iced::widget::tooltip::Position::Top,
+            ),
+            close
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([7, 12])
+    .style(style::toast)
+    .into()
+}
+
+/// Ukáže soubor ve správci souborů (D-Bus `org.freedesktop.FileManager1.ShowItems`, umí
+/// Caja, Nautilus, Nemo, Dolphin…); jinak otevře jeho složku.
+fn show_in_folder(path: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        let uri = file_uri(&path);
+        let shown = zbus::blocking::Connection::session().and_then(|c| {
+            c.call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                &(vec![uri.as_str()], ""),
+            )
+            .map(|_| ())
+        });
+        if let Err(e) = shown {
+            tracing::debug!(error = %e, "FileManager1 nedostupný, otevírám složku");
+            if let Some(dir) = path.parent() {
+                open_path(dir);
+            }
+        }
+    });
+}
+
+/// `file://` URI s procentovým kódováním (mezery, diakritika).
+fn file_uri(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut s = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s
+}
+
 /// Malé tlačítko „⤓ Stáhnout“ (u přílohy a pod obrázkem).
 fn download_button<'a>(mine: bool, msg: Msg) -> Element<'a, Msg> {
     button(text("⤓ Stáhnout").size(12))
@@ -10741,6 +10879,10 @@ mod tests {
         assert_eq!(b.file_name().unwrap(), "x (1).pdf");
         assert_eq!(c.file_name().unwrap(), "bez");
         assert_eq!(d.file_name().unwrap(), "bez (1)");
+        assert_eq!(
+            file_uri(std::path::Path::new("/home/a/Stažené/x y.pdf")),
+            "file:///home/a/Sta%C5%BEen%C3%A9/x%20y.pdf"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
