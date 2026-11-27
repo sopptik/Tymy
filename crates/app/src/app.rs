@@ -34,6 +34,7 @@ use crate::clipboard::{self, Clip};
 use crate::emoji;
 use crate::mention;
 use crate::notify::{self, ReminderChoice};
+use crate::shortcode;
 use crate::state::{
     PeerNames, channel_name, group_teams, is_empty_chat, is_me, is_unread, merge_messages,
     move_pin, my_mri, order_chats, toggle_reaction, unread_count,
@@ -617,6 +618,10 @@ pub enum Msg {
     MentionMove(isize),
     MentionPick(Option<usize>),
     MentionClose,
+    /// Nabídka emoji ke zkratce „:xy“: posun výběru, výběr (index, jinak zvýrazněná), zavření.
+    ShortcodeMove(isize),
+    ShortcodePick(Option<usize>),
+    ShortcodeClose,
     /// Členové chatu pro nabídku zmínek.
     Roster(ConversationId, Result<Vec<Person>, Failure>),
     /// Odpovědět na zprávu (citace nad psacím polem).
@@ -751,6 +756,9 @@ impl Msg {
             Msg::InsertEmoji(_) => debug!("update: InsertEmoji"),
             Msg::MentionPick(i) => debug!(?i, "update: MentionPick"),
             Msg::MentionClose => debug!("update: MentionClose"),
+            Msg::ShortcodeMove(_) => trace!("update: ShortcodeMove"),
+            Msg::ShortcodePick(i) => debug!(?i, "update: ShortcodePick"),
+            Msg::ShortcodeClose => debug!("update: ShortcodeClose"),
             Msg::Roster(id, r) => debug!(
                 %id,
                 result = ok(r.is_ok()),
@@ -1290,6 +1298,11 @@ pub struct App {
     mention_index: usize,
     /// Zmínka zavřená Esc (znovu se nenabídne, dokud se nezmění).
     mention_dismissed: Option<(usize, usize)>,
+    /// Rozepsaná zkratka emoji („:sm“) u kurzoru a zvýrazněná položka nabídky.
+    shortcode: Option<shortcode::Query>,
+    shortcode_index: usize,
+    /// Zavřená nabídka (Esc) pro tuto zkratku: (řádek, pozice „:“).
+    shortcode_dismissed: Option<(usize, usize)>,
     /// Lidé vybraní do zmínek v psacím poli; právě odesílané zmínky.
     composer_mentions: Vec<MentionRef>,
     in_flight_mentions: Vec<MentionRef>,
@@ -1426,6 +1439,9 @@ impl App {
             mention: None,
             mention_index: 0,
             mention_dismissed: None,
+            shortcode: None,
+            shortcode_index: 0,
+            shortcode_dismissed: None,
             composer_mentions: vec![],
             in_flight_mentions: vec![],
             rosters: HashMap::new(),
@@ -2908,9 +2924,92 @@ impl App {
         self.composer_mentions = next.mentions;
     }
 
+    /// Smaže `chars` znaků před kurzorem a vloží místo nich `with`.
+    fn replace_before_cursor(&mut self, chars: usize, with: &str) {
+        for _ in 0..chars {
+            self.composer
+                .perform(text_editor::Action::Select(text_editor::Motion::Left));
+        }
+        self.composer
+            .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                Arc::new(with.to_owned()),
+            )));
+    }
+
+    /// Po napsání znaku: dopsaná zkratka `:smile:` → 😄, smajlík `:-)` před mezerou či
+    /// novým řádkem → 🙂.
+    fn expand_typed(&mut self, typed: char) {
+        let cursor = self.composer.cursor();
+        if cursor.selection.is_some() {
+            return;
+        }
+        let pos = cursor.position;
+        if typed == ':' {
+            let hit = self
+                .composer
+                .line(pos.line)
+                .and_then(|l| shortcode::completed_at(&l.text, pos.column));
+            if let Some((n, e)) = hit {
+                self.replace_before_cursor(n, e);
+                emoji::remember(&mut self.recent_emoji, e);
+            }
+        } else if typed == ' ' {
+            let hit = self
+                .composer
+                .line(pos.line)
+                .and_then(|l| shortcode::emoticon_before(&l.text, pos.column));
+            if let Some((n, e)) = hit {
+                // za smajlíkem je právě napsaná mezera: přeskočit ji a vrátit se za ni
+                self.composer
+                    .perform(text_editor::Action::Move(text_editor::Motion::Left));
+                self.replace_before_cursor(n, e);
+                self.composer
+                    .perform(text_editor::Action::Move(text_editor::Motion::Right));
+            }
+        } else if typed == '\n' && pos.line > 0 {
+            // smajlík na konci předchozího řádku
+            let prev = pos.line - 1;
+            let hit = self.composer.line(prev).and_then(|l| {
+                let line = format!("{} ", l.text);
+                shortcode::emoticon_before(&line, line.len())
+            });
+            if let Some((n, e)) = hit {
+                self.composer
+                    .perform(text_editor::Action::Move(text_editor::Motion::Left));
+                self.replace_before_cursor(n, e);
+                self.composer
+                    .perform(text_editor::Action::Move(text_editor::Motion::Right));
+            }
+        }
+    }
+
+    /// Emoji nabízená k rozepsané zkratce.
+    fn shortcode_candidates(&self) -> Vec<(&'static str, &'static str)> {
+        const MAX: usize = 8;
+        match &self.shortcode {
+            Some(q) => shortcode::suggestions(&q.text, MAX),
+            None => vec![],
+        }
+    }
+
     /// Po změně psacího pole: rozepsaná @zmínka u kurzoru (a načtení členů chatu).
     fn refresh_mention(&mut self) -> Task<Msg> {
         let cursor = self.composer.cursor();
+        let code = if cursor.selection.is_some() {
+            None
+        } else {
+            let line = cursor.position.line;
+            self.composer
+                .line(line)
+                .and_then(|l| shortcode::query_at(line, &l.text, cursor.position.column))
+                .filter(|q| self.shortcode_dismissed != Some((q.line, q.at)))
+        };
+        if code.as_ref().map(|q| (&q.text, q.at))
+            != self.shortcode.as_ref().map(|q| (&q.text, q.at))
+        {
+            self.shortcode_index = 0;
+        }
+        self.shortcode = code;
         let query = if self.editing.is_some() || cursor.selection.is_some() {
             None
         } else {
@@ -3116,7 +3215,7 @@ impl App {
 
     /// Odešle úpravu vlastní zprávy (Enter v režimu úprav).
     fn submit_edit(&mut self, ed: Editing) -> Task<Msg> {
-        let text = self.composer.text().trim().to_owned();
+        let text = shortcode::convert_trailing(self.composer.text().trim());
         if text.is_empty() {
             // prázdná úprava = nabídnout smazání
             self.confirm_delete = Some(ed.id.clone());
@@ -5318,7 +5417,15 @@ impl App {
             }
             Msg::Compose(action) => {
                 let edit = action.is_edit();
+                let typed = match &action {
+                    text_editor::Action::Edit(text_editor::Edit::Insert(c)) => Some(*c),
+                    text_editor::Action::Edit(text_editor::Edit::Enter) => Some('\n'),
+                    _ => None,
+                };
                 self.composer.perform(action);
+                if let Some(c) = typed {
+                    self.expand_typed(c);
+                }
                 let typing = if edit {
                     self.announce_typing()
                 } else {
@@ -5992,6 +6099,36 @@ impl App {
                 }
                 operation::focus(COMPOSER)
             }
+            Msg::ShortcodeMove(delta) => {
+                let n = self.shortcode_candidates().len();
+                if n > 0 {
+                    self.shortcode_index =
+                        (self.shortcode_index as isize + delta).rem_euclid(n as isize) as usize;
+                }
+                Task::none()
+            }
+            Msg::ShortcodePick(index) => {
+                let candidates = self.shortcode_candidates();
+                let Some(q) = self.shortcode.take() else {
+                    return Task::none();
+                };
+                let Some((e, _)) = candidates
+                    .get(index.unwrap_or(self.shortcode_index))
+                    .copied()
+                else {
+                    return Task::none();
+                };
+                // nahradit „:dotaz“ za emoji
+                self.replace_before_cursor(q.text.chars().count() + 1, e);
+                emoji::remember(&mut self.recent_emoji, e);
+                operation::focus(COMPOSER)
+            }
+            Msg::ShortcodeClose => {
+                if let Some(q) = self.shortcode.take() {
+                    self.shortcode_dismissed = Some((q.line, q.at));
+                }
+                Task::none()
+            }
             Msg::MentionClose => {
                 if let Some(q) = self.mention.take() {
                     self.mention_dismissed = Some((q.line, q.at));
@@ -6017,7 +6154,7 @@ impl App {
                     return self.submit_edit(ed);
                 }
                 self.highlight = None;
-                let text = self.composer.text().trim().to_owned();
+                let text = shortcode::convert_trailing(self.composer.text().trim());
                 let (Some(id), Some(backend)) = (
                     self.selected.clone(),
                     self.session().map(|s| s.backend.clone()),
@@ -8482,6 +8619,40 @@ impl App {
             .max_width(360)
             .into()
         };
+        let shortcode_candidates = self.shortcode_candidates();
+        let shortcode_list: Element<'a, Msg> = if shortcode_candidates.is_empty() {
+            space().into()
+        } else {
+            let items = shortcode_candidates
+                .iter()
+                .enumerate()
+                .map(|(i, (e, code))| {
+                    let selected = i == self.shortcode_index;
+                    button(
+                        row![
+                            text(*e).font(style::EMOJI).size(18),
+                            text(format!(":{code}:")).size(13)
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([3, 8])
+                    .style(move |t: &Theme, st| style::list_item(t, st, selected))
+                    .on_press(Msg::ShortcodePick(Some(i)))
+                    .into()
+                });
+            container(
+                column![
+                    text("Emoji (↑↓, Enter, Esc)").size(11).style(muted),
+                    Column::with_children(items).spacing(1),
+                ]
+                .spacing(4),
+            )
+            .padding([6, 4])
+            .max_width(360)
+            .into()
+        };
         let emoji_panel: Element<'a, Msg> = if self.emoji_open {
             self.emoji_panel()
         } else {
@@ -8491,6 +8662,7 @@ impl App {
             container(column![
                 emoji_panel,
                 mention_list,
+                shortcode_list,
                 banner,
                 attachments,
                 row![
@@ -8498,7 +8670,7 @@ impl App {
                         .id(COMPOSER)
                         .highlight_with::<emoji::Highlighter>((), emoji::format)
                         .placeholder(
-                            "Napište zprávu…  (Shift+Enter nový řádek · **tučně** _kurzíva_ `kód` · @zmínka)",
+                            "Napište zprávu…  (Shift+Enter nový řádek · **tučně** _kurzíva_ `kód` · @zmínka · :emoji)",
                         )
                         .on_action(Msg::Compose)
                         .key_binding({
@@ -8507,6 +8679,7 @@ impl App {
                                     && !self.pending_images.is_empty();
                             let keys = ComposerKeys {
                                 mention: !mention_candidates.is_empty(),
+                                shortcode: !shortcode_candidates.is_empty(),
                                 emoji: self.emoji_open,
                                 remove_last,
                                 cancel: if self.editing.is_some() {
@@ -8639,6 +8812,8 @@ struct ComposerKeys {
     emoji: bool,
     /// Je otevřená nabídka zmínek (šipky, Enter/Tab, Esc patří jí).
     mention: bool,
+    /// Je otevřená nabídka emoji ke zkratce „:xy“ (šipky, Enter/Tab, Esc patří jí).
+    shortcode: bool,
     /// Pole je prázdné a jsou vložené obrázky → Backspace odebere poslední.
     remove_last: bool,
     /// Co zruší Esc (úprava, odpověď).
@@ -8706,6 +8881,18 @@ fn composer_keys(
             Key::Named(Named::ArrowDown) => Some(Msg::MentionMove(1)),
             Key::Named(Named::Enter | Named::Tab) => Some(Msg::MentionPick(None)),
             Key::Named(Named::Escape) => Some(Msg::MentionClose),
+            _ => None,
+        };
+        if let Some(msg) = msg {
+            return Some(text_editor::Binding::Custom(msg));
+        }
+    }
+    if keys.shortcode && kp.modifiers.is_empty() {
+        let msg = match kp.key {
+            Key::Named(Named::ArrowUp) => Some(Msg::ShortcodeMove(-1)),
+            Key::Named(Named::ArrowDown) => Some(Msg::ShortcodeMove(1)),
+            Key::Named(Named::Enter | Named::Tab) => Some(Msg::ShortcodePick(None)),
+            Key::Named(Named::Escape) => Some(Msg::ShortcodeClose),
             _ => None,
         };
         if let Some(msg) = msg {

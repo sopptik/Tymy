@@ -9,6 +9,7 @@ license = "MIT"
 rust-version = "1.92"
 
 [workspace.dependencies]
+emojis = "0.9"
 tymy-core = { path = "crates/core" }
 tymy-api = { path = "crates/api" }
 tymy-config = { path = "crates/config" }

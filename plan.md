@@ -38,6 +38,11 @@ Požadavky a rozhodnutí, jak je zadal uživatel:
   kliknutí na text se otevřelo okno chatu s tím uživatelem“. ✅ Zmínka osoby ve zprávě je
   odkaz; klik otevře (případně založí jako rozpracovaný) chat 1:1 s ní. Osoba se bere
   z `properties.mentions` (`itemid` → `mri`); kanály, týmy a štítky se neotevírají.
+- **Smajlíci a zkratky emoji (2026-11-27):** „šlo by udělat převod značek smajlíků :-) na znaky
+  smajlíků případně udělat overlay s výběrem když napíšu : jako to má třeba github?“
+  ✅ Obojí: `:-)`, `:D`, `;)`, `<3`, `(y)`… se po mezeře, novém řádku nebo při odeslání převede
+  na emoji (ne uvnitř slova ani v `kódu`). Po „:“ a dvou znacích nabídka emoji podle
+  zkratek GitHubu (knihovna `emojis`, ↑↓ Enter/Tab Esc), dopsaná `:smile:` se převede sama.
 - **Typy účtů:** pracovní/školní (M365) **i** osobní (Teams free).
 - **Backend:** interní (nedokumentovaná) API Teams web klienta, ne Microsoft Graph.
 - **Hovory:** pokus o nativní implementaci (výzkum), ne vložený web.

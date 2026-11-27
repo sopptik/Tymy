@@ -10,6 +10,7 @@ mod emoji;
 mod idle;
 mod mention;
 mod notify;
+mod shortcode;
 mod state;
 mod style;
 mod tray;
